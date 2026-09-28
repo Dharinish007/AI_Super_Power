@@ -40,7 +40,7 @@ export function toWidgetState(s, opts = {}) {
       provider, conversationId: s?.observables?.conversationId || null, model: 'Detecting…', modelFamily: null, plan: null,
       usedTokens: 0, contextLimit: null, remainingTokens: null, percentage: null,
       limitStatus: 'UNKNOWN', confidence: 0, confidenceLevel: 'LOW',
-      evidence: [], breakdown: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
+      evidence: [], breakdown: [], hiddenItems: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
     };
   }
 
@@ -62,6 +62,10 @@ export function toWidgetState(s, opts = {}) {
   const dataSource = s.observables?.dataSource;
   const authoritative = dataSource === 'authoritative';
 
+  const hiddenItems = s.tokens?.hiddenItems || [];
+  const sum = (items) => items.reduce((n, i) => n + (i.tokens || 0), 0);
+  const stale = s.tokens?.excluded?.staleTools || { count: 0, tokens: 0 };
+  const dropped = s.tokens?.excluded?.outOfWindow || { count: 0, tokens: 0 };
   const confidence = s.confidence?.percentage ?? Math.round((s.confidence?.score || 0) * 100);
 
   const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
@@ -89,8 +93,21 @@ export function toWidgetState(s, opts = {}) {
           ? `${s.observables.attachmentsCount} · ${(s.tokens?.attachments ?? 0).toLocaleString()} est.`
           : 'None'
       },
-      { label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }
+      ...(hiddenItems.length
+        ? [
+            { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
+            ...hiddenItems.filter(i => i.estimated).map(i => ({ label: `${provider} system prompt`, value: `≈${(i.tokens || 0).toLocaleString()}`, tag: 'ESTIMATED' }))
+          ]
+        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
+      // Saved in the chat but not in the current context: shown, never counted in Used
+      ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
+      ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
+    // What the page never shows: label, token count and the text itself, for the viewer
+    hiddenItems: hiddenItems.map(i => ({
+      label: i.label, tokens: i.tokens || 0, text: i.text || '',
+      note: i.included === false ? 'not counted' : (i.estimated ? 'estimate' : null)
+    })),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,
     // usedTokens counts visible conversation text only; true when turns may also be missing
@@ -99,7 +116,11 @@ export function toWidgetState(s, opts = {}) {
     // Only warn when the count really depends on what the page has rendered
     warning: s.observables?.apiError
       ? s.observables.apiError
-      : (isLowerBound ? 'Count may be low: only turns rendered on the page were read.' : null),
+      : isLowerBound
+        ? 'Count may be low: only turns rendered on the page were read.'
+        : dropped.count
+          ? `Chat is longer than the window: the oldest ${dropped.count} turns are no longer seen by the model. Start a new chat to keep full context.`
+          : null,
     diagnostics: s.diagnostics || null,
     ready: true
   };

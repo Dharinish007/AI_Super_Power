@@ -23,6 +23,8 @@ import { analyzeContext } from '../engine/context-advisor.js';
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const round1 = (n) => Math.round(n * 10) / 10;
+// Approximate size of ChatGPT's server-side system prompt (not readable from the client)
+export const SYSTEM_PROMPT_ESTIMATE = 2500;
 
 /**
  * Rolling timing samples (last `size` per metric) for the performance section of diagnostics.
@@ -377,9 +379,11 @@ export class ContentScriptCoordinator {
       const tWait = now();
       const session = await this.conversationClient.getSession();
       let authResult = null;
+      const memoriesPending = this.conversationClient.fetchMemories(); // In parallel; cached, [] without a token
       if (conversationId) {
         authResult = await this.conversationClient.fetchConversation(conversationId, { staleWhileRevalidate: true });
       }
+      const accountMemories = await memoriesPending;
       this.perf.record('networkWaitMs', now() - tWait);
       const tCompute = now();
 
@@ -610,12 +614,31 @@ export class ContentScriptCoordinator {
       }
       this.perf.record('tokenizeMs', tokenizeMs);
 
+      // Hidden context the page never shows but the API exposes. Only what this chat's own data carries
+      // is counted; account memories are shown for reference but excluded, since it is not known whether
+      // this chat received them.
+      const hiddenItems = [...(normalized?.hiddenContext || [])];
+      if (accountMemories.length && !hiddenItems.some(i => i.kind === 'memory')) {
+        hiddenItems.push({ kind: 'account_memory', label: 'Saved memories (may be included)', text: accountMemories.join('\n'), included: false });
+      }
+      // Cached per kind + text hash: memory/instructions are re-counted only when they change, not every pass
+      const hidden = hiddenItems.map((i, n) => ({ ...i, tokens: this.tokenizer.countMessageTokens(`hidden:${i.kind}:${n}`, i.text, model.encoding || encoding) }));
+      // OpenAI's system prompt never reaches the browser; count a labelled estimate so the total is not
+      // silently short. ponytail: one fixed figure; per-model/per-tool estimates if published sizes diverge.
+      if (effectiveMessages.length > 0) hidden.push({ // Nothing is sent before the first message
+        kind: 'system_prompt', label: 'ChatGPT system prompt (estimate)', tokens: SYSTEM_PROMPT_ESTIMATE, estimated: true,
+        text: `Not readable: OpenAI adds this on its servers. Counted as an estimate of ~${SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens, based on published extractions of ChatGPT's system prompt; the real size varies with model and enabled tools.`
+      });
+
       // 10. Calculate context metrics
       const contextState = ContextCalculator.calculate({
         messages: tokenizedMessages,
         model,
         plan: reconciled.evidence?.plan || domPlan,
         attachments: effectiveAttachments,
+        hidden,
+        dropStaleTools: true, // ChatGPT: older tool output is not resent
+        fitToWindow: true,    // ChatGPT: long chats keep only the newest turns that fit
         tools,
         memory: {
           observed: tools.list.some(t => t.type === 'memory'),
@@ -639,7 +662,7 @@ export class ContentScriptCoordinator {
       contextState.observables.hiddenMessagesExcluded = normalized?.hiddenMessages || 0;
       contextState.observables.awaitingData = awaitingData;
       // Measured tokens are a lower bound when turns may be missing (API unavailable for an existing
-      // conversation). Hidden system/memory context is never measured, so it is always excluded.
+      // conversation). OpenAI's own system prompt is never exposed, so the total stays partial.
       contextState.completeness.isLowerBound = !conversationComplete;
       contextState.completeness.hiddenContextMeasured = false;
 
@@ -652,9 +675,10 @@ export class ContentScriptCoordinator {
         usedTokens: contextState.tokens.totalMeasurable,
         contextLimit: contextState.model.contextWindow,
         remainingTokens: contextState.tokens.remaining,
-        messages: tokenizedMessages,
+        messages: contextState.tokens.contextMessages,
         attachments: effectiveAttachments,
         isLowerBound: !conversationComplete,
+        hiddenTokens: contextState.tokens.hidden,
         sessionStartTokens: conversationId ? (this._sessionStartTokens.get(conversationId) ?? null) : null
       });
 
@@ -707,7 +731,9 @@ export class ContentScriptCoordinator {
             counted: effectiveMessages.length
           },
           completeness: { source: completenessSource, complete: conversationComplete, lowerBound: !conversationComplete, virtualizationGap },
-          hiddenMessagesExcluded: normalized?.hiddenMessages || 0
+          hiddenMessagesExcluded: normalized?.hiddenMessages || 0,
+          // Kinds and counts only, never the text
+          hiddenContext: hidden.map(i => `${i.kind}:${i.tokens}`)
         },
         session: session ? { ok: session.ok, status: session.status, planType: session.planType || null, error: session.error || null } : null,
         // Page structure counts are taken at copy time (getDiagnostics), not on every pass
@@ -825,7 +851,9 @@ export class ContentScriptCoordinator {
    */
   syncState(state) {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
-    this._pendingSync = state;
+    // The badge needs numbers only: never ship hidden text or message lists to the worker/storage
+    const { contextMessages, hiddenItems, ...tokens } = state.tokens || {};
+    this._pendingSync = { ...state, tokens: { ...tokens, hiddenItems: (hiddenItems || []).map(({ text, ...rest }) => rest) } };
     // Leading + trailing throttle: the first update goes out at once, bursts (streaming at 20 passes/s)
     // collapse into at most one message per SYNC_MS carrying the latest state. The widget is updated
     // directly on every pass; this only feeds the toolbar badge.

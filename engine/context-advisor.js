@@ -61,7 +61,7 @@ export function analyzeContext(input = {}) {
   const {
     percentage = null, usedTokens = 0, contextLimit = null, remainingTokens = null,
     messages = [], attachments = { count: 0, estimatedTokens: 0, hasUnknown: false },
-    isLowerBound = false, sessionStartTokens = null
+    isLowerBound = false, sessionStartTokens = null, hiddenTokens = 0
   } = input;
 
   const level = healthLevel(contextLimit ? percentage : null);
@@ -80,7 +80,9 @@ export function analyzeContext(input = {}) {
     { key: 'assistant', label: 'Replies', tokens: byRole.assistant, share: share(byRole.assistant), evidenceType: 'ESTIMATED' },
     { key: 'user', label: 'Your messages', tokens: byRole.user, share: share(byRole.user), evidenceType: 'ESTIMATED' },
     { key: 'tool', label: 'Tool output', tokens: byRole.tool, share: share(byRole.tool), evidenceType: 'ESTIMATED' },
-    { key: 'attachments', label: 'Images (estimated)', tokens: attachments.estimatedTokens || 0, share: share(attachments.estimatedTokens || 0), evidenceType: 'ESTIMATED' }
+    { key: 'attachments', label: 'Images (estimated)', tokens: attachments.estimatedTokens || 0, share: share(attachments.estimatedTokens || 0), evidenceType: 'ESTIMATED' },
+    // Part of usedTokens, so it must be listed or the shares would not add up
+    { key: 'hidden', label: 'Hidden context', tokens: hiddenTokens, share: share(hiddenTokens), evidenceType: 'ESTIMATED' }
   ].filter(c => c.tokens > 0).sort((a, b) => b.tokens - a.tokens);
   const largestTurn = largest && largest.tokens > 0 ? { ...largest, share: share(largest.tokens) } : null;
 

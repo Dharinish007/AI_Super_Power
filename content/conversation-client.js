@@ -464,7 +464,8 @@ export class ConversationClient {
     const allAttachments = [];
     let detectedModelSlug = null;
     let turnIndex = 0;
-    let hiddenMessages = 0; // Server-injected context messages (not measurable as visible turns)
+    let hiddenMessages = 0; // Server-injected context messages (not visible turns)
+    const hiddenContext = []; // { kind, label, text } for those that carry text
 
     for (let i = 0; i < activeNodes.length; i++) {
       const node = activeNodes[i];
@@ -472,17 +473,20 @@ export class ConversationClient {
       if (!msg) continue;
 
       const role = msg.author?.role || 'user';
-      // Ignore system instructions if they are standard internal framing
-      if (role === 'system') continue;
-
-      // Hidden context injected server-side (custom instructions, memory) is not a visible turn.
-      // Counting it would inflate "You" and the turn count; it stays in the UNKNOWN hidden context.
       const contentType = msg.content?.content_type;
-      if (msg.metadata?.is_visually_hidden_from_conversation ||
+
+      // Context the server sends the model but the page never shows (custom instructions, memory
+      // snapshot, system/hidden messages). Not a visible turn; kept separately as observed hidden context.
+      if (role === 'system' || msg.metadata?.is_visually_hidden_from_conversation ||
           contentType === 'user_editable_context' || contentType === 'model_editable_context') {
-        hiddenMessages++;
+        const item = this.hiddenItem(msg, role, contentType);
+        if (item) hiddenContext.push(item);
+        if (role !== 'system' || item) hiddenMessages++; // The empty root system node is structure, not context
         continue;
       }
+
+      // Assistant messages addressed to a tool (search queries, code to run) are internal calls, not replies
+      if (role === 'assistant' && msg.recipient && msg.recipient !== 'all') continue;
 
       const parts = this.normalizeParts(msg.content);
       const attachments = this.normalizeAttachments(msg.metadata);
@@ -549,6 +553,7 @@ export class ConversationClient {
       title: conversationPayload.title || '',
       modelSlug: detectedModelSlug || conversationPayload.default_model_slug || null,
       hiddenMessages,
+      hiddenContext,
       messages,
       attachments: {
         count: allAttachments.length,
@@ -557,6 +562,60 @@ export class ConversationClient {
         items: allAttachments
       }
     };
+  }
+
+  /**
+   * Text of one hidden message, labelled by what it is. Null when it carries no text.
+   * @returns {{ kind: string, label: string, text: string }|null}
+   */
+  hiddenItem(msg, role, contentType) {
+    const c = msg.content || {};
+    const join = (...xs) => xs.filter(x => typeof x === 'string' && x.trim()).join('\n\n');
+    if (contentType === 'user_editable_context') {
+      const text = join(c.user_profile, c.user_instructions);
+      return text ? { kind: 'instructions', label: 'Custom instructions', text } : null;
+    }
+    if (contentType === 'model_editable_context') {
+      const text = join(c.model_set_context, c.repository, c.repo_summary);
+      return text ? { kind: 'memory', label: 'Memory (sent with this chat)', text } : null;
+    }
+    const text = this.normalizeParts(c).filter(p => p.type === 'text').map(p => p.text).join('\n\n');
+    if (!text.trim()) return null;
+    if (role === 'system') return { kind: 'system', label: 'System message', text };
+    if (role === 'tool') return { kind: 'tool', label: 'Hidden tool output', text };
+    return { kind: 'hidden', label: 'Hidden message', text };
+  }
+
+  /**
+   * Saved memories of the account (GET /backend-api/memories). Cached 5 min; [] on any failure.
+   * Only called when the session token is available, so it never fires cookie-only requests.
+   * @returns {Promise<string[]>}
+   */
+  async fetchMemories() {
+    if (!this.#accessToken) return [];
+    const now = Date.now();
+    if (this._memories && now - this._memories.at < 5 * 60 * 1000) return this._memories.list;
+    if (this._memoriesPromise) return this._memoriesPromise;
+    this._memoriesPromise = (async () => {
+      let list = [];
+      try {
+        const res = await fetch(`${this._origin()}/backend-api/memories`, {
+          credentials: 'same-origin',
+          headers: this._backendHeaders()
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const raw = Array.isArray(data) ? data : (data?.memories || []);
+          list = raw.map(m => (typeof m === 'string' ? m : m?.content)).filter(t => typeof t === 'string' && t.trim());
+        }
+      } catch (_) {
+        // Memory is optional context; the widget still shows everything else
+      }
+      this._memories = { list, at: now };
+      this._memoriesPromise = null;
+      return list;
+    })();
+    return this._memoriesPromise;
   }
 
   /**

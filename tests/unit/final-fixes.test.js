@@ -198,9 +198,10 @@ export async function runFinalFixesTests() {
       // Prefetch at document_start: the first pass reuses the same request (no second round trip)
       const c = new ContentScriptCoordinator(DB);
       globalThis.window.location.href = `https://chatgpt.com/c/${CONV_A}`;
-      const hits = { session: 0, conversation: 0 };
+      const hits = { session: 0, conversation: 0, memories: 0 };
       globalThis.fetch = async (url) => {
         if (String(url).includes('/api/auth/session')) { hits.session++; return new Response(JSON.stringify({ accessToken: 't', account: { planType: 'plus' } }), { status: 200 }); }
+        if (String(url).includes('/backend-api/memories')) { hits.memories++; return new Response(JSON.stringify({ memories: [] }), { status: 200 }); }
         hits.conversation++;
         await sleep(30);
         return new Response(JSON.stringify(convA), { status: 200 });

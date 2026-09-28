@@ -43,13 +43,69 @@ export class ContextCalculator {
    * @returns {Object} Context state object
    */
   static calculate(input = {}) {
-    const messages = input.messages || [];
+    const history = input.messages || [];
     const model = input.model || { displayName: 'Unknown', contextWindow: null, id: 'unknown' };
     const attachments = input.attachments || { count: 0, estimatedTokens: 0, hasUnknown: false };
     const tools = input.tools || { observed: false, list: [] };
     const memory = input.memory || { enabled: false, observed: false };
     const authoritative = input.authoritative || null;
     const isPartial = Boolean(input.isPartial);
+    // Hidden context read from the API (custom instructions, memory, system/hidden messages): [{ kind, label, text, tokens }]
+    const hidden = Array.isArray(input.hidden) ? input.hidden : [];
+    // included: false = shown for reference only (not known to be in this chat), never counted
+    const hiddenTokens = hidden.reduce((sum, h) => sum + (h.included === false ? 0 : (h.tokens || 0)), 0);
+
+    // Resolve plan tier and source (Group F)
+    const planInput = input.plan;
+    let planTier = 'unknown';
+    let planSource = 'unknown';
+    if (typeof planInput === 'string') {
+      planTier = planInput;
+    } else if (planInput && typeof planInput === 'object') {
+      planTier = planInput.value || planInput.tier || 'unknown';
+      planSource = planInput.source || 'unknown';
+    } else if (model.planTier) {
+      planTier = model.planTier;
+    }
+
+    // Context window & utilization (Group F)
+    // Rule: Never invent a limit. If model is unknown or plan is unknown, contextWindow = null
+    let contextWindow = null;
+    if (model.id !== 'unknown') {
+      if (planTier !== 'unknown' && model.contextWindow) {
+        contextWindow = model.contextWindow;
+      } else if (input.plan === undefined && model.contextWindow) {
+        // Backward compatibility for standalone callers without plan context
+        contextWindow = model.contextWindow;
+      }
+    }
+
+    // Which turns are actually in the model's context (ChatGPT only: opt-in flags).
+    // 1. dropStaleTools: tool output (search results, pages, code runs) from before the latest user
+    //    message is treated as not resent; only the current turn's tool output is in context.
+    //    ponytail: heuristic from ChatGPT's observed behavior, not a documented rule.
+    // 2. fitToWindow: a chat longer than the window keeps only its newest turns that fit next to the
+    //    fixed context (hidden + attachments); the newest turn is always kept.
+    let lastUser = -1;
+    for (let i = history.length - 1; i >= 0; i--) if (history[i].role === 'user') { lastUser = i; break; }
+    const staleTools = input.dropStaleTools ? history.filter((m, i) => m.role === 'tool' && i < lastUser) : [];
+    const live = staleTools.length ? history.filter(m => !staleTools.includes(m)) : history;
+    let messages = live;
+    let outOfWindow = [];
+    if (input.fitToWindow && contextWindow) {
+      let budget = contextWindow -(attachments.estimatedTokens || 0) - hiddenTokens;
+      let cut = live.length - 1; // index of the oldest kept turn
+      budget -= live.length ? (live[cut].tokens || 0) : 0;
+      while (cut > 0 && (live[cut - 1].tokens || 0) <= budget) {
+        cut--;
+        budget -= live[cut].tokens || 0;
+      }
+      if (cut > 0) {
+        outOfWindow = live.slice(0, cut);
+        messages = live.slice(cut);
+      }
+    }
+    const sumTokens = (list) => list.reduce((n, m) => n + (m.tokens || 0), 0);
 
     // Sum message tokens by author role and track non-text parts
     let userTokens = 0;
@@ -89,32 +145,7 @@ export class ContextCalculator {
     const attachmentTokens = attachments.estimatedTokens || 0;
 
     // Total measurable context
-    const totalMeasurableTokens = conversationTokens + attachmentTokens;
-
-    // Resolve plan tier and source (Group F)
-    const planInput = input.plan;
-    let planTier = 'unknown';
-    let planSource = 'unknown';
-    if (typeof planInput === 'string') {
-      planTier = planInput;
-    } else if (planInput && typeof planInput === 'object') {
-      planTier = planInput.value || planInput.tier || 'unknown';
-      planSource = planInput.source || 'unknown';
-    } else if (model.planTier) {
-      planTier = model.planTier;
-    }
-
-    // Context window & utilization (Group F)
-    // Rule: Never invent a limit. If model is unknown or plan is unknown, contextWindow = null
-    let contextWindow = null;
-    if (model.id !== 'unknown') {
-      if (planTier !== 'unknown' && model.contextWindow) {
-        contextWindow = model.contextWindow;
-      } else if (input.plan === undefined && model.contextWindow) {
-        // Backward compatibility for standalone callers without plan context
-        contextWindow = model.contextWindow;
-      }
-    }
+    const totalMeasurableTokens = conversationTokens + attachmentTokens + hiddenTokens;
 
     let utilizationPercent = null;
     if (contextWindow && contextWindow > 0) {
@@ -196,6 +227,15 @@ export class ContextCalculator {
         assistant: assistantTokens,
         conversation: conversationTokens,
         attachments: attachmentTokens,
+        hidden: hiddenTokens,
+        hiddenItems: hidden,
+        contextMessages: messages, // The turns counted as in context (for the advisor; not synced)
+        // Whole chat as saved, and what was left out of the current context (see fitToWindow/dropStaleTools)
+        history: sumTokens(history) + attachmentTokens + hiddenTokens,
+        excluded: {
+          staleTools: { count: staleTools.length, tokens: sumTokens(staleTools) },
+          outOfWindow: { count: outOfWindow.length, tokens: sumTokens(outOfWindow) }
+        },
         totalMeasurable: totalMeasurableTokens,
         // Window minus measured tokens; hidden context is not measurable, so the true remainder is lower
         remaining: contextWindow ? Math.max(0, contextWindow - totalMeasurableTokens) : null,

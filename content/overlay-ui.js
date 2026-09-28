@@ -114,6 +114,12 @@ const STYLES = `
   .btn:hover { border-color: var(--primary); }
   .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
   .fine { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .hid > summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .hid > summary .k { color: var(--muted); white-space: nowrap; }
+  .hid > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
+  .hid pre { margin: 4px 0 8px; padding: 8px; max-height: 200px; overflow: auto; background: var(--subtle);
+    border: 1px solid var(--line); border-radius: 8px; font: 11px/1.45 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
 
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
@@ -322,6 +328,27 @@ function EvidenceList(parent) {
   };
 }
 
+/** One collapsible entry per hidden item; text is assigned as text only. Rebuilt only when items change. */
+function HiddenList(parent) {
+  const el = h('div', null, parent);
+  let signature = null;
+  return {
+    update(items) {
+      const next = JSON.stringify(items);
+      if (next === signature) return;
+      signature = next;
+      el.textContent = '';
+      for (const it of items) {
+        const d = h('details', 'hid', el);
+        const s = h('summary', null, d);
+        h('span', null, s, it.label);
+        h('span', 'k', s, `${it.note === 'estimate' ? '≈' : ''}${it.tokens.toLocaleString()} tokens${it.note === 'not counted' ? ' · not counted' : ''}`);
+        h('pre', null, d, it.text);
+      }
+    }
+  };
+}
+
 function ContextDetails(parent, getDiagnostics) {
   const el = h('div', 'details', parent);
   const section = (title) => {
@@ -337,6 +364,11 @@ function ContextDetails(parent, getDiagnostics) {
   h('div', 'divider', brk);
   const totals = RowList(brk);
 
+  // Hidden context: what the model gets that the page never shows (shown only when some was read)
+  const hid = section('Hidden context');
+  const hiddenList = HiddenList(hid);
+  h('div', 'fine', hid, 'Read from ChatGPT\'s own API, except the system prompt (an estimate). Chat-history summaries are not exposed.');
+
   // Confidence: native dropdown, closed by default; open state survives updates (DOM is built once)
   const conf = h('details', 'section conf', el);
   const confHead = h('summary', 'h', conf);
@@ -349,7 +381,7 @@ function ContextDetails(parent, getDiagnostics) {
   const diag = section('Diagnostics');
   const warn = h('div', 'warn-text', diag);
   const copy = h('button', 'btn', diag, 'Copy diagnostics');
-  h('div', 'fine', diag, 'Counts visible text only. Hidden system prompts and memory are not measurable.');
+  h('div', 'fine', diag, 'Counts visible text, hidden context the API exposes, and an estimate of the system prompt.');
   copy.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(getDiagnostics() || { note: 'no state yet' }, null, 2));
@@ -375,6 +407,11 @@ function ContextDetails(parent, getDiagnostics) {
         { label: 'Remaining', value: tokens(vm.remainingTokens), tag: null },
         { label: 'Window', value: vm.contextLimit ? `${vm.contextLimit.toLocaleString()} tokens` : 'Unknown', tag: vm.limitStatus || null }
       ]);
+
+      const items = vm.hiddenItems || [];
+      const hidDisplay = items.length ? '' : 'none';
+      if (hid.style.display !== hidDisplay) hid.style.display = hidDisplay;
+      hiddenList.update(items);
 
       badge.update(vm);
       evidence.update(vm);

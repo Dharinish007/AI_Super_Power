@@ -2240,13 +2240,69 @@ class ContextCalculator {
    * @returns {Object} Context state object
    */
   static calculate(input = {}) {
-    const messages = input.messages || [];
+    const history = input.messages || [];
     const model = input.model || { displayName: 'Unknown', contextWindow: null, id: 'unknown' };
     const attachments = input.attachments || { count: 0, estimatedTokens: 0, hasUnknown: false };
     const tools = input.tools || { observed: false, list: [] };
     const memory = input.memory || { enabled: false, observed: false };
     const authoritative = input.authoritative || null;
     const isPartial = Boolean(input.isPartial);
+    // Hidden context read from the API (custom instructions, memory, system/hidden messages): [{ kind, label, text, tokens }]
+    const hidden = Array.isArray(input.hidden) ? input.hidden : [];
+    // included: false = shown for reference only (not known to be in this chat), never counted
+    const hiddenTokens = hidden.reduce((sum, h) => sum + (h.included === false ? 0 : (h.tokens || 0)), 0);
+
+    // Resolve plan tier and source (Group F)
+    const planInput = input.plan;
+    let planTier = 'unknown';
+    let planSource = 'unknown';
+    if (typeof planInput === 'string') {
+      planTier = planInput;
+    } else if (planInput && typeof planInput === 'object') {
+      planTier = planInput.value || planInput.tier || 'unknown';
+      planSource = planInput.source || 'unknown';
+    } else if (model.planTier) {
+      planTier = model.planTier;
+    }
+
+    // Context window & utilization (Group F)
+    // Rule: Never invent a limit. If model is unknown or plan is unknown, contextWindow = null
+    let contextWindow = null;
+    if (model.id !== 'unknown') {
+      if (planTier !== 'unknown' && model.contextWindow) {
+        contextWindow = model.contextWindow;
+      } else if (input.plan === undefined && model.contextWindow) {
+        // Backward compatibility for standalone callers without plan context
+        contextWindow = model.contextWindow;
+      }
+    }
+
+    // Which turns are actually in the model's context (ChatGPT only: opt-in flags).
+    // 1. dropStaleTools: tool output (search results, pages, code runs) from before the latest user
+    //    message is treated as not resent; only the current turn's tool output is in context.
+    //    ponytail: heuristic from ChatGPT's observed behavior, not a documented rule.
+    // 2. fitToWindow: a chat longer than the window keeps only its newest turns that fit next to the
+    //    fixed context (hidden + attachments); the newest turn is always kept.
+    let lastUser = -1;
+    for (let i = history.length - 1; i >= 0; i--) if (history[i].role === 'user') { lastUser = i; break; }
+    const staleTools = input.dropStaleTools ? history.filter((m, i) => m.role === 'tool' && i < lastUser) : [];
+    const live = staleTools.length ? history.filter(m => !staleTools.includes(m)) : history;
+    let messages = live;
+    let outOfWindow = [];
+    if (input.fitToWindow && contextWindow) {
+      let budget = contextWindow -(attachments.estimatedTokens || 0) - hiddenTokens;
+      let cut = live.length - 1; // index of the oldest kept turn
+      budget -= live.length ? (live[cut].tokens || 0) : 0;
+      while (cut > 0 && (live[cut - 1].tokens || 0) <= budget) {
+        cut--;
+        budget -= live[cut].tokens || 0;
+      }
+      if (cut > 0) {
+        outOfWindow = live.slice(0, cut);
+        messages = live.slice(cut);
+      }
+    }
+    const sumTokens = (list) => list.reduce((n, m) => n + (m.tokens || 0), 0);
 
     // Sum message tokens by author role and track non-text parts
     let userTokens = 0;
@@ -2286,32 +2342,7 @@ class ContextCalculator {
     const attachmentTokens = attachments.estimatedTokens || 0;
 
     // Total measurable context
-    const totalMeasurableTokens = conversationTokens + attachmentTokens;
-
-    // Resolve plan tier and source (Group F)
-    const planInput = input.plan;
-    let planTier = 'unknown';
-    let planSource = 'unknown';
-    if (typeof planInput === 'string') {
-      planTier = planInput;
-    } else if (planInput && typeof planInput === 'object') {
-      planTier = planInput.value || planInput.tier || 'unknown';
-      planSource = planInput.source || 'unknown';
-    } else if (model.planTier) {
-      planTier = model.planTier;
-    }
-
-    // Context window & utilization (Group F)
-    // Rule: Never invent a limit. If model is unknown or plan is unknown, contextWindow = null
-    let contextWindow = null;
-    if (model.id !== 'unknown') {
-      if (planTier !== 'unknown' && model.contextWindow) {
-        contextWindow = model.contextWindow;
-      } else if (input.plan === undefined && model.contextWindow) {
-        // Backward compatibility for standalone callers without plan context
-        contextWindow = model.contextWindow;
-      }
-    }
+    const totalMeasurableTokens = conversationTokens + attachmentTokens + hiddenTokens;
 
     let utilizationPercent = null;
     if (contextWindow && contextWindow > 0) {
@@ -2393,6 +2424,15 @@ class ContextCalculator {
         assistant: assistantTokens,
         conversation: conversationTokens,
         attachments: attachmentTokens,
+        hidden: hiddenTokens,
+        hiddenItems: hidden,
+        contextMessages: messages, // The turns counted as in context (for the advisor; not synced)
+        // Whole chat as saved, and what was left out of the current context (see fitToWindow/dropStaleTools)
+        history: sumTokens(history) + attachmentTokens + hiddenTokens,
+        excluded: {
+          staleTools: { count: staleTools.length, tokens: sumTokens(staleTools) },
+          outOfWindow: { count: outOfWindow.length, tokens: sumTokens(outOfWindow) }
+        },
         totalMeasurable: totalMeasurableTokens,
         // Window minus measured tokens; hidden context is not measurable, so the true remainder is lower
         remaining: contextWindow ? Math.max(0, contextWindow - totalMeasurableTokens) : null,
@@ -2580,7 +2620,7 @@ function analyzeContext(input = {}) {
   const {
     percentage = null, usedTokens = 0, contextLimit = null, remainingTokens = null,
     messages = [], attachments = { count: 0, estimatedTokens: 0, hasUnknown: false },
-    isLowerBound = false, sessionStartTokens = null
+    isLowerBound = false, sessionStartTokens = null, hiddenTokens = 0
   } = input;
 
   const level = healthLevel(contextLimit ? percentage : null);
@@ -2599,7 +2639,9 @@ function analyzeContext(input = {}) {
     { key: 'assistant', label: 'Replies', tokens: byRole.assistant, share: share(byRole.assistant), evidenceType: 'ESTIMATED' },
     { key: 'user', label: 'Your messages', tokens: byRole.user, share: share(byRole.user), evidenceType: 'ESTIMATED' },
     { key: 'tool', label: 'Tool output', tokens: byRole.tool, share: share(byRole.tool), evidenceType: 'ESTIMATED' },
-    { key: 'attachments', label: 'Images (estimated)', tokens: attachments.estimatedTokens || 0, share: share(attachments.estimatedTokens || 0), evidenceType: 'ESTIMATED' }
+    { key: 'attachments', label: 'Images (estimated)', tokens: attachments.estimatedTokens || 0, share: share(attachments.estimatedTokens || 0), evidenceType: 'ESTIMATED' },
+    // Part of usedTokens, so it must be listed or the shares would not add up
+    { key: 'hidden', label: 'Hidden context', tokens: hiddenTokens, share: share(hiddenTokens), evidenceType: 'ESTIMATED' }
   ].filter(c => c.tokens > 0).sort((a, b) => b.tokens - a.tokens);
   const largestTurn = largest && largest.tokens > 0 ? { ...largest, share: share(largest.tokens) } : null;
 
@@ -3598,7 +3640,8 @@ class ConversationClient {
     const allAttachments = [];
     let detectedModelSlug = null;
     let turnIndex = 0;
-    let hiddenMessages = 0; // Server-injected context messages (not measurable as visible turns)
+    let hiddenMessages = 0; // Server-injected context messages (not visible turns)
+    const hiddenContext = []; // { kind, label, text } for those that carry text
 
     for (let i = 0; i < activeNodes.length; i++) {
       const node = activeNodes[i];
@@ -3606,17 +3649,20 @@ class ConversationClient {
       if (!msg) continue;
 
       const role = msg.author?.role || 'user';
-      // Ignore system instructions if they are standard internal framing
-      if (role === 'system') continue;
-
-      // Hidden context injected server-side (custom instructions, memory) is not a visible turn.
-      // Counting it would inflate "You" and the turn count; it stays in the UNKNOWN hidden context.
       const contentType = msg.content?.content_type;
-      if (msg.metadata?.is_visually_hidden_from_conversation ||
+
+      // Context the server sends the model but the page never shows (custom instructions, memory
+      // snapshot, system/hidden messages). Not a visible turn; kept separately as observed hidden context.
+      if (role === 'system' || msg.metadata?.is_visually_hidden_from_conversation ||
           contentType === 'user_editable_context' || contentType === 'model_editable_context') {
-        hiddenMessages++;
+        const item = this.hiddenItem(msg, role, contentType);
+        if (item) hiddenContext.push(item);
+        if (role !== 'system' || item) hiddenMessages++; // The empty root system node is structure, not context
         continue;
       }
+
+      // Assistant messages addressed to a tool (search queries, code to run) are internal calls, not replies
+      if (role === 'assistant' && msg.recipient && msg.recipient !== 'all') continue;
 
       const parts = this.normalizeParts(msg.content);
       const attachments = this.normalizeAttachments(msg.metadata);
@@ -3683,6 +3729,7 @@ class ConversationClient {
       title: conversationPayload.title || '',
       modelSlug: detectedModelSlug || conversationPayload.default_model_slug || null,
       hiddenMessages,
+      hiddenContext,
       messages,
       attachments: {
         count: allAttachments.length,
@@ -3691,6 +3738,60 @@ class ConversationClient {
         items: allAttachments
       }
     };
+  }
+
+  /**
+   * Text of one hidden message, labelled by what it is. Null when it carries no text.
+   * @returns {{ kind: string, label: string, text: string }|null}
+   */
+  hiddenItem(msg, role, contentType) {
+    const c = msg.content || {};
+    const join = (...xs) => xs.filter(x => typeof x === 'string' && x.trim()).join('\n\n');
+    if (contentType === 'user_editable_context') {
+      const text = join(c.user_profile, c.user_instructions);
+      return text ? { kind: 'instructions', label: 'Custom instructions', text } : null;
+    }
+    if (contentType === 'model_editable_context') {
+      const text = join(c.model_set_context, c.repository, c.repo_summary);
+      return text ? { kind: 'memory', label: 'Memory (sent with this chat)', text } : null;
+    }
+    const text = this.normalizeParts(c).filter(p => p.type === 'text').map(p => p.text).join('\n\n');
+    if (!text.trim()) return null;
+    if (role === 'system') return { kind: 'system', label: 'System message', text };
+    if (role === 'tool') return { kind: 'tool', label: 'Hidden tool output', text };
+    return { kind: 'hidden', label: 'Hidden message', text };
+  }
+
+  /**
+   * Saved memories of the account (GET /backend-api/memories). Cached 5 min; [] on any failure.
+   * Only called when the session token is available, so it never fires cookie-only requests.
+   * @returns {Promise<string[]>}
+   */
+  async fetchMemories() {
+    if (!this.#accessToken) return [];
+    const now = Date.now();
+    if (this._memories && now - this._memories.at < 5 * 60 * 1000) return this._memories.list;
+    if (this._memoriesPromise) return this._memoriesPromise;
+    this._memoriesPromise = (async () => {
+      let list = [];
+      try {
+        const res = await fetch(`${this._origin()}/backend-api/memories`, {
+          credentials: 'same-origin',
+          headers: this._backendHeaders()
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const raw = Array.isArray(data) ? data : (data?.memories || []);
+          list = raw.map(m => (typeof m === 'string' ? m : m?.content)).filter(t => typeof t === 'string' && t.trim());
+        }
+      } catch (_) {
+        // Memory is optional context; the widget still shows everything else
+      }
+      this._memories = { list, at: now };
+      this._memoriesPromise = null;
+      return list;
+    })();
+    return this._memoriesPromise;
   }
 
   /**
@@ -4746,7 +4847,7 @@ function toWidgetState(s, opts = {}) {
       provider, conversationId: s?.observables?.conversationId || null, model: 'Detecting…', modelFamily: null, plan: null,
       usedTokens: 0, contextLimit: null, remainingTokens: null, percentage: null,
       limitStatus: 'UNKNOWN', confidence: 0, confidenceLevel: 'LOW',
-      evidence: [], breakdown: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
+      evidence: [], breakdown: [], hiddenItems: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
     };
   }
 
@@ -4768,6 +4869,10 @@ function toWidgetState(s, opts = {}) {
   const dataSource = s.observables?.dataSource;
   const authoritative = dataSource === 'authoritative';
 
+  const hiddenItems = s.tokens?.hiddenItems || [];
+  const sum = (items) => items.reduce((n, i) => n + (i.tokens || 0), 0);
+  const stale = s.tokens?.excluded?.staleTools || { count: 0, tokens: 0 };
+  const dropped = s.tokens?.excluded?.outOfWindow || { count: 0, tokens: 0 };
   const confidence = s.confidence?.percentage ?? Math.round((s.confidence?.score || 0) * 100);
 
   const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
@@ -4795,8 +4900,21 @@ function toWidgetState(s, opts = {}) {
           ? `${s.observables.attachmentsCount} · ${(s.tokens?.attachments ?? 0).toLocaleString()} est.`
           : 'None'
       },
-      { label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }
+      ...(hiddenItems.length
+        ? [
+            { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
+            ...hiddenItems.filter(i => i.estimated).map(i => ({ label: `${provider} system prompt`, value: `≈${(i.tokens || 0).toLocaleString()}`, tag: 'ESTIMATED' }))
+          ]
+        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
+      // Saved in the chat but not in the current context: shown, never counted in Used
+      ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
+      ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
+    // What the page never shows: label, token count and the text itself, for the viewer
+    hiddenItems: hiddenItems.map(i => ({
+      label: i.label, tokens: i.tokens || 0, text: i.text || '',
+      note: i.included === false ? 'not counted' : (i.estimated ? 'estimate' : null)
+    })),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,
     // usedTokens counts visible conversation text only; true when turns may also be missing
@@ -4805,7 +4923,11 @@ function toWidgetState(s, opts = {}) {
     // Only warn when the count really depends on what the page has rendered
     warning: s.observables?.apiError
       ? s.observables.apiError
-      : (isLowerBound ? 'Count may be low: only turns rendered on the page were read.' : null),
+      : isLowerBound
+        ? 'Count may be low: only turns rendered on the page were read.'
+        : dropped.count
+          ? `Chat is longer than the window: the oldest ${dropped.count} turns are no longer seen by the model. Start a new chat to keep full context.`
+          : null,
     diagnostics: s.diagnostics || null,
     ready: true
   };
@@ -4928,6 +5050,12 @@ const STYLES = `
   .btn:hover { border-color: var(--primary); }
   .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
   .fine { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .hid > summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .hid > summary .k { color: var(--muted); white-space: nowrap; }
+  .hid > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
+  .hid pre { margin: 4px 0 8px; padding: 8px; max-height: 200px; overflow: auto; background: var(--subtle);
+    border: 1px solid var(--line); border-radius: 8px; font: 11px/1.45 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
 
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
@@ -5136,6 +5264,27 @@ function EvidenceList(parent) {
   };
 }
 
+/** One collapsible entry per hidden item; text is assigned as text only. Rebuilt only when items change. */
+function HiddenList(parent) {
+  const el = h('div', null, parent);
+  let signature = null;
+  return {
+    update(items) {
+      const next = JSON.stringify(items);
+      if (next === signature) return;
+      signature = next;
+      el.textContent = '';
+      for (const it of items) {
+        const d = h('details', 'hid', el);
+        const s = h('summary', null, d);
+        h('span', null, s, it.label);
+        h('span', 'k', s, `${it.note === 'estimate' ? '≈' : ''}${it.tokens.toLocaleString()} tokens${it.note === 'not counted' ? ' · not counted' : ''}`);
+        h('pre', null, d, it.text);
+      }
+    }
+  };
+}
+
 function ContextDetails(parent, getDiagnostics) {
   const el = h('div', 'details', parent);
   const section = (title) => {
@@ -5151,6 +5300,11 @@ function ContextDetails(parent, getDiagnostics) {
   h('div', 'divider', brk);
   const totals = RowList(brk);
 
+  // Hidden context: what the model gets that the page never shows (shown only when some was read)
+  const hid = section('Hidden context');
+  const hiddenList = HiddenList(hid);
+  h('div', 'fine', hid, 'Read from ChatGPT\'s own API, except the system prompt (an estimate). Chat-history summaries are not exposed.');
+
   // Confidence: native dropdown, closed by default; open state survives updates (DOM is built once)
   const conf = h('details', 'section conf', el);
   const confHead = h('summary', 'h', conf);
@@ -5163,7 +5317,7 @@ function ContextDetails(parent, getDiagnostics) {
   const diag = section('Diagnostics');
   const warn = h('div', 'warn-text', diag);
   const copy = h('button', 'btn', diag, 'Copy diagnostics');
-  h('div', 'fine', diag, 'Counts visible text only. Hidden system prompts and memory are not measurable.');
+  h('div', 'fine', diag, 'Counts visible text, hidden context the API exposes, and an estimate of the system prompt.');
   copy.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(getDiagnostics() || { note: 'no state yet' }, null, 2));
@@ -5189,6 +5343,11 @@ function ContextDetails(parent, getDiagnostics) {
         { label: 'Remaining', value: tokens(vm.remainingTokens), tag: null },
         { label: 'Window', value: vm.contextLimit ? `${vm.contextLimit.toLocaleString()} tokens` : 'Unknown', tag: vm.limitStatus || null }
       ]);
+
+      const items = vm.hiddenItems || [];
+      const hidDisplay = items.length ? '' : 'none';
+      if (hid.style.display !== hidDisplay) hid.style.display = hidDisplay;
+      hiddenList.update(items);
 
       badge.update(vm);
       evidence.update(vm);
@@ -5701,6 +5860,8 @@ function mergeLiveTurns(base, candidates, opts = {}) {
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const round1 = (n) => Math.round(n * 10) / 10;
+// Approximate size of ChatGPT's server-side system prompt (not readable from the client)
+const SYSTEM_PROMPT_ESTIMATE = 2500;
 
 /**
  * Rolling timing samples (last `size` per metric) for the performance section of diagnostics.
@@ -6055,9 +6216,11 @@ class ContentScriptCoordinator {
       const tWait = now();
       const session = await this.conversationClient.getSession();
       let authResult = null;
+      const memoriesPending = this.conversationClient.fetchMemories(); // In parallel; cached, [] without a token
       if (conversationId) {
         authResult = await this.conversationClient.fetchConversation(conversationId, { staleWhileRevalidate: true });
       }
+      const accountMemories = await memoriesPending;
       this.perf.record('networkWaitMs', now() - tWait);
       const tCompute = now();
 
@@ -6288,12 +6451,31 @@ class ContentScriptCoordinator {
       }
       this.perf.record('tokenizeMs', tokenizeMs);
 
+      // Hidden context the page never shows but the API exposes. Only what this chat's own data carries
+      // is counted; account memories are shown for reference but excluded, since it is not known whether
+      // this chat received them.
+      const hiddenItems = [...(normalized?.hiddenContext || [])];
+      if (accountMemories.length && !hiddenItems.some(i => i.kind === 'memory')) {
+        hiddenItems.push({ kind: 'account_memory', label: 'Saved memories (may be included)', text: accountMemories.join('\n'), included: false });
+      }
+      // Cached per kind + text hash: memory/instructions are re-counted only when they change, not every pass
+      const hidden = hiddenItems.map((i, n) => ({ ...i, tokens: this.tokenizer.countMessageTokens(`hidden:${i.kind}:${n}`, i.text, model.encoding || encoding) }));
+      // OpenAI's system prompt never reaches the browser; count a labelled estimate so the total is not
+      // silently short. ponytail: one fixed figure; per-model/per-tool estimates if published sizes diverge.
+      if (effectiveMessages.length > 0) hidden.push({ // Nothing is sent before the first message
+        kind: 'system_prompt', label: 'ChatGPT system prompt (estimate)', tokens: SYSTEM_PROMPT_ESTIMATE, estimated: true,
+        text: `Not readable: OpenAI adds this on its servers. Counted as an estimate of ~${SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens, based on published extractions of ChatGPT's system prompt; the real size varies with model and enabled tools.`
+      });
+
       // 10. Calculate context metrics
       const contextState = ContextCalculator.calculate({
         messages: tokenizedMessages,
         model,
         plan: reconciled.evidence?.plan || domPlan,
         attachments: effectiveAttachments,
+        hidden,
+        dropStaleTools: true, // ChatGPT: older tool output is not resent
+        fitToWindow: true,    // ChatGPT: long chats keep only the newest turns that fit
         tools,
         memory: {
           observed: tools.list.some(t => t.type === 'memory'),
@@ -6317,7 +6499,7 @@ class ContentScriptCoordinator {
       contextState.observables.hiddenMessagesExcluded = normalized?.hiddenMessages || 0;
       contextState.observables.awaitingData = awaitingData;
       // Measured tokens are a lower bound when turns may be missing (API unavailable for an existing
-      // conversation). Hidden system/memory context is never measured, so it is always excluded.
+      // conversation). OpenAI's own system prompt is never exposed, so the total stays partial.
       contextState.completeness.isLowerBound = !conversationComplete;
       contextState.completeness.hiddenContextMeasured = false;
 
@@ -6330,9 +6512,10 @@ class ContentScriptCoordinator {
         usedTokens: contextState.tokens.totalMeasurable,
         contextLimit: contextState.model.contextWindow,
         remainingTokens: contextState.tokens.remaining,
-        messages: tokenizedMessages,
+        messages: contextState.tokens.contextMessages,
         attachments: effectiveAttachments,
         isLowerBound: !conversationComplete,
+        hiddenTokens: contextState.tokens.hidden,
         sessionStartTokens: conversationId ? (this._sessionStartTokens.get(conversationId) ?? null) : null
       });
 
@@ -6385,7 +6568,9 @@ class ContentScriptCoordinator {
             counted: effectiveMessages.length
           },
           completeness: { source: completenessSource, complete: conversationComplete, lowerBound: !conversationComplete, virtualizationGap },
-          hiddenMessagesExcluded: normalized?.hiddenMessages || 0
+          hiddenMessagesExcluded: normalized?.hiddenMessages || 0,
+          // Kinds and counts only, never the text
+          hiddenContext: hidden.map(i => `${i.kind}:${i.tokens}`)
         },
         session: session ? { ok: session.ok, status: session.status, planType: session.planType || null, error: session.error || null } : null,
         // Page structure counts are taken at copy time (getDiagnostics), not on every pass
@@ -6503,7 +6688,9 @@ class ContentScriptCoordinator {
    */
   syncState(state) {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
-    this._pendingSync = state;
+    // The badge needs numbers only: never ship hidden text or message lists to the worker/storage
+    const { contextMessages, hiddenItems, ...tokens } = state.tokens || {};
+    this._pendingSync = { ...state, tokens: { ...tokens, hiddenItems: (hiddenItems || []).map(({ text, ...rest }) => rest) } };
     // Leading + trailing throttle: the first update goes out at once, bursts (streaming at 20 passes/s)
     // collapse into at most one message per SYNC_MS carrying the latest state. The widget is updated
     // directly on every pass; this only feeds the toolbar badge.

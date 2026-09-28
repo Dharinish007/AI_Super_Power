@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ContentScriptCoordinator } from '../../content/content-main.js';
+import { ContentScriptCoordinator, SYSTEM_PROMPT_ESTIMATE as SP } from '../../content/content-main.js';
 import { ModelDetector } from '../../content/model-detector.js';
 import { PlanDetector, normalizePlanTier } from '../../content/plan-detector.js';
 import { Tokenizer } from '../../engine/tokenizer.js';
@@ -109,14 +109,18 @@ export async function runAccuracyTests() {
       const { run } = harness({ api });
       const s = await run();
       const expUser = count(USER1) + count(USER2);
-      const expAssist = count(ASSIST1) + count(TOOL) + count(ASSIST2);
-      const used = expUser + expAssist;
+      const expAssist = count(ASSIST1) + count(ASSIST2); // TOOL precedes the latest user turn: not resent
+      const expHidden = count('I am a biologist\n\nBe brief');
+      const used = expUser + expAssist + expHidden + SP;
 
       assert('Complete conversation: user tokens = exact sum of user turns', s.tokens.user === expUser);
-      assert('Tool output counted on the model side, never as user', s.tokens.assistant === expAssist);
-      assert('Hidden custom-instructions message excluded from turns/tokens', s.observables.hiddenMessagesExcluded === 1);
-      assert('Empty reasoning ("thoughts") message is not a turn', s.observables.messagesCount === 5);
-      assert('Used tokens = user + assistant + tools', s.tokens.totalMeasurable === used);
+      assert('Older tool output excluded from context, reported separately', s.tokens.assistant === expAssist &&
+        s.tokens.excluded.staleTools.count === 1 && s.tokens.excluded.staleTools.tokens === count(TOOL));
+      assert('Hidden custom-instructions message is not a turn', s.observables.hiddenMessagesExcluded === 1);
+      assert('Custom instructions + system prompt estimate counted as hidden context', s.tokens.hidden === expHidden + SP &&
+        s.tokens.hiddenItems.length === 2 && s.tokens.hiddenItems[0].kind === 'instructions');
+      assert('Empty reasoning ("thoughts") message is not a turn', s.observables.messagesCount === 4);
+      assert('Used tokens = user + assistant + tools + hidden', s.tokens.totalMeasurable === used);
       assert('Window: GPT-5.6 Instant on Plus = 54,000', s.model.contextWindow === 54000);
       assert('Remaining = window - used', s.tokens.remaining === 54000 - used);
       assert('Percentage = used / window, one decimal', s.utilization.percentage === Number(((used / 54000) * 100).toFixed(1)));
@@ -127,6 +131,57 @@ export async function runAccuracyTests() {
       assert('Normalized state carries conversationId', vm.conversationId === CONV_A);
       assert('Normalized state: used/limit/remaining/percentage consistent',
         vm.usedTokens === used && vm.contextLimit === 54000 && vm.remainingTokens === 54000 - used && vm.percentage === s.utilization.percentage);
+    }
+
+    // ------------------------------------------------------------ hidden context: memory, system text, account memories dedupe
+    {
+      const MEM = '1. User is a biologist';
+      const SYS = 'Use the web tool when needed.';
+      const api = tree(CONV_A, [
+        { role: 'system', text: SYS },
+        { role: 'user', contentType: 'model_editable_context', content: { model_set_context: MEM } },
+        { role: 'user', text: 'hi' },
+        { role: 'assistant', text: 'hello', slug: 'gpt-5-6' }
+      ]);
+      const { c, run } = harness({ api });
+      c.conversationClient.fetchMemories = async () => ['account memory A'];
+      const s = await run();
+      const kinds = s.tokens.hiddenItems.map(i => i.kind).sort().join(',');
+      assert('Hidden: system text + in-chat memory read, account memories not double counted', kinds === 'memory,system,system_prompt');
+      assert('Hidden tokens = memory + system text', s.tokens.hidden === count(MEM) + count(SYS) + SP);
+      assert('Hidden items are not turns', s.observables.messagesCount === 2);
+
+      const { c: c2, run: run2 } = harness({ api: tree(CONV_A, [{ role: 'user', text: 'hi' }, { role: 'assistant', text: 'yo', slug: 'gpt-5-6' }]) });
+      c2.conversationClient.fetchMemories = async () => ['likes tea', 'lives in Chennai'];
+      const s2 = await run2();
+      assert('Account memories shown but not counted (not known to be in this chat)',
+        s2.tokens.hidden === SP && s2.tokens.hiddenItems.some(i => i.kind === 'account_memory' && i.included === false));
+      const vm2 = toWidgetState(s2, { provider: 'ChatGPT' });
+      assert('Widget exposes hidden items with text for the viewer', vm2.hiddenItems.length === 2 && vm2.hiddenItems[0].text.includes('tea') && vm2.hiddenItems[0].note === 'not counted');
+    }
+
+    // ------------------------------------------------------------ tool calls skipped, current tool output kept, window fitting
+    {
+      const api = tree(CONV_A, [
+        { role: 'user', text: 'search the news' },
+        { role: 'assistant', text: 'search("news")', slug: 'gpt-5-6' },
+        { role: 'tool', text: 'RESULTS page text' },
+        { role: 'assistant', text: 'Here is the news.', slug: 'gpt-5-6' }
+      ]);
+      api.mapping.n1.message.recipient = 'web.run';
+      const s = await harness({ api }).run();
+      assert('Assistant tool call (recipient != all) is not a turn', s.observables.messagesCount === 3);
+      assert('Tool output of the current turn stays in context', s.tokens.assistant === count('RESULTS page text') + count('Here is the news.') && s.tokens.excluded.staleTools.count === 0);
+
+      const model = { id: 'x', displayName: 'X', contextWindow: 1000, limitStatus: 'VERIFIED', recognized: true };
+      const msgs = [1, 2, 3, 4, 5].map(i => ({ id: 'm' + i, role: i % 2 ? 'user' : 'assistant', tokens: 300 }));
+      const fit = ContextCalculator.calculate({ messages: msgs, model, plan: 'plus', hidden: [{ kind: 'system_prompt', tokens: 200 }], fitToWindow: true });
+      assert('Long chat: only newest turns that fit are counted', fit.tokens.totalMeasurable === 200 + 600 && fit.tokens.excluded.outOfWindow.count === 3);
+      assert('Long chat: history keeps the full size', fit.tokens.history === 1700 && fit.utilization.percentage === 80);
+      const vm = toWidgetState(fit, { provider: 'ChatGPT' });
+      assert('Widget warns that older turns are outside the window', /no longer seen/.test(vm.warning) && vm.breakdown.some(b => b.label === 'Older turns'));
+      const noFit = ContextCalculator.calculate({ messages: msgs, model, plan: 'plus' });
+      assert('Without fitToWindow (other providers) nothing is dropped', noFit.tokens.totalMeasurable === 1500);
     }
 
     // ------------------------------------------------------------ duplicates across API + DOM + network, repeats, order
@@ -147,14 +202,14 @@ export async function runAccuracyTests() {
       h.bridge('STREAM_CHUNK', { conversationId: CONV_A, messageId: id(4), role: 'assistant', text: 'Okay again.', status: 'finished_successfully' });
       const s = await h.run();
       const expected = count('yes') * 2 + count('Okay.') + count('Okay again.');
-      assert('Same turns in API + DOM + network counted once', s.tokens.totalMeasurable === expected && s.observables.messagesCount === 4);
+      assert('Same turns in API + DOM + network counted once', s.tokens.totalMeasurable === expected + SP && s.observables.messagesCount === 4);
       assert('Repeated identical user messages both counted', s.tokens.user === count('yes') * 2);
 
       // Partial live assistant stream appended after the saved tree, in order
       h.bridge('CONVERSATION_REQUEST', { conversationId: CONV_A, userMessage: { id: id(5), text: 'more', parts: [{ type: 'text', text: 'more' }] } });
       h.bridge('STREAM_CHUNK', { conversationId: CONV_A, messageId: id(6), role: 'assistant', text: 'Partial repl', status: 'in_progress' });
       const s2 = await h.run();
-      assert('Partial assistant stream counted while streaming', s2.tokens.totalMeasurable === expected + count('more') + count('Partial repl'));
+      assert('Partial assistant stream counted while streaming', s2.tokens.totalMeasurable === expected + SP + count('more') + count('Partial repl'));
       assert('Live turns appended in order after saved turns', s2.observables.messagesCount === 6);
     }
 
@@ -218,7 +273,7 @@ export async function runAccuracyTests() {
       // New conversation: nothing in the URL, only rendered DOM turns
       const n = harness({ url: null, api: null, dom: [{ id: id(1), role: 'user', text: 'hello' }], domModel: 'gpt-5-6' });
       const sN = await n.run();
-      assert('New conversation: counted from DOM, not flagged as a lower bound', sN.tokens.totalMeasurable === count('hello') && sN.completeness.isLowerBound === false);
+      assert('New conversation: counted from DOM, not flagged as a lower bound', sN.tokens.totalMeasurable === count('hello') + SP && sN.completeness.isLowerBound === false);
     }
 
     // ------------------------------------------------------------ unknown model / partial matching
