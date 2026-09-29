@@ -181,6 +181,11 @@ export class RequestObserver {
           }
           break;
 
+        case 'LIMITS_OBSERVED':
+          // Feature allowances from conversation/init (counts and reset times only)
+          this.observedLimits = payload;
+          break;
+
         case 'MODELS_OBSERVED':
           // Array of model slugs available on ChatGPT Web
           break;
@@ -415,6 +420,11 @@ export class RequestObserver {
    */
   getObservedModel() {
     return this.observedModel;
+  }
+
+  /** Last feature-allowance snapshot from conversation/init, or null. */
+  getObservedLimits() {
+    return this.observedLimits || null;
   }
 
   /**

@@ -32,7 +32,7 @@
    */
   // Latest event per sticky type. This script runs at document_start but the isolated listener
   // only at document_idle, so early events (plan, first conversation load) would otherwise be lost.
-  const STICKY_EVENTS = new Set(['ACCOUNT_PLAN_OBSERVED', 'CONVERSATION_LOADED', 'MODELS_OBSERVED']);
+  const STICKY_EVENTS = new Set(['ACCOUNT_PLAN_OBSERVED', 'CONVERSATION_LOADED', 'MODELS_OBSERVED', 'LIMITS_OBSERVED']);
   const stickyCache = new Map();
 
   function dispatchNetworkEvent(eventType, payload = {}) {
@@ -566,6 +566,26 @@
                 } catch (_) {}
               }).catch(() => {});
             } catch (_) {}
+          }
+        }
+
+        // Plan feature allowances: POST /backend-api/conversation/init (the page loads it itself).
+        // Only the limit fields are forwarded: feature names, counts and reset times.
+        else if (endpoint === '/backend-api/conversation/init') {
+          if (response.status === 200 && response.body && !response.bodyUsed) {
+            response.clone().json().then(data => {
+              const list = (v) => (Array.isArray(v) ? v : []);
+              dispatchNetworkEvent('LIMITS_OBSERVED', {
+                limitsProgress: list(data?.limits_progress).map(l => ({
+                  feature: safeString(l?.feature_name, 64), remaining: typeof l?.remaining === 'number' ? l.remaining : null, resetAfter: safeString(l?.reset_after, 64)
+                })),
+                blocked: list(data?.blocked_features).map(b => safeString(typeof b === 'string' ? b : (b?.feature_name || b?.name), 64)).filter(Boolean),
+                modelLimits: list(data?.model_limits).map(m => ({
+                  model: safeString(m?.model_slug || m?.slug || m?.model, 64), remaining: typeof m?.remaining === 'number' ? m.remaining : null, resetAfter: safeString(m?.reset_after || m?.resets_after, 64)
+                })),
+                timestamp: Date.now()
+              });
+            }).catch(() => {});
           }
         }
 

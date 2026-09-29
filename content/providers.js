@@ -70,6 +70,29 @@ function topLevel(nodes) {
 const CLAUDE_LIMIT_SOURCE = 'Claude Help Center: context window on paid plans (support.claude.com/en/articles/8606394)';
 const CLAUDE_1M_MODELS = new Set(['fable-5.1', 'opus-5.5', 'sonnet-5']);
 const CLAUDE_PAID_PLANS = new Set(['pro', 'max', 'team', 'enterprise']);
+// Hidden-context estimates. claude.ai's prompt/tool sizes are not published; these follow the community
+// measurements in lugia19/Claude-Usage-Extension (checked 2026-09-28). Keyed by the account/conversation setting flag.
+const CLAUDE_SYSTEM_PROMPT_ESTIMATE = 3200;
+const CLAUDE_PREFERENCES_BASE = 850; // Wrapper text around your preferences
+// o200k undercounts Claude's (unpublished) tokenizer; same factor as that extension
+const CLAUDE_TOKEN_SCALE = 1.4;
+// Codename flags keep their codename: what they switch on is not documented
+const CLAUDE_FEATURE_COSTS = {
+  enabled_web_search: ['Web search', 10250],
+  citation_info: ['Citations', 450],
+  enabled_artifacts_attachments: ['Artifacts', 2200],
+  preview_feature_uses_artifacts: ['Artifacts (preview)', 8400],
+  preview_feature_uses_latex: ['LaTeX', 200],
+  enabled_monkeys_in_a_barrel: ['Code execution', 5300],
+  enabled_saffron: ['Memory', 4250],
+  enabled_saffron_search: ['Memory search', 3000],
+  enabled_melange: ['Memory files', 14000],
+  enabled_bananagrams: ['Feature "bananagrams"', 750],
+  enabled_sourdough: ['Feature "sourdough"', 900],
+  enabled_foccacia: ['Feature "foccacia"', 1350],
+  enabled_compass: ['Feature "compass"', 1000],
+  enabled_turmeric: ['Feature "turmeric"', 2000]
+};
 
 /**
  * "claude-opus-5-5", "Opus 5.5", "claude-sonnet-4-5-20250929", "claude-3-5-sonnet-20241022" -> "opus-5.5",
@@ -127,6 +150,11 @@ export const ClaudeProvider = {
   },
 
   modelKey: claudeModelKey,
+  // claude.ai keeps tool calls but drops earlier tool results (e.g. search pages) from later requests
+  dropsOldToolResults: true,
+  tokenScale: CLAUDE_TOKEN_SCALE,
+  // Limits also arrive in each reply's stream (the only source on plans where /usage is empty)
+  limitStreamSource: 'CONTEXT_MONITOR_CLAUDE_LIMIT',
 
   displayName(raw) {
     const key = claudeModelKey(raw);
@@ -161,11 +189,111 @@ export const ClaudeProvider = {
   async fetchConversation(conversationId, fetchJson) {
     const org = await this._orgId(fetchJson);
     if (!org) return null;
-    const [conv, orgInfo] = await Promise.all([
+    const optional = (path) => fetchJson(path).catch(() => null); // Hidden context is best effort
+    const [conv, orgInfo, profile, account, usage] = await Promise.all([
       fetchJson(`/api/organizations/${org}/chat_conversations/${conversationId}?tree=True&rendering_mode=messages&render_all_tools=true`),
-      fetchJson(`/api/organizations/${org}`).catch(() => null)
+      optional(`/api/organizations/${org}`),
+      optional('/api/account_profile'),
+      optional('/api/account'),
+      optional(`/api/organizations/${org}/usage`)
     ]);
-    return { ...this.normalizeConversation(conv), plan: this.planFromOrganization(orgInfo) };
+    const projectId = conv?.project_uuid || conv?.project?.uuid || null;
+    const [project, kb] = projectId
+      ? await Promise.all([optional(`/api/organizations/${org}/projects/${projectId}`), optional(`/api/organizations/${org}/projects/${projectId}/kb/stats`)])
+      : [null, null];
+    return {
+      ...this.normalizeConversation(conv),
+      plan: this.planFromOrganization(orgInfo),
+      hidden: this.hiddenContext({ conv, profile, account, project, kb }),
+      limits: this.parseUsage(usage)
+    };
+  },
+
+  /**
+   * Plan limits from a reply stream's `message_limit` event (see claude-limit-watcher.js):
+   * { windows: { "5h": { utilization: 0..1, resets_at }, "7d": {...} }, resetsAt }.
+   * resets_at may be epoch seconds, epoch ms or ISO; utilization is a fraction (a value > 1 is taken as a percent).
+   * @returns {Array<{ key: string, label: string, percent: number, resetsAt: number|null }>}
+   */
+  parseMessageLimit(ml) {
+    const windows = ml && typeof ml === 'object' ? ml.windows : null;
+    if (!windows || typeof windows !== 'object') return [];
+    const toMs = (v) => (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : v ? Date.parse(v) || null : null);
+    const names = { '5h': ['session', 'Session (5h)'], '7d': ['weekly', 'Weekly'] };
+    const out = [];
+    for (const [win, [key, label]] of Object.entries(names)) {
+      const w = windows[win];
+      const u = w?.utilization;
+      if (typeof u !== 'number' || !isFinite(u)) continue;
+      out.push({ key, label, percent: Math.round(u > 1 ? u : u * 100), resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === 'session' ? ml.resetsAt : null)) });
+    }
+    return out;
+  },
+
+  /**
+   * Plan usage limits from /api/organizations/{org}/usage, as claude.ai reports them.
+   * Two shapes exist: { limits: [{ kind, percent, resets_at, scope }] } and the older top-level
+   * { five_hour|seven_day|seven_day_opus|seven_day_sonnet: { utilization, resets_at } }.
+   * @returns {Array<{ key: string, label: string, percent: number, resetsAt: number|null }>}
+   */
+  parseUsage(usage) {
+    if (!usage || typeof usage !== 'object') return [];
+    const at = (iso) => (iso ? new Date(iso).getTime() || null : null);
+    const out = [];
+    const add = (key, label, percent, resetsAt) => {
+      if (typeof percent === 'number' && isFinite(percent)) out.push({ key, label, percent: Math.round(percent), resetsAt: at(resetsAt) });
+    };
+    if (Array.isArray(usage.limits)) {
+      for (const l of usage.limits) {
+        const model = l.scope?.model?.display_name;
+        if (l.kind === 'session') add('session', 'Session (5h)', l.percent, l.resets_at);
+        else if (l.kind === 'weekly_all') add('weekly', 'Weekly', l.percent, l.resets_at);
+        else if (l.kind === 'weekly_scoped' && model) add(`weekly:${model}`, `Weekly · ${model}`, l.percent, l.resets_at);
+      }
+    } else {
+      const top = [['five_hour', 'session', 'Session (5h)'], ['seven_day', 'weekly', 'Weekly'],
+        ['seven_day_opus', 'weekly:Opus', 'Weekly · Opus'], ['seven_day_sonnet', 'weekly:Sonnet', 'Weekly · Sonnet']];
+      for (const [field, key, label] of top) if (usage[field]) add(key, label, usage[field].utilization, usage[field].resets_at);
+    }
+    return out;
+  },
+
+  /**
+   * What claude.ai sends with every message besides the chat itself. Text items carry their text
+   * (counted by the tokenizer); fixed-cost items carry `tokens` and are estimates.
+   * Sources: /api/account_profile, /api/account (+ conversation settings), the project and its kb/stats.
+   * @returns {Array<{ kind: string, label: string, text: string, tokens?: number, estimated?: boolean, included?: boolean }>}
+   */
+  hiddenContext({ conv, profile, account, project, kb } = {}) {
+    const items = [{
+      kind: 'system_prompt', label: 'Claude system prompt (estimate)', tokens: CLAUDE_SYSTEM_PROMPT_ESTIMATE, estimated: true,
+      text: `Not readable from the page. Estimated at ~${CLAUDE_SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens.`
+    }];
+    const prefs = profile?.conversation_preferences;
+    if (typeof prefs === 'string' && prefs.trim()) {
+      items.push({ kind: 'instructions', label: 'Your preferences', text: prefs });
+      items.push({ kind: 'instructions_base', label: 'Preferences framing (estimate)', tokens: CLAUDE_PREFERENCES_BASE, estimated: true,
+        text: `Fixed text claude.ai wraps around your preferences, ~${CLAUDE_PREFERENCES_BASE} tokens.` });
+    }
+
+    const instructions = project?.prompt_template;
+    if (typeof instructions === 'string' && instructions.trim()) items.push({ kind: 'project', label: 'Project instructions', text: instructions });
+    const settings = { ...(account?.settings || {}), ...(conv?.settings || {}) };
+    const kbTokens = Number(kb?.knowledge_size) || 0;
+    if (kbTokens > 0) {
+      // Large projects switch to search: files are retrieved as needed, not sent whole
+      const searched = Boolean(settings.use_project_knowledge_search || kb?.use_project_knowledge_search);
+      items.push({
+        kind: 'project_knowledge', label: searched ? 'Project knowledge (searched as needed)' : 'Project knowledge', tokens: kbTokens,
+        included: !searched, text: searched ? 'Project is in search mode: only retrieved parts are sent, so the full size is not counted.' : 'Size of the project knowledge files as reported by claude.ai.'
+      });
+    }
+
+    // Enabled tools/features add fixed prompt text (sizes: community measurements, not published)
+    for (const [flag, [label, tokens]] of Object.entries(CLAUDE_FEATURE_COSTS)) {
+      if (settings[flag] === true) items.push({ kind: 'tool', label: `${label} (estimate)`, tokens, estimated: true, text: `${label} is enabled; its instructions add ~${tokens.toLocaleString()} tokens.` });
+    }
+    return items;
   },
 
   /** capabilities: claude_max / claude_pro / raven (Team or Enterprise); only "chat" -> free (inferred). */
@@ -180,7 +308,7 @@ export const ClaudeProvider = {
 
   /**
    * Active branch (current_leaf_message_uuid -> parents) of a claude.ai conversation, as turns.
-   * Tool calls and results are counted as "tool"; earlier thinking is not resent, so it is skipped;
+   * Tool calls stay in the reply, tool results become "tool" turns; thinking is not resent, so it is skipped;
    * text extracted from attached files is part of the prompt and counted with the user turn.
    */
   normalizeConversation(conv) {
@@ -207,7 +335,8 @@ export const ClaudeProvider = {
       if (Array.isArray(m.content) && m.content.length > 0) {
         for (const block of m.content) {
           if (block.type === 'text' && block.text) text.push(block.text);
-          else if (block.type === 'tool_use') tool.push(JSON.stringify(block.input ?? {}));
+          // The call stays in the reply; only the result is dropped once a newer message is sent
+          else if (block.type === 'tool_use') text.push(JSON.stringify(block.input ?? {}));
           else if (block.type === 'tool_result') {
             const c = Array.isArray(block.content) ? block.content.map(x => x.text || '').join('\n') : String(block.content ?? '');
             if (c) tool.push(c);
@@ -233,6 +362,7 @@ export const ClaudeProvider = {
       model: conv?.model || null,
       messages,
       visibleTurns: chain.length,
+      rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
       attachments: { count: files, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
   }
@@ -275,21 +405,64 @@ export const GeminiProvider = {
   },
 
   detectModel(doc) {
-    const el = doc.querySelector('[data-test-id="bard-mode-menu-button"], [data-test-id*="mode-menu"] button, button.gds-mode-switch-button');
+    // Current layout (checked 2026-09-29): <button aria-label="Open mode picker, currently 3.5 Flash-Lite">
+    const picker = doc.querySelector('button[aria-label*="mode picker" i]');
+    const current = picker?.getAttribute?.('aria-label')?.match(/currently\s+(.+)$/i);
+    if (current) return current[1].trim();
+    const el = picker || doc.querySelector('[data-test-id="bard-mode-menu-button"], [data-test-id*="mode-menu"] button, button.gds-mode-switch-button');
     const text = el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
     return text && text.length < 40 ? text : null;
   },
 
+  /**
+   * Gemini does not report usage; it only shows a message once a limit is hit. Reads alerts, snack
+   * bars and the latest reply for that message. Returns a used-up limit, with the reset time when
+   * the message names one ("try again at 5:30 PM" / "in 3 hours").
+   * @returns {{ key: string, label: string, remaining: number, blocked: boolean, resetsAt: number|null }|null}
+   */
+  detectLimitReached(doc, now = Date.now()) {
+    const replies = doc.querySelectorAll('model-response');
+    const nodes = [...doc.querySelectorAll('[role="alert"], [role="status"], snack-bar-container, .mat-mdc-snack-bar-container'), replies[replies.length - 1]];
+    for (const n of nodes) {
+      const text = (n?.textContent || '').replace(/\s+/g, ' ');
+      // A long reply that merely discusses limits is not the limit notice (notices are one or two lines)
+      if (n === replies[replies.length - 1] && text.length > 400) continue;
+      if (!/(reached|hit) (your|the) (\w+ )?limit|limit (reached|resets)|usage limit/i.test(text)) continue;
+      return { key: 'limit', label: 'Gemini usage', remaining: 0, blocked: true, resetsAt: this.parseResetTime(text, now) };
+    }
+    return null;
+  },
+
+  /** "at 5:30 PM" / "after 17:30" -> next such time; "in 3 hours" / "in 45 minutes" -> now + that. */
+  parseResetTime(text, now = Date.now()) {
+    const rel = text.match(/in (\d+) (hour|minute)s?/i);
+    if (rel) return now + Number(rel[1]) * (/hour/i.test(rel[2]) ? 3600000 : 60000);
+    const t = text.match(/(?:at|after|until) (\d{1,2})(?::(\d{2}))?\s*([AP]\.?M\.?)?/i);
+    if (!t) return null;
+    let h = Number(t[1]) % 12 + (t[3] && /p/i.test(t[3]) ? 12 : 0);
+    if (!t[3]) h = Number(t[1]); // 24-hour clock
+    const d = new Date(now);
+    d.setHours(h, Number(t[2] || 0), 0, 0);
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+    return d.getTime();
+  },
+
+  // Gemini meters compute, and long chats cost more per message: note it once the chat is this full
+  longChatNoteAt: 50,
+
   /** Explicit "Google AI Pro/Ultra/Plus" text is OBSERVED; a bare PRO/ULTRA badge is only a hint. */
   detectPlan(doc) {
+    let seenHeader = false;
     for (const el of doc.querySelectorAll('header, top-bar-actions, [data-test-id*="pillbox"], .gds-pillbox, [role="banner"]')) {
       const text = el.textContent || '';
       const named = text.match(/Google AI (Ultra|Pro|Plus)\b/);
       if (named) return { value: named[1].toLowerCase(), source: 'dom', evidenceType: 'OBSERVED' };
       const badge = text.match(/\b(ULTRA|PRO|PLUS)\b/);
       if (badge) return { value: badge[1].toLowerCase(), source: 'dom_heuristic', evidenceType: 'ESTIMATED' };
+      seenHeader = true;
     }
-    return null;
+    // Paid plans show a badge in the top bar; a loaded top bar without one is the free plan (inferred)
+    return seenHeader ? { value: 'free', source: 'dom_heuristic', evidenceType: 'ESTIMATED' } : null;
   },
 
   modelKey: (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim() || null,

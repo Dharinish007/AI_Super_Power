@@ -26,6 +26,35 @@ const round1 = (n) => Math.round(n * 10) / 10;
 // Approximate size of ChatGPT's server-side system prompt (not readable from the client)
 export const SYSTEM_PROMPT_ESTIMATE = 2500;
 
+const FEATURE_NAMES = {
+  deep_research: 'Deep research', reason: 'Thinking', image_gen: 'Image generation',
+  file_upload: 'File uploads', paste_text_to_file: 'Paste as file'
+};
+const featureLabel = (f) => FEATURE_NAMES[f] || f.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+
+/**
+ * ChatGPT plan allowances (from conversation/init) as widget limits: remaining count + reset time.
+ * Entries past their reset time are dropped (the count is stale until ChatGPT reports again).
+ * @param {{ limitsProgress?: Array, blocked?: string[], modelLimits?: Array }|null} raw
+ * @returns {Array<{ key: string, label: string, remaining: number|null, blocked: boolean, resetsAt: number|null }>}
+ */
+export function chatgptLimits(raw, now = Date.now()) {
+  if (!raw) return [];
+  const blocked = new Set(raw.blocked || []);
+  const at = (iso) => (iso ? Date.parse(iso) || null : null);
+  const out = [];
+  for (const m of raw.modelLimits || []) {
+    if (m.model) out.push({ key: `model:${m.model}`, label: `Messages · ${m.model}`, remaining: m.remaining, blocked: m.remaining === 0, resetsAt: at(m.resetAfter) });
+  }
+  for (const l of raw.limitsProgress || []) {
+    if (l.feature) out.push({ key: l.feature, label: featureLabel(l.feature), remaining: l.remaining, blocked: blocked.has(l.feature) || l.remaining === 0, resetsAt: at(l.resetAfter) });
+  }
+  for (const f of blocked) {
+    if (!out.some(l => l.key === f)) out.push({ key: f, label: featureLabel(f), remaining: 0, blocked: true, resetsAt: null });
+  }
+  return out.filter(l => !l.resetsAt || l.resetsAt > now);
+}
+
 /**
  * Rolling timing samples (last `size` per metric) for the performance section of diagnostics.
  */
@@ -661,6 +690,8 @@ export class ContentScriptCoordinator {
       contextState.observables.plan = winningPlan;
       contextState.observables.hiddenMessagesExcluded = normalized?.hiddenMessages || 0;
       contextState.observables.awaitingData = awaitingData;
+      // Plan feature allowances ChatGPT reported (no message percentage exists on ChatGPT)
+      contextState.limits = chatgptLimits(this.requestObserver.getObservedLimits());
       // Measured tokens are a lower bound when turns may be missing (API unavailable for an existing
       // conversation). OpenAI's own system prompt is never exposed, so the total stays partial.
       contextState.completeness.isLowerBound = !conversationComplete;

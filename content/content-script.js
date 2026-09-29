@@ -2895,6 +2895,11 @@ class RequestObserver {
           }
           break;
 
+        case 'LIMITS_OBSERVED':
+          // Feature allowances from conversation/init (counts and reset times only)
+          this.observedLimits = payload;
+          break;
+
         case 'MODELS_OBSERVED':
           // Array of model slugs available on ChatGPT Web
           break;
@@ -3129,6 +3134,11 @@ class RequestObserver {
    */
   getObservedModel() {
     return this.observedModel;
+  }
+
+  /** Last feature-allowance snapshot from conversation/init, or null. */
+  getObservedLimits() {
+    return this.observedLimits || null;
   }
 
   /**
@@ -4828,6 +4838,17 @@ function formatModelName(slug) {
   return `GPT-${version}${rest}`;
 }
 
+/** "3h 57m", "2d 4h", "12m" until `at` (ms); null when unknown or past. */
+function formatResetIn(at, now = Date.now()) {
+  if (!at) return null;
+  const min = Math.round((at - now) / 60000);
+  if (min <= 0) return null;
+  const d = Math.floor(min / 1440);
+  const hr = Math.floor((min % 1440) / 60);
+  if (d) return `${d}d ${hr}h`;
+  return hr ? `${hr}h ${min % 60}m` : `${min}m`;
+}
+
 /**
  * @param {Object} s Context state produced by ContextCalculator + coordinator
  * @param {{ provider?: string }} [opts]
@@ -4847,7 +4868,7 @@ function toWidgetState(s, opts = {}) {
       provider, conversationId: s?.observables?.conversationId || null, model: 'Detecting…', modelFamily: null, plan: null,
       usedTokens: 0, contextLimit: null, remainingTokens: null, percentage: null,
       limitStatus: 'UNKNOWN', confidence: 0, confidenceLevel: 'LOW',
-      evidence: [], breakdown: [], hiddenItems: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
+      evidence: [], breakdown: [], stats: { user: 0, assistant: 0, hidden: 0 }, hiddenItems: [], limits: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
     };
   }
 
@@ -4903,19 +4924,28 @@ function toWidgetState(s, opts = {}) {
       ...(hiddenItems.length
         ? [
             { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
-            ...hiddenItems.filter(i => i.estimated).map(i => ({ label: `${provider} system prompt`, value: `≈${(i.tokens || 0).toLocaleString()}`, tag: 'ESTIMATED' }))
+            // One row for every estimate (system prompt, and on Claude the enabled tools); details in the viewer
+            ...(hiddenItems.some(i => i.estimated)
+              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED' }]
+              : [])
           ]
         : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
       // Saved in the chat but not in the current context: shown, never counted in Used
       ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
+    // Headline split for the panel's stat row (display only; same numbers as the breakdown)
+    stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
     // What the page never shows: label, token count and the text itself, for the viewer
     hiddenItems: hiddenItems.map(i => ({
       label: i.label, tokens: i.tokens || 0, text: i.text || '',
       note: i.included === false ? 'not counted' : (i.estimated ? 'estimate' : null)
     })),
-    source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)' : 'Page text',
+    // Plan usage limits (Claude only; empty elsewhere): percent used and time until reset
+    // Percent-based (Claude) or count-based (ChatGPT: `remaining`, `blocked`)
+    limits: (s.limits || []).map(l => ({ key: l.key, label: l.label, percent: l.percent, remaining: l.remaining, blocked: Boolean(l.blocked), note: l.note || null, resetIn: formatResetIn(l.resetsAt) })),
+    source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
+      : dataSource === 'dom_unsaved' ? 'Page text (not saved yet)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,
     // usedTokens counts visible conversation text only; true when turns may also be missing
     isLowerBound,
@@ -4937,130 +4967,164 @@ function toWidgetState(s, opts = {}) {
   /**
  * Context Monitor - Context Widget (provider-neutral UI)
  *
- * Renders the normalized view state from widget-state.js (toWidgetState). It knows nothing about
- * any AI site: a provider adapter supplies a name, `findInput()` (the chat input element),
- * `onRefresh()` (re-read the conversation now; may return a promise) and `getDiagnostics()`.
- * Everything lives in a shadow root, so the host page's CSS cannot reach it and ours never leaks out.
+ * Renders the view state from widget-state.js (toWidgetState). It knows nothing about any AI site:
+ * the adapter supplies a name, `onRefresh()` and `getDiagnostics()`. Everything lives in a shadow
+ * root, so the host page's CSS cannot reach it and ours never leaks out.
  *
- * One card, bottom-anchored. Expanding opens the details ABOVE the summary, so the summary (the
- * main element) never moves and the width never changes:
+ *   Collapsed (default)  pill "39.3K • Medium" — click expands, drag moves
+ *   Expanded             header (drag handle: theme / collapse / close)
+ *                        hero: token count, usage bar, window, model, limit line, warning
+ *                        stats: You / <Site> + tools / Hidden
+ *                        sections (closed by default): Breakdown, Hidden context, Usage limits, Diagnostics
+ *                        footer: confidence, Copy diagnostics, Refresh
  *
- *   ContextDetails (open only)  Breakdown (+ used / remaining / window)
- *                               Confidence dropdown (closed by default) + all evidence
- *                               Diagnostics (warning, Copy diagnostics)
- *                               Model (provider, model · family, plan, source, turns)
- *   ContextSummary              [percentage] [confidence]            [refresh] [expand]
- *                               progress bar
- *                               used / total tokens
- *                               model · family
- *
- * The percentage is shown once (summary only). Components build their DOM once; update(vm) writes
- * only what changed, so repeated identical updates cause zero DOM mutations (no flicker, no lost
- * focus/scroll/open state), and page-derived strings are only ever assigned as text, never HTML.
+ * Position: free drag (pointer events, translate3d), clamped to the viewport, snapped to the nearest
+ * side on release (hold Alt to skip), anchored to that side so expanding never pushes it off screen.
+ * Position, expanded state and theme persist per site in chrome.storage.local.
+ * Components build their DOM once; updates write only what changed, and page-derived strings are
+ * only ever assigned as text, never HTML.
  */
 
 const STYLES = `
   :host { all: initial; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   .root {
-    --primary: #6366F1; --accent: #06B6D4; --primary-text: #4F46E5;
-    --surface: #FFFFFF; --subtle: #F8FAFC; --text: #0F172A; --muted: #64748B; --line: #E2E8F0; --track: #EEF2F7;
-    --ok: #059669; --warn: #D97706; --bad: #DC2626;
-    --shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 8px 24px rgba(15, 23, 42, .10);
-    font: 12.5px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    font-variant-numeric: tabular-nums;
-    color: var(--text);
-    color-scheme: light; /* native scrollbars and focus rings follow the widget theme */
-    -webkit-font-smoothing: antialiased;
+    --bg: #0F1115; --surface: #171A21; --glass: rgba(23, 26, 33, .85); --border: #262A33; --text: #E6E8EC; --muted: #8A91A0;
+    --accent: #D97757; --good: #4ADE80; --warn: #FBBF24; --warn-text: #FBBF24; --danger: #F87171; --track: #262A33; --hover: rgba(255, 255, 255, .06);
+    --s1: #D97757; --s2: #60A5FA; --s3: #A78BFA; --s4: #34D399; --s5: #F472B6; --s6: #FBBF24; --s7: #22D3EE; --s8: #94A3B8;
+    --shadow: 0 8px 30px rgba(0, 0, 0, .25);
+    --ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    position: relative; font: 12.5px/1.45 var(--ui); color: var(--text); color-scheme: dark;
+    -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
   }
-  .root.dark {
-    color-scheme: dark;
-    --primary-text: #A5B4FC;
-    --surface: #0F172A; --subtle: #111C33; --text: #E2E8F0; --muted: #94A3B8; --line: #1E293B; --track: #1E293B;
-    --ok: #34D399; --warn: #FBBF24; --bad: #F87171;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px rgba(0, 0, 0, .45);
+  .root.light {
+    --bg: #FAF9F6; --surface: #FFFFFF; --glass: rgba(255, 255, 255, .85); --border: #E7E4DD; --text: #1F2328; --muted: #6B7280;
+    --accent: #C15F3C; --good: #16A34A; --warn: #D97706; --warn-text: #B45309; --danger: #DC2626; --track: #EFECE6; --hover: rgba(0, 0, 0, .04);
+    --s1: #C15F3C; --s2: #2563EB; --s3: #7C3AED; --s4: #059669; --s5: #DB2777; --s6: #D97706; --s7: #0891B2; --s8: #64748B;
+    --shadow: 0 8px 30px rgba(0, 0, 0, .12); color-scheme: light;
   }
-  .card {
-    display: flex; flex-direction: column; overflow: hidden;
-    background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
-  }
+  button { all: unset; box-sizing: border-box; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 
-  /* Summary (always visible) */
-  .summary { padding: 12px 14px 11px; }
-  .top { display: flex; align-items: center; gap: 8px; min-height: 30px; }
-  .pct { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap;
-    font-size: 26px; font-weight: 700; line-height: 1; letter-spacing: -.02em; color: var(--primary-text); }
-  .pct .unit { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; color: var(--muted); }
-  .pct.warn { color: var(--warn); } .pct.bad { color: var(--bad); }
-  .spacer { flex: 1; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 700; letter-spacing: .06em;
-    padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
-    background: var(--subtle);
+  /* Pill (collapsed) */
+  .pill { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 999px;
+    background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); white-space: nowrap;
+    font-weight: 600; cursor: grab; touch-action: none; user-select: none; }
+  .pill .num { font-family: var(--mono); font-size: 12.5px; }
+  .pill .sep, .pill .lvl { color: var(--muted); font-weight: 500; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.HIGH { background: var(--good); } .dot.MEDIUM { background: var(--warn); } .dot.LOW { background: var(--muted); }
+
+  /* Panel (expanded) */
+  .panel { width: 320px; display: flex; flex-direction: column; max-height: 70vh; border-radius: 12px; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
+  @supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
+    .panel, .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
   }
-  .badge i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: block; }
-  .badge.HIGH { color: var(--ok); } .badge.MEDIUM { color: var(--warn); } .badge.LOW { color: var(--muted); }
-  .toggle {
-    all: unset; cursor: pointer; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
-    color: var(--muted); transition: background .15s ease, color .15s ease;
-  }
-  .toggle:hover { background: var(--track); color: var(--text); }
-  .toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-  .toggle:disabled { cursor: default; opacity: .6; }
-  .toggle.chev svg { transition: transform .2s ease; }
-  .open .toggle.chev svg { transform: rotate(180deg); }
-  .refreshing svg { animation: spin .8s linear infinite; }
+  .open .panel { animation: in .15s ease; }
+  @keyframes in { from { opacity: 0; transform: translateY(-4px); } }
+  .head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border);
+    cursor: grab; touch-action: none; user-select: none; }
+  .head .title { flex: 1; min-width: 0; font-weight: 600; font-size: 12px; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .head .title span { color: var(--muted); font-weight: 500; }
+  .dragging .pill, .dragging .head { cursor: grabbing; }
+  .ib { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); flex: none; }
+  .ib:hover { background: var(--hover); color: var(--text); }
+  .ib:disabled { opacity: .5; cursor: default; }
+  .spin svg { animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .progress { height: 6px; border-radius: 999px; background: var(--track); overflow: hidden; margin: 10px 0 8px; }
-  .progress b { display: block; height: 100%; width: 0; border-radius: inherit;
-    background: linear-gradient(90deg, var(--primary), var(--accent)); transition: width .35s ease; }
-  .progress.warn b { background: var(--warn); } .progress.bad b { background: var(--bad); }
-  .tokens { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tokens .of { color: var(--muted); font-weight: 500; }
-  .model { margin-top: 2px; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Details (open only), above the summary inside the same card */
-  .details { display: none; overflow: auto; overscroll-behavior: contain; max-height: var(--details-max, 60vh);
-    border-bottom: 1px solid var(--line); scrollbar-width: thin; }
-  .open .details { display: block; }
-  .section { padding: 11px 14px; }
-  .section + .section { border-top: 1px solid var(--line); }
-  .h { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
-  .divider { border-top: 1px dashed var(--line); margin: 6px 0; }
-  .conf > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; margin: 0; }
-  .conf > summary::-webkit-details-marker { display: none; }
-  .conf > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
-  .conf > summary svg { margin-left: auto; color: var(--muted); transition: transform .2s ease; }
-  .conf[open] > summary svg { transform: rotate(180deg); }
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 2px 0; }
+  .body { overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  .body::-webkit-scrollbar { width: 6px; } .body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .hero { padding: 16px 16px 12px; }
+  .hero .top { display: flex; align-items: baseline; gap: 8px; }
+  .hero .big { font-family: var(--mono); font-size: 28px; font-weight: 600; letter-spacing: -.02em; line-height: 1; }
+  .hero .unit { color: var(--muted); font-size: 11px; }
+  .hero .pct { margin-left: auto; font-family: var(--mono); font-weight: 600; font-size: 13px; }
+  .bar { height: 6px; border-radius: 999px; background: var(--track); overflow: hidden; margin: 12px 0 8px; position: relative; }
+  .bar b { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--good); transition: width .35s ease; }
+  .bar.warn b { background: var(--warn); } .bar.bad b { background: var(--danger); }
+  .bar.unknown b { width: 30% !important; background: var(--muted); opacity: .45; animation: slide 1.6s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  .meta { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; min-width: 0; }
+  .meta .model { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .line { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+  .line:empty { display: none; }
+  .line.warn { color: var(--warn-text); } /* #D97706 is 3.2:1 on white: text uses a darker amber (5.0:1) */
+
+  .approx { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--muted); font-size: 10.5px; font-weight: 600; cursor: help; margin-left: 4px; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .stat { padding: 8px 16px; min-width: 0; }
+  .stat + .stat { border-left: 1px solid var(--border); }
+  .stat .k { color: var(--muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat .v { font-family: var(--mono); font-weight: 600; font-size: 13px; }
+
+  .sec { border-bottom: 1px solid var(--border); }
+  .sec-h { display: flex; align-items: center; width: 100%; padding: 10px 16px; font-size: 10.5px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .sec-h:hover { color: var(--text); background: var(--hover); }
+  .sec-h svg { margin-left: auto; transition: transform .15s ease; }
+  .sec-h[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .sec-b { padding: 0 16px 12px; }
+  .sec-b[hidden] { display: none; }
+
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
   .row .k { color: var(--muted); white-space: nowrap; }
   .row .v { text-align: right; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
-  .tag { font-size: 9px; font-weight: 700; letter-spacing: .05em; padding: 1px 5px; border-radius: 4px; margin-left: 6px;
-    border: 1px solid var(--line); color: var(--muted); vertical-align: 1px; white-space: nowrap; }
-  .tag:empty { display: none; }
-  .tag.VERIFIED { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
-  .evidence { list-style: none; display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 12px; }
-  .evidence li { display: flex; gap: 7px; align-items: baseline; }
-  .evidence li span:last-child { min-width: 0; overflow-wrap: anywhere; }
-  .evidence .y { color: var(--ok); } .evidence .n { color: var(--warn); }
-  .warn-text { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
-  .warn-text:empty { display: none; }
-  .btn { all: unset; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--primary-text);
-    border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; background: var(--subtle); }
-  .btn:hover { border-color: var(--primary); }
-  .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-  .fine { color: var(--muted); font-size: 11px; margin-top: 8px; }
-  .hid > summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
-  .hid > summary .k { color: var(--muted); white-space: nowrap; }
-  .hid > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
-  .hid pre { margin: 4px 0 8px; padding: 8px; max-height: 200px; overflow: auto; background: var(--subtle);
-    border: 1px solid var(--line); border-radius: 8px; font: 11px/1.45 ui-monospace, Consolas, monospace;
-    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .divider { border-top: 1px dashed var(--border); margin: 6px 0; }
 
-  @media (prefers-reduced-motion: reduce) {
-    * { transition: none !important; animation: none !important; }
-  }
+  .stack { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--track); gap: 2px; margin: 4px 0 10px; }
+  .stack i { display: block; min-width: 3px; }
+  .leg { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 6px; margin: 0 -6px; border-radius: 6px; width: calc(100% + 12px); }
+  .leg:hover { background: var(--hover); }
+  .leg .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .leg .sw.off { background: transparent !important; border: 1px solid var(--muted); }
+  .leg .l { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .leg .t { font-family: var(--mono); color: var(--muted); }
+  pre { margin: 4px 0 8px; padding: 8px; max-height: 180px; overflow: auto; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-width: thin; }
+  pre[hidden] { display: none; }
+
+  .evidence { list-style: none; display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 11.5px; }
+  .evidence li { display: flex; gap: 6px; }
+  .evidence .y { color: var(--good); } .evidence .n { color: var(--warn-text); }
+  .fine { color: var(--muted); font-size: 11px; margin-top: 8px; }
+
+  .foot { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 16px; border-top: 1px solid var(--border); }
+  .foot .conf { flex: 1; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+
+  .toast { position: absolute; left: 50%; bottom: 48px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px;
+    background: var(--text); color: var(--surface); font-size: 11.5px; font-weight: 600; pointer-events: none; opacity: 0; transition: opacity .15s ease; }
+  .toast.show { opacity: 1; }
+  .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
+    font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
+  .tip.show { opacity: 1; }
+
+  .hide { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 `;
+
+const MARGIN = 8; // Viewport clamp
+const TOP_SAFE = 72; // Default/snap top: below the sites' top bars (Share, account buttons)
+const SNAP_Y = 48; // Snap to a top/bottom corner when released this close
+const DRAG_THRESHOLD = 4; // Pointer movement that turns a press into a drag
+const DEFAULT_POS = { side: 'right', dx: 16, y: TOP_SAFE };
+const THEMES = ['auto', 'dark', 'light'];
+
+const ICONS = {
+  chevron: 'M4 6l4 4 4-4',
+  collapse: 'M4 8h8',
+  close: 'M4.5 4.5l7 7M11.5 4.5l-7 7',
+  refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
+  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
+  auto: 'M8 2.5a5.5 5.5 0 1 0 0 11zM8 2.5a5.5 5.5 0 0 1 0 11',
+  dark: 'M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z',
+  light: 'M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1'
+};
 
 const fmtK = (n) => {
   if (n === null || n === undefined) return '—';
@@ -5068,7 +5132,10 @@ const fmtK = (n) => {
   if (n < 1e6) return `${(Math.round(n / 100) / 10).toString().replace(/\.0$/, '')}K`;
   return `${(Math.round(n / 1e4) / 100).toString()}M`;
 };
-const fmtPct = (p, used) => (p === 0 && used > 0 ? '<0.1' : String(p));
+const fmtInt = (n) => (n === null || n === undefined ? '—' : Math.round(n).toLocaleString());
+const tone = (p) => (p === null || p === undefined ? '' : p > 85 ? 'bad' : p >= 60 ? 'warn' : '');
+const levelName = (lvl) => (lvl ? lvl.charAt(0) + lvl.slice(1).toLowerCase() : 'Low');
+const reducedMotion = () => Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 
 function h(tag, cls, parent, text) {
   const n = document.createElement(tag);
@@ -5077,13 +5144,13 @@ function h(tag, cls, parent, text) {
   if (parent) parent.appendChild(n);
   return n;
 }
-
 /** Writes only when the value changed: identical updates cause no DOM mutation. */
 const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
 const setClass = (node, cls) => { if (node.className !== cls) node.className = cls; };
 const setAttr = (node, name, value) => { if (node.getAttribute(name) !== value) node.setAttribute(name, value); };
+const show = (node, visible) => { node.classList.toggle('hide', !visible); };
 
-/** Stroked 16x16 SVG icon from one path. */
+/** Stroked 16x16 icon. */
 function icon(parent, d) {
   const NS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(NS, 'svg');
@@ -5095,137 +5162,68 @@ function icon(parent, d) {
   path.setAttribute('d', d);
   path.setAttribute('fill', 'none');
   path.setAttribute('stroke', 'currentColor');
-  path.setAttribute('stroke-width', '1.75');
+  path.setAttribute('stroke-width', '1.6');
   path.setAttribute('stroke-linecap', 'round');
   path.setAttribute('stroke-linejoin', 'round');
   svg.appendChild(path);
   parent.appendChild(svg);
-  return svg;
-}
-const CHEVRON_UP = 'M4 10l4-4 4 4';
-const CHEVRON_DOWN = 'M4 6l4 4 4-4';
-const REFRESH = 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3';
-
-const tone = (p) => (p === null ? '' : p >= 85 ? 'bad' : p >= 65 ? 'warn' : '');
-
-/** Progress bar; tone switches to warn/bad near the limit. */
-function UsageProgress(parent) {
-  const el = h('div', 'progress', parent);
-  el.setAttribute('role', 'progressbar');
-  el.setAttribute('aria-valuemin', '0');
-  el.setAttribute('aria-valuemax', '100');
-  el.setAttribute('aria-label', 'Context used');
-  const fill = h('b', null, el);
-  return {
-    el,
-    update(vm) {
-      const p = vm.percentage;
-      const display = p === null ? 'none' : '';
-      if (el.style.display !== display) el.style.display = display;
-      if (p === null) return;
-      const width = `${Math.min(100, p)}%`;
-      if (fill.style.width !== width) fill.style.width = width;
-      setClass(el, `progress ${tone(p)}`.trim());
-      setAttr(el, 'aria-valuenow', String(p));
-    }
-  };
+  return { svg, path };
 }
 
-/** "● HIGH" or "● 100% HIGH" using the engine's confidence as-is. */
-function ConfidenceBadge(parent, withScore = false) {
-  const el = h('span', 'badge', parent);
-  h('i', null, el);
-  const label = h('span', null, el);
-  return {
-    update(vm) {
-      const display = vm.ready === false ? 'none' : ''; // No confidence claim before there is data
-      if (el.style.display !== display) el.style.display = display;
-      setClass(el, `badge ${vm.confidenceLevel}`);
-      setText(label, withScore ? `${vm.confidence}% ${vm.confidenceLevel}` : vm.confidenceLevel);
-      setAttr(el, 'title', `Measurement confidence ${vm.confidence}%`);
-    }
-  };
+function iconButton(parent, d, label) {
+  const b = h('button', 'ib', parent);
+  b.type = 'button';
+  b.setAttribute('aria-label', label);
+  b.dataset.tip = label;
+  return { b, ...icon(b, d) };
 }
 
-/** "GPT-5.6 · Instant" */
-const modelText = (vm) => [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
+/** The single "≈" badge (estimated / unverified / unknown), explained in a tooltip. */
+function approx(parent, tip) {
+  const s = h('span', 'approx', parent, '≈');
+  s.dataset.tip = tip;
+  s.setAttribute('aria-label', tip);
+  s.tabIndex = 0;
+  return s;
+}
+const TAG_TIPS = {
+  ESTIMATED: 'Estimated: not reported by the site',
+  UNKNOWN: 'Not measurable from the page',
+  UNVERIFIED: 'Window from our limits table, not confirmed for this plan'
+};
 
-function ContextSummary(parent, onToggle, onRefresh) {
-  const el = h('div', 'summary', parent);
-  const top = h('div', 'top', el);
-  const pct = h('span', 'pct', top);
-  const pctNum = h('span', 'num', pct);
-  const pctUnit = h('span', 'unit', pct);
-  const confidence = ConfidenceBadge(top);
-  h('span', 'spacer', top);
+/** "28% · resets in 3h 57m" / "5 left · resets in 30d" / "limit reached", or a note before the site reports it. */
+const limitText = (l) => {
+  if (l.note) return l.note;
+  const reset = l.resetIn ? ` · resets in ${l.resetIn}` : '';
+  if (l.key === 'limit') return `limit reached${reset}`;
+  if (l.remaining !== undefined && l.remaining !== null) return `${l.blocked ? 'used up' : `${l.remaining} left`}${reset}`;
+  if (l.percent === null || l.percent === undefined) return 'updates after your next message';
+  return `${l.percent}%${reset}`;
+};
+/** Headline limit: the session, else anything used up, else the allowance closest to running out. */
+const headlineLimit = (limits = []) => limits.find(l => l.key === 'session') || limits.find(l => l.blocked) ||
+  limits.filter(l => typeof l.remaining === 'number').sort((a, b) => a.remaining - b.remaining)[0] || null;
 
-  // Refresh: re-reads the conversation now; spins and is disabled until the pass finishes
-  const refresh = h('button', 'toggle refresh', top);
-  icon(refresh, REFRESH);
-  refresh.setAttribute('aria-label', 'Refresh context data');
-  refresh.title = 'Refresh';
-  refresh.addEventListener('click', async () => {
-    if (refresh.disabled) return;
-    refresh.disabled = true;
-    refresh.classList.add('refreshing');
-    try {
-      await onRefresh();
-    } catch (_) {
-      // The next automatic pass still updates the widget
-    } finally {
-      refresh.disabled = false;
-      refresh.classList.remove('refreshing');
-    }
+/** Collapsible section; closed by default, open state survives updates (DOM is built once). */
+function Section(parent, title) {
+  const el = h('section', 'sec', parent);
+  const head = h('button', 'sec-h', el);
+  head.type = 'button';
+  h('span', null, head, title);
+  icon(head, ICONS.chevron);
+  head.setAttribute('aria-expanded', 'false');
+  const body = h('div', 'sec-b', el);
+  body.hidden = true;
+  head.addEventListener('click', () => {
+    const open = head.getAttribute('aria-expanded') !== 'true';
+    head.setAttribute('aria-expanded', String(open));
+    body.hidden = !open;
   });
-
-  const toggle = h('button', 'toggle chev', top);
-  icon(toggle, CHEVRON_UP); // Details open upward; rotates 180° when open
-  toggle.setAttribute('aria-label', 'Show context details');
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.addEventListener('click', onToggle);
-
-  const progress = UsageProgress(el);
-  const tokens = h('div', 'tokens', el);
-  const used = h('span', null, tokens);
-  const of = h('span', 'of', tokens);
-  const model = h('div', 'model', el);
-  return {
-    el,
-    setExpanded(open) {
-      setAttr(toggle, 'aria-expanded', String(open));
-      setAttr(toggle, 'aria-label', open ? 'Hide context details' : 'Show context details');
-    },
-    update(vm) {
-      if (!vm.ready) {
-        setText(pctNum, '…');
-        setText(pctUnit, '');
-      } else if (vm.percentage === null) {
-        setText(pctNum, fmtK(vm.usedTokens));
-        setText(pctUnit, 'TOKENS');
-      } else {
-        setText(pctNum, `${fmtPct(vm.percentage, vm.usedTokens)}%`);
-        setText(pctUnit, 'USED');
-      }
-      setClass(pct, `pct ${vm.ready ? tone(vm.percentage) : ''}`.trim());
-      confidence.update(vm);
-      progress.update(vm);
-      if (!vm.ready) {
-        setText(used, 'Reading conversation…');
-        setText(of, '');
-      } else if (vm.contextLimit) {
-        setText(used, fmtK(vm.usedTokens));
-        setText(of, ` / ${fmtK(vm.contextLimit)} tokens`);
-      } else {
-        setText(used, fmtK(vm.usedTokens));
-        setText(of, ` / window unknown${vm.plan ? '' : ' (plan not detected)'}`);
-      }
-      setText(model, modelText(vm));
-      setAttr(model, 'title', `${vm.provider}: ${model.textContent}`);
-    }
-  };
+  return { el, body };
 }
 
-/** Label/value rows (optionally tagged). Rebuilt only when the rows actually change. */
+/** Label/value rows; rebuilt only when the rows change. */
 function RowList(parent) {
   const el = h('div', null, parent);
   let signature = null;
@@ -5239,200 +5237,270 @@ function RowList(parent) {
         const row = h('div', 'row', el);
         h('span', 'k', row, r.label);
         const v = h('span', 'v', row, r.value);
-        if (r.tag) h('span', `tag ${r.tag}`, v, r.tag);
+        if (r.tip) approx(v, r.tip);
       }
     }
   };
 }
 
-/** Every confidence reason / evidence line, in engine order. Rebuilt only when the list changes. */
-function EvidenceList(parent) {
-  const el = h('ul', 'evidence', parent);
-  let signature = null;
-  return {
-    update(vm) {
-      const next = JSON.stringify(vm.evidence);
-      if (next === signature) return;
-      signature = next;
-      el.textContent = '';
-      for (const e of vm.evidence) {
-        const li = h('li', null, el);
-        h('span', e.ok ? 'y' : 'n', li, e.ok ? '✓' : '!');
-        h('span', null, li, e.text);
-      }
-    }
-  };
-}
-
-/** One collapsible entry per hidden item; text is assigned as text only. Rebuilt only when items change. */
-function HiddenList(parent) {
-  const el = h('div', null, parent);
+/**
+ * Hidden context as one stacked bar (counted items, exact tokens on hover) plus a legend. Each legend
+ * entry opens that item's text. Items not counted are listed but left out of the bar.
+ */
+function HiddenStack(parent) {
+  const bar = h('div', 'stack', parent);
+  bar.setAttribute('role', 'img');
+  const legend = h('div', null, parent);
   let signature = null;
   return {
     update(items) {
       const next = JSON.stringify(items);
       if (next === signature) return;
       signature = next;
-      el.textContent = '';
-      for (const it of items) {
-        const d = h('details', 'hid', el);
-        const s = h('summary', null, d);
-        h('span', null, s, it.label);
-        h('span', 'k', s, `${it.note === 'estimate' ? '≈' : ''}${it.tokens.toLocaleString()} tokens${it.note === 'not counted' ? ' · not counted' : ''}`);
-        h('pre', null, d, it.text);
-      }
+      const open = new Set([...legend.querySelectorAll('.leg[aria-expanded="true"]')].map(b => b.dataset.key));
+      bar.textContent = '';
+      legend.textContent = '';
+      const counted = items.filter(i => i.note !== 'not counted' && i.tokens > 0);
+      const total = counted.reduce((n, i) => n + i.tokens, 0);
+      bar.setAttribute('aria-label', `Hidden context: ${total.toLocaleString()} tokens in ${counted.length} parts`);
+      items.forEach((it, idx) => {
+        const color = `var(--s${(idx % 8) + 1})`;
+        const est = it.note === 'estimate';
+        const off = it.note === 'not counted';
+        if (!off && it.tokens > 0) {
+          const seg = h('i', null, bar);
+          seg.style.flex = `${it.tokens} 0 0`;
+          seg.style.background = color;
+          seg.dataset.tip = `${it.label}: ${est ? '≈' : ''}${it.tokens.toLocaleString()} tokens`;
+        }
+        const key = `${idx}:${it.label}`;
+        const row = h('button', 'leg', legend);
+        row.type = 'button';
+        row.dataset.key = key;
+        const sw = h('span', `sw${off ? ' off' : ''}`, row);
+        sw.style.background = color;
+        h('span', 'l', row, it.label);
+        h('span', 't', row, `${est ? '≈' : ''}${it.tokens.toLocaleString()}${off ? ' · not counted' : ''}`);
+        const pre = h('pre', null, legend, it.text || '(no text)');
+        const isOpen = open.has(key);
+        row.setAttribute('aria-expanded', String(isOpen));
+        pre.hidden = !isOpen;
+        row.addEventListener('click', () => {
+          const o = row.getAttribute('aria-expanded') !== 'true';
+          row.setAttribute('aria-expanded', String(o));
+          pre.hidden = !o;
+        });
+      });
     }
   };
 }
-
-function ContextDetails(parent, getDiagnostics) {
-  const el = h('div', 'details', parent);
-  const section = (title) => {
-    const s = h('section', 'section', el);
-    h('div', 'h', s, title);
-    return s;
-  };
-
-  // Breakdown (top): what the used tokens are made of, then the exact totals.
-  // The percentage and bar are in the summary only, so they are not repeated here.
-  const brk = section('Breakdown');
-  const parts = RowList(brk);
-  h('div', 'divider', brk);
-  const totals = RowList(brk);
-
-  // Hidden context: what the model gets that the page never shows (shown only when some was read)
-  const hid = section('Hidden context');
-  const hiddenList = HiddenList(hid);
-  h('div', 'fine', hid, 'Read from ChatGPT\'s own API, except the system prompt (an estimate). Chat-history summaries are not exposed.');
-
-  // Confidence: native dropdown, closed by default; open state survives updates (DOM is built once)
-  const conf = h('details', 'section conf', el);
-  const confHead = h('summary', 'h', conf);
-  h('span', null, confHead, 'Confidence');
-  const badge = ConfidenceBadge(confHead, true);
-  icon(confHead, CHEVRON_DOWN);
-  const evidence = EvidenceList(conf);
-
-  // Diagnostics
-  const diag = section('Diagnostics');
-  const warn = h('div', 'warn-text', diag);
-  const copy = h('button', 'btn', diag, 'Copy diagnostics');
-  h('div', 'fine', diag, 'Counts visible text, hidden context the API exposes, and an estimate of the system prompt.');
-  copy.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(getDiagnostics() || { note: 'no state yet' }, null, 2));
-      copy.textContent = 'Copied ✓';
-    } catch (_) {
-      copy.textContent = 'Copy failed';
-    }
-    setTimeout(() => { copy.textContent = 'Copy diagnostics'; }, 1500);
-  });
-
-  // Model (bottom)
-  const mdl = section('Model');
-  const modelRows = RowList(mdl);
-
-  return {
-    el,
-    update(vm) {
-      // While loading, show dashes rather than zeros
-      const tokens = (n) => (vm.ready === false || n === null ? '—' : `${n.toLocaleString()} tokens`);
-      parts.update(vm.breakdown.map(b => ({ label: b.label, value: b.value, tag: b.tag || null })));
-      totals.update([
-        { label: 'Used', value: tokens(vm.usedTokens), tag: null },
-        { label: 'Remaining', value: tokens(vm.remainingTokens), tag: null },
-        { label: 'Window', value: vm.contextLimit ? `${vm.contextLimit.toLocaleString()} tokens` : 'Unknown', tag: vm.limitStatus || null }
-      ]);
-
-      const items = vm.hiddenItems || [];
-      const hidDisplay = items.length ? '' : 'none';
-      if (hid.style.display !== hidDisplay) hid.style.display = hidDisplay;
-      hiddenList.update(items);
-
-      badge.update(vm);
-      evidence.update(vm);
-
-      setText(warn, vm.warning || '');
-
-      modelRows.update([
-        { label: 'Provider', value: vm.provider, tag: null },
-        { label: 'Model', value: modelText(vm), tag: null },
-        { label: 'Plan', value: vm.plan || 'Unknown', tag: null },
-        { label: 'Source', value: vm.source || '—', tag: null },
-        { label: 'Turns', value: vm.ready === false ? '—' : String(vm.turns), tag: null }
-      ]);
-    }
-  };
-}
-
-const WIDTH = 300; // One width, collapsed or open: expanding never shifts the card sideways
-const GAP = 16;
 
 class ContextWidget {
   /**
    * @param {{ provider?: string, findInput?: () => Element|null, onRefresh?: () => any, getDiagnostics?: () => Object }} [adapter]
-   *   Provider adapter: display name, a way to find the chat input, a refresh action and the
-   *   diagnostics source. Nothing else is site-specific.
+   *   `findInput` is accepted for compatibility; the widget no longer positions itself by the chat input.
    */
   constructor(adapter = {}) {
     this.adapter = {
       provider: adapter.provider || 'AI',
-      findInput: adapter.findInput || (() => null),
       onRefresh: adapter.onRefresh || (() => {}),
-      // Copy diagnostics source; the provider can check it still matches what is on screen
       getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
     };
     this.hostElement = null;
     this.shadowRoot = null;
     this.isExpanded = false;
     this.isVisible = true;
+    this.theme = 'auto';
+    this.pos = { ...DEFAULT_POS };
     this.latestState = null;
     this.parts = null;
-    this._raf = null;
-    this._observedInput = null;
-    this._resizeObserver = null;
+    this._shownTokens = null;
+    this._countRaf = null;
+    this._posRaf = null;
+    this._drag = null;
+    this._justDragged = false;
+    this._storeKey = typeof location !== 'undefined' ? `ui:${location.hostname}` : 'ui';
   }
 
   mount() {
     if (this.hostElement || typeof document === 'undefined') return;
     document.getElementById('chatgpt-context-monitor-host')?.remove();
-
-    this.hostElement = document.createElement('div');
-    this.hostElement.id = 'chatgpt-context-monitor-host';
-    // Own stacking/paint context so the page's layout and styles cannot leak in or be disturbed
-    this.hostElement.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483000;contain:layout style;';
-    this.shadowRoot = this.hostElement.attachShadow({ mode: 'open' });
+    const host = this.hostElement = document.createElement('div');
+    host.id = 'chatgpt-context-monitor-host';
+    // Fixed at the origin, moved only with transform (no layout work while dragging)
+    host.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483000;contain:layout style;will-change:transform;';
+    this.shadowRoot = host.attachShadow({ mode: 'open' });
     h('style', null, this.shadowRoot, STYLES);
-
     const root = h('div', 'root', this.shadowRoot);
-    const card = h('div', 'card', root);
-    const details = ContextDetails(card, () => this.adapter.getDiagnostics());
-    const summary = ContextSummary(card, () => {
-      this.isExpanded = !this.isExpanded;
-      this.render();
-    }, () => this.adapter.onRefresh());
-    this.parts = { root, card, details, summary };
+    this.parts = { root, ...this._build(root) };
+    (document.body || document.documentElement).appendChild(host);
 
-    (document.body || document.documentElement).appendChild(this.hostElement);
     window.addEventListener('resize', () => this._schedulePosition());
-    if (typeof ResizeObserver !== 'undefined') {
-      // The chat input grows while typing; keep clear of it without waiting for a data update
-      this._resizeObserver = new ResizeObserver(() => this._schedulePosition());
-    }
-    // Follow the site's light/dark switch immediately (sites flip a class/attribute on <html>/<body>)
-    const themeWatch = new MutationObserver(() => this._applyTheme());
-    for (const node of [document.documentElement, document.body].filter(Boolean)) {
-      themeWatch.observe(node, { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme'] });
-    }
     window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => this._applyTheme());
+    // Alt+T shows/hides the panel on any page state
+    window.addEventListener('keydown', (e) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyT') {
+        e.preventDefault();
+        this.isVisible = !this.isVisible;
+        this.render();
+      }
+    }, true);
+    this._loadPrefs();
     this.render();
   }
 
-  /** Light/dark from the page itself; writes only when it flips. */
-  _applyTheme() {
-    if (!this.parts) return;
-    const { root } = this.parts;
-    setClass(root, ['root', this._isDarkPage() ? 'dark' : '', this.isExpanded ? 'open' : ''].filter(Boolean).join(' '));
+  _build(root) {
+    const provider = this.adapter.provider;
+
+    // Pill
+    const pill = h('button', 'pill', root);
+    pill.type = 'button';
+    pill.setAttribute('aria-expanded', 'false');
+    const pillDot = h('span', 'dot', pill);
+    const pillNum = h('span', 'num', pill);
+    h('span', 'sep', pill, '•');
+    const pillLvl = h('span', 'lvl', pill);
+    pill.addEventListener('click', () => {
+      if (this._justDragged) { this._justDragged = false; return; }
+      this._setExpanded(true);
+    });
+
+    // Panel
+    const panel = h('div', 'panel', root);
+    panel.setAttribute('role', 'region');
+    panel.setAttribute('aria-label', `${provider} context usage`);
+    const head = h('div', 'head', panel);
+    head.tabIndex = 0;
+    head.setAttribute('aria-label', 'Move panel: drag, or use arrow keys. Double-click to reset position.');
+    const title = h('div', 'title', head, 'Context ');
+    h('span', null, title, `· ${provider}`);
+    const themeBtn = iconButton(head, ICONS.auto, 'Theme: auto');
+    const collapseBtn = iconButton(head, ICONS.collapse, 'Collapse');
+    const closeBtn = iconButton(head, ICONS.close, 'Close (Alt+T to reopen)');
+    themeBtn.b.addEventListener('click', () => {
+      this.theme = THEMES[(THEMES.indexOf(this.theme) + 1) % THEMES.length];
+      this._applyTheme();
+      this._savePrefs();
+    });
+    collapseBtn.b.addEventListener('click', () => this._setExpanded(false));
+    closeBtn.b.addEventListener('click', () => { this.isVisible = false; this.render(); });
+
+    const body = h('div', 'body', panel);
+    const hero = h('div', 'hero', body);
+    const top = h('div', 'top', hero);
+    const big = h('span', 'big', top, '—');
+    h('span', 'unit', top, 'tokens');
+    const pct = h('span', 'pct', top);
+    const bar = h('div', 'bar', hero);
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-label', 'Context window used');
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    const fill = h('b', null, bar);
+    const meta = h('div', 'meta', hero);
+    const windowText = h('span', null, meta);
+    const windowBadge = approx(meta, 'Window size is not known for this model/plan');
+    const modelText = h('span', 'model', meta);
+    const limitLine = h('div', 'line', hero);
+    const warnLine = h('div', 'line warn', hero);
+    warnLine.setAttribute('role', 'status');
+
+    const stats = h('div', 'stats', body);
+    const stat = (label) => {
+      const c = h('div', 'stat', stats);
+      const k = h('div', 'k', c, label);
+      return { k, v: h('div', 'v', c, '—') };
+    };
+    const sUser = stat('You');
+    const sAsst = stat(`${provider} + tools`);
+    const sHidden = stat('Hidden');
+
+    const brk = Section(body, 'Breakdown');
+    const brkRows = RowList(brk.body);
+    h('div', 'divider', brk.body);
+    const totals = RowList(brk.body);
+
+    const hid = Section(body, 'Hidden context');
+    const hidStack = HiddenStack(hid.body);
+    h('div', 'fine', hid.body, `Read from ${provider}'s own data. ≈ marks estimates; anything else ${provider} adds on its servers is not visible.`);
+
+    const lim = Section(body, 'Usage limits');
+    const limRows = RowList(lim.body);
+
+    const diag = Section(body, 'Diagnostics');
+    const diagWarn = h('div', 'line warn', diag.body);
+    const diagRows = RowList(diag.body);
+    const evidence = h('ul', 'evidence', diag.body);
+    h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not.');
+
+    const foot = h('div', 'foot', panel);
+    const conf = h('div', 'conf', foot);
+    const confDot = h('span', 'dot', conf);
+    const confText = h('span', null, conf);
+    const copyBtn = iconButton(foot, ICONS.copy, 'Copy diagnostics');
+    const refreshBtn = iconButton(foot, ICONS.refresh, 'Refresh');
+    copyBtn.b.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(this.adapter.getDiagnostics() || { note: 'no state yet' }, null, 2));
+        this._toast('Diagnostics copied');
+      } catch (_) {
+        this._toast('Copy failed');
+      }
+    });
+    refreshBtn.b.addEventListener('click', async () => {
+      if (refreshBtn.b.disabled) return;
+      refreshBtn.b.disabled = true;
+      refreshBtn.b.classList.add('spin');
+      try { await this.adapter.onRefresh(); } catch (_) { /* the next automatic pass still updates */ } finally {
+        refreshBtn.b.disabled = false;
+        refreshBtn.b.classList.remove('spin');
+      }
+    });
+
+    const toast = h('div', 'toast', root);
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    const tip = h('div', 'tip', root);
+    tip.setAttribute('aria-hidden', 'true');
+
+    // Tooltips for anything with data-tip (bar segments, badges, icon buttons)
+    root.addEventListener('pointerover', (e) => {
+      const t = e.target.closest?.('[data-tip]');
+      if (t && !this._drag?.moved) this._showTip(t);
+    });
+    root.addEventListener('pointerout', (e) => { if (e.target.closest?.('[data-tip]')) tip.classList.remove('show'); });
+    root.addEventListener('focusin', (e) => { if (e.target.dataset?.tip) this._showTip(e.target); });
+    root.addEventListener('focusout', () => tip.classList.remove('show'));
+
+    // Drag from the pill or the header (never from a header button)
+    for (const handle of [pill, head]) {
+      handle.addEventListener('pointerdown', (e) => this._dragStart(e, handle));
+      handle.addEventListener('pointermove', (e) => this._dragMove(e));
+      handle.addEventListener('pointerup', (e) => this._dragEnd(e));
+      handle.addEventListener('pointercancel', (e) => this._dragEnd(e));
+    }
+    head.addEventListener('dblclick', (e) => {
+      if (e.target.closest('button')) return;
+      this.pos = { ...DEFAULT_POS };
+      this._position();
+      this._savePrefs();
+    });
+    head.addEventListener('keydown', (e) => {
+      const step = e.shiftKey ? 40 : 10;
+      const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+      if (!d || e.target !== head) return;
+      e.preventDefault();
+      const { x, y } = this._xy();
+      this._settle(x + d[0], y + d[1], false);
+    });
+    root.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.isExpanded) { e.stopPropagation(); this._setExpanded(false); pill.focus(); }
+    });
+
+    return {
+      pill, pillDot, pillNum, pillLvl, panel, head, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
+    };
   }
 
   /** @param {Object} viewState Output of toWidgetState() */
@@ -5448,117 +5516,290 @@ class ContextWidget {
     if (!this.hostElement || !this.parts) return;
     const display = this.isVisible ? '' : 'none';
     if (this.hostElement.style.display !== display) this.hostElement.style.display = display;
-    const { details, summary } = this.parts;
+    const p = this.parts;
+    this._applyTheme();
+    setClass(p.root, `root${this._isDark() ? '' : ' light'}${this.isExpanded ? ' open' : ''}${this._drag?.moved ? ' dragging' : ''}`);
+    show(p.pill, !this.isExpanded);
+    show(p.panel, this.isExpanded);
+    setAttr(p.pill, 'aria-expanded', String(this.isExpanded));
 
-    // Theme switches are caught by the attribute observer / media listener; the computed-style check
-    // (a style recalculation on a busy page) runs here at most every 2 s as a safety net
-    const t = Date.now();
-    if (!this._themeCheckedAt || t - this._themeCheckedAt > 2000) {
-      this._themeCheckedAt = t;
-      this._applyTheme();
-    } else {
-      setClass(this.parts.root, this.parts.root.className.replace(/\s*\bopen\b/, '') + (this.isExpanded ? ' open' : ''));
-    }
-    summary.setExpanded(this.isExpanded);
+    const vm = this.latestState || { ready: false, usedTokens: 0, percentage: null, evidence: [], breakdown: [], hiddenItems: [], limits: [], confidenceLevel: 'LOW', confidence: 0, provider: this.adapter.provider, model: 'Detecting…' };
+    const lvl = vm.ready === false ? 'LOW' : vm.confidenceLevel;
+    setClass(p.pillDot, `dot ${lvl}`);
+    setText(p.pillNum, vm.ready === false ? '…' : fmtK(vm.usedTokens));
+    setText(p.pillLvl, vm.ready === false ? 'Reading' : levelName(vm.confidenceLevel));
+    setAttr(p.pill, 'aria-label', vm.ready === false
+      ? 'Context usage: reading conversation. Expand panel.'
+      : `Context usage ${fmtInt(vm.usedTokens)} tokens${vm.percentage !== null ? `, ${vm.percentage}% of window` : ''}, confidence ${levelName(vm.confidenceLevel)}. Expand panel.`);
 
-    const vm = this.latestState || { ready: false, percentage: null, usedTokens: 0, evidence: [], breakdown: [], confidenceLevel: 'LOW', confidence: 0, provider: this.adapter.provider, model: 'Detecting…' };
-    summary.update(vm);
-    if (this.isExpanded) details.update(vm);
-
-    // Measuring the chat input right after our DOM writes would force a layout on every update;
-    // one measurement per frame is enough (the first one runs right away so the card never flashes)
-    if (this._positioned) this._schedulePosition();
-    else { this._positioned = true; this._position(); }
+    if (this.isExpanded) this._renderPanel(vm);
+    this._schedulePosition();
   }
 
-  /** Theme from the host page's actual background, so it works on any provider. */
-  _isDarkPage() {
-    try {
-      for (const node of [document.body, document.documentElement]) {
-        const m = node && getComputedStyle(node).backgroundColor.match(/\d+(\.\d+)?/g);
-        if (m && (m.length < 4 || Number(m[3]) > 0)) {
-          const [r, g, b] = m.map(Number);
-          return (0.299 * r + 0.587 * g + 0.114 * b) < 128;
-        }
+  _renderPanel(vm) {
+    const p = this.parts;
+    const ready = vm.ready !== false;
+    this._countTo(ready ? vm.usedTokens : null);
+    setText(p.pct, ready && vm.percentage !== null ? `${vm.percentage === 0 && vm.usedTokens > 0 ? '<0.1' : vm.percentage}%` : '');
+    const known = ready && vm.percentage !== null;
+    setClass(p.bar, `bar ${known ? tone(vm.percentage) : 'unknown'}`.trim());
+    const width = known ? `${Math.min(100, vm.percentage)}%` : '';
+    if (p.fill.style.width !== width) p.fill.style.width = width;
+    if (known) setAttr(p.bar, 'aria-valuenow', String(vm.percentage)); else p.bar.removeAttribute('aria-valuenow');
+    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window` : 'window unknown');
+    show(p.windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
+    p.windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
+    const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
+    setText(p.modelText, model);
+    setAttr(p.modelText, 'title', `${vm.provider}: ${model}`);
+    const head = headlineLimit(vm.limits);
+    setText(p.limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
+    setText(p.warnLine, vm.warning || '');
+
+    const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
+    setText(p.sUser.v, ready ? fmtK(st.user) : '—');
+    setText(p.sAsst.v, ready ? fmtK(st.assistant) : '—');
+    setText(p.sHidden.v, ready ? fmtK(st.hidden) : '—');
+
+    const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
+    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? TAG_TIPS[b.tag] || b.tag : null })));
+    p.totals.update([
+      { label: 'Used', value: tokens(vm.usedTokens) },
+      { label: 'Remaining', value: tokens(vm.remainingTokens) },
+      { label: 'Window', value: vm.contextLimit ? vm.contextLimit.toLocaleString() : 'Unknown', tip: vm.contextLimit && vm.limitStatus === 'VERIFIED' ? null : (vm.contextLimit ? TAG_TIPS.UNVERIFIED : TAG_TIPS.UNKNOWN) }
+    ]);
+
+    const items = vm.hiddenItems || [];
+    show(p.hid.el, items.length > 0);
+    p.hidStack.update(items);
+    show(p.lim.el, (vm.limits || []).length > 0);
+    p.limRows.update((vm.limits || []).map(l => ({ label: l.label, value: limitText(l) })));
+
+    setText(p.diagWarn, vm.warning || '');
+    p.diagRows.update([
+      { label: 'Provider', value: vm.provider },
+      { label: 'Model', value: model || '—' },
+      { label: 'Plan', value: vm.plan || 'Unknown' },
+      { label: 'Source', value: vm.source || '—' },
+      { label: 'Turns', value: ready ? String(vm.turns) : '—' }
+    ]);
+    const evSig = JSON.stringify(vm.evidence || []);
+    if (p.evidence.dataset.sig !== evSig) {
+      p.evidence.dataset.sig = evSig;
+      p.evidence.textContent = '';
+      for (const e of vm.evidence || []) {
+        const li = h('li', null, p.evidence);
+        h('span', e.ok ? 'y' : 'n', li, e.ok ? '✓' : '!');
+        h('span', null, li, e.text);
       }
-    } catch (_) {}
-    return Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    setClass(p.confDot, `dot ${ready ? vm.confidenceLevel : 'LOW'}`);
+    setText(p.confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
+  }
+
+  /** Token count animates from the last shown value (instant with reduced motion). */
+  _countTo(target) {
+    const el = this.parts.big;
+    if (this._countRaf) cancelAnimationFrame(this._countRaf);
+    if (target === null) { setText(el, '—'); this._shownTokens = null; return; }
+    const from = this._shownTokens;
+    if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
+      this._shownTokens = target;
+      setText(el, fmtInt(target));
+      return;
+    }
+    const start = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - start) / 400);
+      const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
+      setText(el, fmtInt(v));
+      this._shownTokens = k < 1 ? v : target;
+      this._countRaf = k < 1 ? requestAnimationFrame(step) : null;
+    };
+    this._countRaf = requestAnimationFrame(step);
+  }
+
+  _setExpanded(open) {
+    this.isExpanded = open;
+    this.render();
+    this._savePrefs();
+    if (open) this.parts.head.focus({ preventScroll: true });
+  }
+
+  _toast(text) {
+    const t = this.parts.toast;
+    t.textContent = text;
+    t.classList.add('show');
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+  }
+
+  _showTip(target) {
+    const { tip, root } = this.parts;
+    tip.textContent = target.dataset.tip;
+    const r = target.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    tip.classList.add('show');
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    let left = r.left - rr.left + r.width / 2 - tw / 2;
+    left = Math.max(4, Math.min(left, rr.width - tw - 4));
+    let top = r.top - rr.top - th - 6;
+    if (r.top - th - 6 < 0) top = r.bottom - rr.top + 6; // No room above: show below
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  // ------------------------------------------------------------------ theme
+
+  _isDark() {
+    if (this.theme === 'dark') return true;
+    if (this.theme === 'light') return false;
+    return Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+  }
+
+  _applyTheme() {
+    if (!this.parts) return;
+    const { root, themeBtn } = this.parts;
+    root.classList.toggle('light', !this._isDark());
+    const label = `Theme: ${this.theme}`;
+    if (themeBtn.b.getAttribute('aria-label') !== label) {
+      themeBtn.b.setAttribute('aria-label', label);
+      themeBtn.b.dataset.tip = label;
+      themeBtn.path.setAttribute('d', ICONS[this.theme]);
+    }
+  }
+
+  // ------------------------------------------------------------------ drag & position
+
+  _dragStart(e, handle) {
+    if (e.button !== 0 || (handle === this.parts.head && e.target.closest('button'))) return;
+    const { x, y } = this._xy();
+    this._drag = { id: e.pointerId, handle, sx: e.clientX, sy: e.clientY, x0: x, y0: y, x, y, moved: false };
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+  }
+
+  _dragMove(e) {
+    const d = this._drag;
+    if (!d || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.sx;
+    const dy = e.clientY - d.sy;
+    if (!d.moved) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // Still a click
+      d.moved = true;
+      this.parts.tip.classList.remove('show');
+      this.parts.root.classList.add('dragging');
+      document.documentElement.style.userSelect = 'none';
+    }
+    e.preventDefault();
+    d.x = d.x0 + dx;
+    d.y = d.y0 + dy;
+    if (!this._posRaf) this._posRaf = requestAnimationFrame(() => { this._posRaf = null; this._applyXY(d.x, d.y); });
+  }
+
+  _dragEnd(e) {
+    const d = this._drag;
+    if (!d || e.pointerId !== d.id) return;
+    try { d.handle.releasePointerCapture(d.id); } catch (_) {}
+    this._drag = null;
+    if (!d.moved) return;
+    this._justDragged = d.handle === this.parts.pill; // Swallow the click that follows a pill drag
+    this.parts.root.classList.remove('dragging');
+    document.documentElement.style.userSelect = '';
+    this._settle(d.x, d.y, !e.altKey && e.type !== 'pointercancel', true);
   }
 
   /**
-   * Finds the visual composer box around the adapter's input: the outermost ancestor that is
-   * still input-sized (short and not full-width). Works without knowing the site's markup.
+   * Stores a position given as top-left x/y: anchored to the nearer side, optionally snapped to that
+   * side (and to a top/bottom corner when close), then applied and saved.
    */
-  _composerRect() {
-    const input = this.adapter.findInput();
-    if (!input || !input.getBoundingClientRect) return null;
-    if (this._resizeObserver && input !== this._observedInput) {
-      if (this._observedInput) this._resizeObserver.unobserve(this._observedInput);
-      this._resizeObserver.observe(input);
-      this._observedInput = input;
-    }
-    let box = input;
-    let rect = input.getBoundingClientRect();
-    for (let el = input.parentElement; el && el !== document.body; el = el.parentElement) {
-      const r = el.getBoundingClientRect();
-      if (r.width === 0 || r.height === 0) continue; // display: contents wrappers
-      if (r.height > 260 || r.width >= window.innerWidth - 4) break; // page-level wrapper, not the composer
-      box = el;
-      rect = r;
-    }
-    return box && rect.width > 0 ? rect : null;
-  }
-
-  /** Coalesces resize bursts into one layout pass per frame. */
-  _schedulePosition() {
-    if (this._raf) return;
-    const run = () => { this._raf = null; this._position(); };
-    this._raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(run) : setTimeout(run, 16);
-  }
-
-  /**
-   * Beside the composer when there is room, otherwise right-aligned just above it; corner fallback.
-   * The placement depends only on the page layout (never on open/closed), and styles are written only
-   * when they change, so updates and expanding never make the card jump.
-   */
-  _position() {
-    if (!this.hostElement || !this.parts) return;
+  _settle(x, y, snap, animate = false) {
+    const { w, h: ht } = this._size();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const width = Math.max(200, Math.min(WIDTH, vw - 24));
-    const r = this._composerRect();
-    let left = 'auto';
-    let right = '12px';
-    let bottom = GAP;
-    let placement = 'corner';
-
-    if (r && r.top > 80 && vw - r.right - 2 * GAP >= width) {
-      placement = 'beside';
-      left = `${Math.round(r.right + GAP)}px`;
-      right = 'auto';
-      bottom = Math.max(8, Math.round(vh - r.bottom));
-    } else if (r && r.top > 80) {
-      placement = 'above';
-      right = `${Math.max(12, Math.round(vw - r.right))}px`;
-      bottom = Math.max(8, Math.round(vh - r.top + 8));
+    const side = x + w / 2 < vw / 2 ? 'left' : 'right';
+    let dx = side === 'left' ? x : vw - w - x;
+    if (snap) {
+      dx = 16;
+      if (Math.abs(y - TOP_SAFE) < SNAP_Y) y = TOP_SAFE;
+      else if (Math.abs(vh - ht - MARGIN - y) < SNAP_Y) y = vh - ht - MARGIN;
     }
+    // Store what is shown: the clamped position, so collapsing/reloading never jumps
+    dx = Math.max(MARGIN, Math.min(dx, vw - w - MARGIN));
+    y = Math.max(MARGIN, Math.min(y, vh - ht - MARGIN));
+    this.pos = { side, dx, y };
+    if (animate && !reducedMotion()) {
+      this.hostElement.style.transition = 'transform .15s ease';
+      setTimeout(() => { if (this.hostElement) this.hostElement.style.transition = ''; }, 170);
+    }
+    this._position();
+    this._savePrefs();
+  }
 
-    const s = this.hostElement.style;
-    if (s.left !== left) s.left = left;
-    if (s.right !== right) s.right = right;
-    if (s.bottom !== `${bottom}px`) s.bottom = `${bottom}px`;
-    const w = `${width}px`;
-    if (this.parts.root.style.width !== w) this.parts.root.style.width = w;
-    if (this.hostElement.dataset.placement !== placement) this.hostElement.dataset.placement = placement;
+  _size() {
+    const el = this.isExpanded ? this.parts.panel : this.parts.pill;
+    const r = el.getBoundingClientRect();
+    return { w: r.width || (this.isExpanded ? 320 : 150), h: r.height || 32 };
+  }
 
-    // Details open upward above the summary; keep the whole card inside the viewport
-    const summaryHeight = this.parts.summary.el.getBoundingClientRect().height || 90;
-    const max = `${Math.max(120, vh - bottom - summaryHeight - 24)}px`;
-    if (this.parts.root.style.getPropertyValue('--details-max') !== max) this.parts.root.style.setProperty('--details-max', max);
+  /** Current top-left from the stored side-anchored position. */
+  _xy() {
+    const { w } = this._size();
+    const x = this.pos.side === 'left' ? this.pos.dx : window.innerWidth - w - this.pos.dx;
+    return { x, y: this.pos.y };
+  }
+
+  _applyXY(x, y) {
+    const { w, h: ht } = this._size();
+    const cx = Math.round(Math.max(MARGIN, Math.min(x, window.innerWidth - w - MARGIN)));
+    const cy = Math.round(Math.max(MARGIN, Math.min(y, window.innerHeight - ht - MARGIN)));
+    const t = `translate3d(${cx}px, ${cy}px, 0)`;
+    if (this.hostElement.style.transform !== t) this.hostElement.style.transform = t;
+  }
+
+  _position() {
+    if (!this.hostElement || !this.parts || this._drag?.moved) return;
+    const { x, y } = this._xy();
+    this._applyXY(x, y);
+  }
+
+  /** One layout pass per frame for resizes and content changes. */
+  _schedulePosition() {
+    if (this._posRaf || typeof requestAnimationFrame !== 'function') return this._position();
+    this._posRaf = requestAnimationFrame(() => { this._posRaf = null; this._position(); });
+  }
+
+  // ------------------------------------------------------------------ preferences
+
+  _storage() {
+    try { return typeof chrome !== 'undefined' ? chrome.storage?.local || null : null; } catch (_) { return null; }
+  }
+
+  _loadPrefs() {
+    const store = this._storage();
+    if (!store) return;
+    try {
+      store.get(this._storeKey).then((r) => {
+        const s = r?.[this._storeKey];
+        if (!s || typeof s !== 'object') return;
+        if (s.pos && ['left', 'right'].includes(s.pos.side) && Number.isFinite(s.pos.dx) && Number.isFinite(s.pos.y)) this.pos = s.pos;
+        if (THEMES.includes(s.theme)) this.theme = s.theme;
+        this.isExpanded = Boolean(s.expanded);
+        this.render();
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  _savePrefs() {
+    const store = this._storage();
+    if (!store) return;
+    clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme } }).catch(() => {}); } catch (_) {}
+    }, 200);
   }
 
   unmount() {
-    this._resizeObserver?.disconnect();
     this.hostElement?.remove();
     this.hostElement = null;
     this.shadowRoot = null;
@@ -5862,6 +6103,35 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
 const round1 = (n) => Math.round(n * 10) / 10;
 // Approximate size of ChatGPT's server-side system prompt (not readable from the client)
 const SYSTEM_PROMPT_ESTIMATE = 2500;
+
+const FEATURE_NAMES = {
+  deep_research: 'Deep research', reason: 'Thinking', image_gen: 'Image generation',
+  file_upload: 'File uploads', paste_text_to_file: 'Paste as file'
+};
+const featureLabel = (f) => FEATURE_NAMES[f] || f.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+
+/**
+ * ChatGPT plan allowances (from conversation/init) as widget limits: remaining count + reset time.
+ * Entries past their reset time are dropped (the count is stale until ChatGPT reports again).
+ * @param {{ limitsProgress?: Array, blocked?: string[], modelLimits?: Array }|null} raw
+ * @returns {Array<{ key: string, label: string, remaining: number|null, blocked: boolean, resetsAt: number|null }>}
+ */
+function chatgptLimits(raw, now = Date.now()) {
+  if (!raw) return [];
+  const blocked = new Set(raw.blocked || []);
+  const at = (iso) => (iso ? Date.parse(iso) || null : null);
+  const out = [];
+  for (const m of raw.modelLimits || []) {
+    if (m.model) out.push({ key: `model:${m.model}`, label: `Messages · ${m.model}`, remaining: m.remaining, blocked: m.remaining === 0, resetsAt: at(m.resetAfter) });
+  }
+  for (const l of raw.limitsProgress || []) {
+    if (l.feature) out.push({ key: l.feature, label: featureLabel(l.feature), remaining: l.remaining, blocked: blocked.has(l.feature) || l.remaining === 0, resetsAt: at(l.resetAfter) });
+  }
+  for (const f of blocked) {
+    if (!out.some(l => l.key === f)) out.push({ key: f, label: featureLabel(f), remaining: 0, blocked: true, resetsAt: null });
+  }
+  return out.filter(l => !l.resetsAt || l.resetsAt > now);
+}
 
 /**
  * Rolling timing samples (last `size` per metric) for the performance section of diagnostics.
@@ -6498,6 +6768,8 @@ class ContentScriptCoordinator {
       contextState.observables.plan = winningPlan;
       contextState.observables.hiddenMessagesExcluded = normalized?.hiddenMessages || 0;
       contextState.observables.awaitingData = awaitingData;
+      // Plan feature allowances ChatGPT reported (no message percentage exists on ChatGPT)
+      contextState.limits = chatgptLimits(this.requestObserver.getObservedLimits());
       // Measured tokens are a lower bound when turns may be missing (API unavailable for an existing
       // conversation). OpenAI's own system prompt is never exposed, so the total stays partial.
       contextState.completeness.isLowerBound = !conversationComplete;
@@ -6824,6 +7096,29 @@ function topLevel(nodes) {
 const CLAUDE_LIMIT_SOURCE = 'Claude Help Center: context window on paid plans (support.claude.com/en/articles/8606394)';
 const CLAUDE_1M_MODELS = new Set(['fable-5.1', 'opus-5.5', 'sonnet-5']);
 const CLAUDE_PAID_PLANS = new Set(['pro', 'max', 'team', 'enterprise']);
+// Hidden-context estimates. claude.ai's prompt/tool sizes are not published; these follow the community
+// measurements in lugia19/Claude-Usage-Extension (checked 2026-09-28). Keyed by the account/conversation setting flag.
+const CLAUDE_SYSTEM_PROMPT_ESTIMATE = 3200;
+const CLAUDE_PREFERENCES_BASE = 850; // Wrapper text around your preferences
+// o200k undercounts Claude's (unpublished) tokenizer; same factor as that extension
+const CLAUDE_TOKEN_SCALE = 1.4;
+// Codename flags keep their codename: what they switch on is not documented
+const CLAUDE_FEATURE_COSTS = {
+  enabled_web_search: ['Web search', 10250],
+  citation_info: ['Citations', 450],
+  enabled_artifacts_attachments: ['Artifacts', 2200],
+  preview_feature_uses_artifacts: ['Artifacts (preview)', 8400],
+  preview_feature_uses_latex: ['LaTeX', 200],
+  enabled_monkeys_in_a_barrel: ['Code execution', 5300],
+  enabled_saffron: ['Memory', 4250],
+  enabled_saffron_search: ['Memory search', 3000],
+  enabled_melange: ['Memory files', 14000],
+  enabled_bananagrams: ['Feature "bananagrams"', 750],
+  enabled_sourdough: ['Feature "sourdough"', 900],
+  enabled_foccacia: ['Feature "foccacia"', 1350],
+  enabled_compass: ['Feature "compass"', 1000],
+  enabled_turmeric: ['Feature "turmeric"', 2000]
+};
 
 /**
  * "claude-opus-5-5", "Opus 5.5", "claude-sonnet-4-5-20250929", "claude-3-5-sonnet-20241022" -> "opus-5.5",
@@ -6881,6 +7176,11 @@ const ClaudeProvider = {
   },
 
   modelKey: claudeModelKey,
+  // claude.ai keeps tool calls but drops earlier tool results (e.g. search pages) from later requests
+  dropsOldToolResults: true,
+  tokenScale: CLAUDE_TOKEN_SCALE,
+  // Limits also arrive in each reply's stream (the only source on plans where /usage is empty)
+  limitStreamSource: 'CONTEXT_MONITOR_CLAUDE_LIMIT',
 
   displayName(raw) {
     const key = claudeModelKey(raw);
@@ -6915,11 +7215,111 @@ const ClaudeProvider = {
   async fetchConversation(conversationId, fetchJson) {
     const org = await this._orgId(fetchJson);
     if (!org) return null;
-    const [conv, orgInfo] = await Promise.all([
+    const optional = (path) => fetchJson(path).catch(() => null); // Hidden context is best effort
+    const [conv, orgInfo, profile, account, usage] = await Promise.all([
       fetchJson(`/api/organizations/${org}/chat_conversations/${conversationId}?tree=True&rendering_mode=messages&render_all_tools=true`),
-      fetchJson(`/api/organizations/${org}`).catch(() => null)
+      optional(`/api/organizations/${org}`),
+      optional('/api/account_profile'),
+      optional('/api/account'),
+      optional(`/api/organizations/${org}/usage`)
     ]);
-    return { ...this.normalizeConversation(conv), plan: this.planFromOrganization(orgInfo) };
+    const projectId = conv?.project_uuid || conv?.project?.uuid || null;
+    const [project, kb] = projectId
+      ? await Promise.all([optional(`/api/organizations/${org}/projects/${projectId}`), optional(`/api/organizations/${org}/projects/${projectId}/kb/stats`)])
+      : [null, null];
+    return {
+      ...this.normalizeConversation(conv),
+      plan: this.planFromOrganization(orgInfo),
+      hidden: this.hiddenContext({ conv, profile, account, project, kb }),
+      limits: this.parseUsage(usage)
+    };
+  },
+
+  /**
+   * Plan limits from a reply stream's `message_limit` event (see claude-limit-watcher.js):
+   * { windows: { "5h": { utilization: 0..1, resets_at }, "7d": {...} }, resetsAt }.
+   * resets_at may be epoch seconds, epoch ms or ISO; utilization is a fraction (a value > 1 is taken as a percent).
+   * @returns {Array<{ key: string, label: string, percent: number, resetsAt: number|null }>}
+   */
+  parseMessageLimit(ml) {
+    const windows = ml && typeof ml === 'object' ? ml.windows : null;
+    if (!windows || typeof windows !== 'object') return [];
+    const toMs = (v) => (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : v ? Date.parse(v) || null : null);
+    const names = { '5h': ['session', 'Session (5h)'], '7d': ['weekly', 'Weekly'] };
+    const out = [];
+    for (const [win, [key, label]] of Object.entries(names)) {
+      const w = windows[win];
+      const u = w?.utilization;
+      if (typeof u !== 'number' || !isFinite(u)) continue;
+      out.push({ key, label, percent: Math.round(u > 1 ? u : u * 100), resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === 'session' ? ml.resetsAt : null)) });
+    }
+    return out;
+  },
+
+  /**
+   * Plan usage limits from /api/organizations/{org}/usage, as claude.ai reports them.
+   * Two shapes exist: { limits: [{ kind, percent, resets_at, scope }] } and the older top-level
+   * { five_hour|seven_day|seven_day_opus|seven_day_sonnet: { utilization, resets_at } }.
+   * @returns {Array<{ key: string, label: string, percent: number, resetsAt: number|null }>}
+   */
+  parseUsage(usage) {
+    if (!usage || typeof usage !== 'object') return [];
+    const at = (iso) => (iso ? new Date(iso).getTime() || null : null);
+    const out = [];
+    const add = (key, label, percent, resetsAt) => {
+      if (typeof percent === 'number' && isFinite(percent)) out.push({ key, label, percent: Math.round(percent), resetsAt: at(resetsAt) });
+    };
+    if (Array.isArray(usage.limits)) {
+      for (const l of usage.limits) {
+        const model = l.scope?.model?.display_name;
+        if (l.kind === 'session') add('session', 'Session (5h)', l.percent, l.resets_at);
+        else if (l.kind === 'weekly_all') add('weekly', 'Weekly', l.percent, l.resets_at);
+        else if (l.kind === 'weekly_scoped' && model) add(`weekly:${model}`, `Weekly · ${model}`, l.percent, l.resets_at);
+      }
+    } else {
+      const top = [['five_hour', 'session', 'Session (5h)'], ['seven_day', 'weekly', 'Weekly'],
+        ['seven_day_opus', 'weekly:Opus', 'Weekly · Opus'], ['seven_day_sonnet', 'weekly:Sonnet', 'Weekly · Sonnet']];
+      for (const [field, key, label] of top) if (usage[field]) add(key, label, usage[field].utilization, usage[field].resets_at);
+    }
+    return out;
+  },
+
+  /**
+   * What claude.ai sends with every message besides the chat itself. Text items carry their text
+   * (counted by the tokenizer); fixed-cost items carry `tokens` and are estimates.
+   * Sources: /api/account_profile, /api/account (+ conversation settings), the project and its kb/stats.
+   * @returns {Array<{ kind: string, label: string, text: string, tokens?: number, estimated?: boolean, included?: boolean }>}
+   */
+  hiddenContext({ conv, profile, account, project, kb } = {}) {
+    const items = [{
+      kind: 'system_prompt', label: 'Claude system prompt (estimate)', tokens: CLAUDE_SYSTEM_PROMPT_ESTIMATE, estimated: true,
+      text: `Not readable from the page. Estimated at ~${CLAUDE_SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens.`
+    }];
+    const prefs = profile?.conversation_preferences;
+    if (typeof prefs === 'string' && prefs.trim()) {
+      items.push({ kind: 'instructions', label: 'Your preferences', text: prefs });
+      items.push({ kind: 'instructions_base', label: 'Preferences framing (estimate)', tokens: CLAUDE_PREFERENCES_BASE, estimated: true,
+        text: `Fixed text claude.ai wraps around your preferences, ~${CLAUDE_PREFERENCES_BASE} tokens.` });
+    }
+
+    const instructions = project?.prompt_template;
+    if (typeof instructions === 'string' && instructions.trim()) items.push({ kind: 'project', label: 'Project instructions', text: instructions });
+    const settings = { ...(account?.settings || {}), ...(conv?.settings || {}) };
+    const kbTokens = Number(kb?.knowledge_size) || 0;
+    if (kbTokens > 0) {
+      // Large projects switch to search: files are retrieved as needed, not sent whole
+      const searched = Boolean(settings.use_project_knowledge_search || kb?.use_project_knowledge_search);
+      items.push({
+        kind: 'project_knowledge', label: searched ? 'Project knowledge (searched as needed)' : 'Project knowledge', tokens: kbTokens,
+        included: !searched, text: searched ? 'Project is in search mode: only retrieved parts are sent, so the full size is not counted.' : 'Size of the project knowledge files as reported by claude.ai.'
+      });
+    }
+
+    // Enabled tools/features add fixed prompt text (sizes: community measurements, not published)
+    for (const [flag, [label, tokens]] of Object.entries(CLAUDE_FEATURE_COSTS)) {
+      if (settings[flag] === true) items.push({ kind: 'tool', label: `${label} (estimate)`, tokens, estimated: true, text: `${label} is enabled; its instructions add ~${tokens.toLocaleString()} tokens.` });
+    }
+    return items;
   },
 
   /** capabilities: claude_max / claude_pro / raven (Team or Enterprise); only "chat" -> free (inferred). */
@@ -6934,7 +7334,7 @@ const ClaudeProvider = {
 
   /**
    * Active branch (current_leaf_message_uuid -> parents) of a claude.ai conversation, as turns.
-   * Tool calls and results are counted as "tool"; earlier thinking is not resent, so it is skipped;
+   * Tool calls stay in the reply, tool results become "tool" turns; thinking is not resent, so it is skipped;
    * text extracted from attached files is part of the prompt and counted with the user turn.
    */
   normalizeConversation(conv) {
@@ -6961,7 +7361,8 @@ const ClaudeProvider = {
       if (Array.isArray(m.content) && m.content.length > 0) {
         for (const block of m.content) {
           if (block.type === 'text' && block.text) text.push(block.text);
-          else if (block.type === 'tool_use') tool.push(JSON.stringify(block.input ?? {}));
+          // The call stays in the reply; only the result is dropped once a newer message is sent
+          else if (block.type === 'tool_use') text.push(JSON.stringify(block.input ?? {}));
           else if (block.type === 'tool_result') {
             const c = Array.isArray(block.content) ? block.content.map(x => x.text || '').join('\n') : String(block.content ?? '');
             if (c) tool.push(c);
@@ -6987,6 +7388,7 @@ const ClaudeProvider = {
       model: conv?.model || null,
       messages,
       visibleTurns: chain.length,
+      rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
       attachments: { count: files, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
   }
@@ -7029,21 +7431,64 @@ const GeminiProvider = {
   },
 
   detectModel(doc) {
-    const el = doc.querySelector('[data-test-id="bard-mode-menu-button"], [data-test-id*="mode-menu"] button, button.gds-mode-switch-button');
+    // Current layout (checked 2026-09-29): <button aria-label="Open mode picker, currently 3.5 Flash-Lite">
+    const picker = doc.querySelector('button[aria-label*="mode picker" i]');
+    const current = picker?.getAttribute?.('aria-label')?.match(/currently\s+(.+)$/i);
+    if (current) return current[1].trim();
+    const el = picker || doc.querySelector('[data-test-id="bard-mode-menu-button"], [data-test-id*="mode-menu"] button, button.gds-mode-switch-button');
     const text = el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
     return text && text.length < 40 ? text : null;
   },
 
+  /**
+   * Gemini does not report usage; it only shows a message once a limit is hit. Reads alerts, snack
+   * bars and the latest reply for that message. Returns a used-up limit, with the reset time when
+   * the message names one ("try again at 5:30 PM" / "in 3 hours").
+   * @returns {{ key: string, label: string, remaining: number, blocked: boolean, resetsAt: number|null }|null}
+   */
+  detectLimitReached(doc, now = Date.now()) {
+    const replies = doc.querySelectorAll('model-response');
+    const nodes = [...doc.querySelectorAll('[role="alert"], [role="status"], snack-bar-container, .mat-mdc-snack-bar-container'), replies[replies.length - 1]];
+    for (const n of nodes) {
+      const text = (n?.textContent || '').replace(/\s+/g, ' ');
+      // A long reply that merely discusses limits is not the limit notice (notices are one or two lines)
+      if (n === replies[replies.length - 1] && text.length > 400) continue;
+      if (!/(reached|hit) (your|the) (\w+ )?limit|limit (reached|resets)|usage limit/i.test(text)) continue;
+      return { key: 'limit', label: 'Gemini usage', remaining: 0, blocked: true, resetsAt: this.parseResetTime(text, now) };
+    }
+    return null;
+  },
+
+  /** "at 5:30 PM" / "after 17:30" -> next such time; "in 3 hours" / "in 45 minutes" -> now + that. */
+  parseResetTime(text, now = Date.now()) {
+    const rel = text.match(/in (\d+) (hour|minute)s?/i);
+    if (rel) return now + Number(rel[1]) * (/hour/i.test(rel[2]) ? 3600000 : 60000);
+    const t = text.match(/(?:at|after|until) (\d{1,2})(?::(\d{2}))?\s*([AP]\.?M\.?)?/i);
+    if (!t) return null;
+    let h = Number(t[1]) % 12 + (t[3] && /p/i.test(t[3]) ? 12 : 0);
+    if (!t[3]) h = Number(t[1]); // 24-hour clock
+    const d = new Date(now);
+    d.setHours(h, Number(t[2] || 0), 0, 0);
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+    return d.getTime();
+  },
+
+  // Gemini meters compute, and long chats cost more per message: note it once the chat is this full
+  longChatNoteAt: 50,
+
   /** Explicit "Google AI Pro/Ultra/Plus" text is OBSERVED; a bare PRO/ULTRA badge is only a hint. */
   detectPlan(doc) {
+    let seenHeader = false;
     for (const el of doc.querySelectorAll('header, top-bar-actions, [data-test-id*="pillbox"], .gds-pillbox, [role="banner"]')) {
       const text = el.textContent || '';
       const named = text.match(/Google AI (Ultra|Pro|Plus)\b/);
       if (named) return { value: named[1].toLowerCase(), source: 'dom', evidenceType: 'OBSERVED' };
       const badge = text.match(/\b(ULTRA|PRO|PLUS)\b/);
       if (badge) return { value: badge[1].toLowerCase(), source: 'dom_heuristic', evidenceType: 'ESTIMATED' };
+      seenHeader = true;
     }
-    return null;
+    // Paid plans show a badge in the top bar; a loaded top bar without one is the free plan (inferred)
+    return seenHeader ? { value: 'free', source: 'dom_heuristic', evidenceType: 'ESTIMATED' } : null;
   },
 
   modelKey: (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim() || null,
@@ -7091,6 +7536,7 @@ function providerForHost(hostname) {
 
 
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
+const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
 const API_BACKOFF_MS = 15000; // After a failed read, wait before trying again (Refresh skips this)
 
 class ProviderCoordinator {
@@ -7126,6 +7572,7 @@ class ProviderCoordinator {
     trustTextCache(true);
     this.domObserver.start();
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
+    this._listenForLimits();
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request?.type !== 'TOGGLE_OVERLAY') return false;
@@ -7160,7 +7607,10 @@ class ProviderCoordinator {
       try {
         const result = await this.provider.fetchConversation(conversationId, (p) => this._fetchJson(p));
         if (!result) throw new Error('Conversation API unavailable');
-        this._api = { conversationId, result, at: Date.now() };
+        // A just-created chat is read before its first turns are saved: an empty copy is retried after
+        // EMPTY_RETRY_MS instead of being served as fresh for the whole TTL
+        const at = result.messages.length ? Date.now() : Date.now() - API_TTL_MS + EMPTY_RETRY_MS;
+        this._api = { conversationId, result, at };
         this._apiFailure = null;
         return { result, error: null };
       } catch (err) {
@@ -7196,6 +7646,40 @@ class ProviderCoordinator {
       return { note: 'The conversation on screen is still loading; data from the previous conversation is withheld', provider: this.provider.name, currentConversationRef: currentRef, loading: true, copiedAt };
     }
     return { ...d, copiedAt, stateAgeMs: Date.now() - this.latestState.timestamp };
+  }
+
+  /**
+   * Plan limits streamed with each reply (adapters with `limitStreamSource`, i.e. Claude). The last
+   * value (percent + reset time only) is kept in extension storage so other chats and reloads show it.
+   */
+  _listenForLimits() {
+    const p = this.provider;
+    if (!p.limitStreamSource || typeof window === 'undefined') return;
+    const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
+    const key = `limits:${p.name}`;
+    store?.get(key).then(r => { if (r?.[key] && !this._streamLimits) this._streamLimits = r[key]; }).catch(() => {});
+    window.addEventListener('message', (e) => {
+      if (e.source !== window || e.data?.source !== p.limitStreamSource) return;
+      const limits = p.parseMessageLimit(e.data.messageLimit);
+      if (!limits.length) return;
+      this._streamLimits = { limits, at: Date.now() };
+      store?.set({ [key]: this._streamLimits }).catch(() => {});
+      this.handleDOMChange();
+    });
+  }
+
+  /**
+   * Limits to show: the newer of /usage (empty on some plans) and the last streamed value. A limit
+   * past its reset time shows as 0%. Adapters that stream limits show a placeholder until the first reply.
+   */
+  _currentLimits(apiLimits = []) {
+    const streamed = this._streamLimits;
+    const useStream = streamed && (!apiLimits.length || streamed.at > (this._api?.at || 0));
+    const now = Date.now();
+    const limits = (useStream ? streamed.limits : apiLimits)
+      .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
+    if (!limits.length && this.provider.limitStreamSource) return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
+    return limits;
   }
 
   async handleDOMChange(event = {}) {
@@ -7234,10 +7718,13 @@ class ProviderCoordinator {
         const savedVisible = saved.messages.filter(m => m.role !== 'tool').length;
         messages = mergeLiveTurns(saved.messages, dom.length > savedVisible ? dom.slice(savedVisible) : [], { conversationId, baseIsFinal: true });
       } else {
-        dataSource = conversationId && p.hasApi ? 'dom_fallback' : 'dom';
+        // Saved copy read fine but holds no turns yet (brand-new chat): the page has the whole chat.
+        // Saved turns that normalize to nothing (format change) stay a fallback, flagged as partial.
+        const unsaved = Boolean(saved) && !saved.rawMessages;
+        dataSource = !(conversationId && p.hasApi) ? 'dom' : unsaved ? 'dom_unsaved' : 'dom_fallback';
         messages = dom;
         // A saved chat read only from the page may miss turns (API failed, or lazy-loaded history)
-        completenessSource = conversationId && (p.hasApi || p.pageMayBePartial) ? 'dom_partial' : 'dom_complete';
+        completenessSource = !unsaved && conversationId && (p.hasApi || p.pageMayBePartial) ? 'dom_partial' : 'dom_complete';
       }
       const complete = completenessSource !== 'dom_partial';
       const awaitingData = Boolean(conversationId) && messages.length === 0;
@@ -7267,12 +7754,19 @@ class ProviderCoordinator {
       const plan = ev.plan?.value || 'unknown';
       const limit = p.resolveLimit(modelRaw, plan);
 
-      // Tokens: o200k BPE as an estimate (the provider's tokenizer is not public)
+      // Tokens: o200k BPE as an estimate (the provider's tokenizer is not public), scaled by the
+      // adapter's correction factor for counted text (fixed-cost estimates are already in its tokens)
+      const scale = p.tokenScale || 1;
+      const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
-        return { id: m.id, role: m.role, tokens: r.tokens, hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
+        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
       });
       const attachments = saved?.attachments || { count: 0, estimatedTokens: 0, hasUnknown: false };
+      // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
+      // Only once the chat has a message: nothing is sent before that.
+      const hidden = messages.length ? (saved?.hidden || []).map(i => (i.tokens !== undefined ? i
+        : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, 'o200k_base')) })) : [];
 
       const state = ContextCalculator.calculate({
         messages: tokenized,
@@ -7288,6 +7782,8 @@ class ProviderCoordinator {
         },
         plan: ev.plan,
         attachments,
+        hidden,
+        dropStaleTools: Boolean(p.dropsOldToolResults),
         tools: { observed: tokenized.some(m => m.role === 'tool'), list: [] },
         completeness,
         isPartial: !complete,
@@ -7301,6 +7797,14 @@ class ProviderCoordinator {
       state.observables.dataSource = dataSource;
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
+      // Plan usage limits as the site reports them (Claude only); read with the conversation
+      state.limits = this._currentLimits(saved?.limits || []);
+      // Sites that only show a notice once a limit is hit (Gemini)
+      const reached = p.detectLimitReached?.(document);
+      if (reached) state.limits.push(reached);
+      if (p.longChatNoteAt && state.utilization.percentage >= p.longChatNoteAt) {
+        state.limits.push({ key: 'long_chat', label: 'Long chat', note: `each message uses more of your ${p.name} limit; a new chat is lighter` });
+      }
       if (api.error) state.observables.apiError = saved ? `Conversation API failed (${api.error}); using the last good copy` : `Conversation API failed (${api.error}); reading the page`;
       state.completeness.isLowerBound = !complete;
       state.completeness.hiddenContextMeasured = false;
@@ -7320,9 +7824,10 @@ class ProviderCoordinator {
         usedTokens: state.tokens.totalMeasurable,
         contextLimit: state.model.contextWindow,
         remainingTokens: state.tokens.remaining,
-        messages: tokenized,
+        messages: state.tokens.contextMessages,
         attachments,
         isLowerBound: !complete,
+        hiddenTokens: state.tokens.hidden,
         sessionStartTokens: conversationId ? (this._sessionStartTokens.get(conversationId) ?? null) : null
       });
 
@@ -7332,13 +7837,15 @@ class ProviderCoordinator {
         generatedAt: new Date().toISOString(),
         conversation: {
           ref: this._conversationRef(conversationId), loading: awaitingData, dataSource, apiError: api.error || null,
-          turns: { api: saved ? saved.visibleTurns : null, page: dom.length, counted: messages.length }, completeness: { source: completenessSource, lowerBound: !complete }
+          turns: { api: saved ? saved.visibleTurns : null, apiRaw: saved ? (saved.rawMessages ?? null) : null, apiCounted: saved ? saved.messages.length : null, page: dom.length, counted: messages.length }, completeness: { source: completenessSource, lowerBound: !complete },
+          hiddenContext: hidden.map(i => `${i.kind}:${i.tokens}`) // Kinds and counts only, never the text
         },
         candidates: { model: modelCandidates.map(c => `${c.source}:${c.value}`), plan: planCandidates.map(c => `${c.source}:${c.value}`) },
         conflicts: reconciled.conflicts.map(c => ({ field: c.field, winning: `${c.winning.source}:${c.winning.value}`, discarded: `${c.discarded.source}:${c.discarded.value}` })),
         agreements: reconciled.agreements,
         resolved: { model: modelRaw, plan, limit: state.model.contextWindow, limitStatus: ev.limit.status, limitReference: ev.limit.reference },
-        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: 'o200k_base (approximate for this provider)' },
+        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: `o200k_base x${scale} (approximate for this provider)` },
+        limits: state.limits.map(l => `${l.key}:${typeof l.percent === 'number' ? `${l.percent}%` : l.remaining ?? (l.note ? 'note' : 'pending')}`),
         confidence: { level: state.confidence.level, percentage: state.confidence.percentage, highBlockers: state.confidence.highBlockers || [] },
         intelligence: { health: state.intelligence.health.level, advice: state.intelligence.advice.title }
       };
@@ -7356,7 +7863,9 @@ class ProviderCoordinator {
   /** Toolbar badge; at most one message per 250 ms (streaming updates the page many times a second). */
   syncState(state) {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    this._pendingSync = state;
+    // The badge needs numbers only: never ship hidden text or message lists to the worker/storage
+    const { contextMessages, hiddenItems, ...tokens } = state.tokens || {};
+    this._pendingSync = { ...state, tokens: { ...tokens, hiddenItems: (hiddenItems || []).map(({ text, ...rest }) => rest) } };
     if (this._syncTimer) return;
     const send = () => {
       if (!this._pendingSync) return;

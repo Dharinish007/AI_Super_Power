@@ -19,6 +19,7 @@ import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { invalidateText, trustTextCache } from './providers.js';
 
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
+const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
 const API_BACKOFF_MS = 15000; // After a failed read, wait before trying again (Refresh skips this)
 
 export class ProviderCoordinator {
@@ -54,6 +55,7 @@ export class ProviderCoordinator {
     trustTextCache(true);
     this.domObserver.start();
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
+    this._listenForLimits();
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request?.type !== 'TOGGLE_OVERLAY') return false;
@@ -88,7 +90,10 @@ export class ProviderCoordinator {
       try {
         const result = await this.provider.fetchConversation(conversationId, (p) => this._fetchJson(p));
         if (!result) throw new Error('Conversation API unavailable');
-        this._api = { conversationId, result, at: Date.now() };
+        // A just-created chat is read before its first turns are saved: an empty copy is retried after
+        // EMPTY_RETRY_MS instead of being served as fresh for the whole TTL
+        const at = result.messages.length ? Date.now() : Date.now() - API_TTL_MS + EMPTY_RETRY_MS;
+        this._api = { conversationId, result, at };
         this._apiFailure = null;
         return { result, error: null };
       } catch (err) {
@@ -124,6 +129,40 @@ export class ProviderCoordinator {
       return { note: 'The conversation on screen is still loading; data from the previous conversation is withheld', provider: this.provider.name, currentConversationRef: currentRef, loading: true, copiedAt };
     }
     return { ...d, copiedAt, stateAgeMs: Date.now() - this.latestState.timestamp };
+  }
+
+  /**
+   * Plan limits streamed with each reply (adapters with `limitStreamSource`, i.e. Claude). The last
+   * value (percent + reset time only) is kept in extension storage so other chats and reloads show it.
+   */
+  _listenForLimits() {
+    const p = this.provider;
+    if (!p.limitStreamSource || typeof window === 'undefined') return;
+    const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
+    const key = `limits:${p.name}`;
+    store?.get(key).then(r => { if (r?.[key] && !this._streamLimits) this._streamLimits = r[key]; }).catch(() => {});
+    window.addEventListener('message', (e) => {
+      if (e.source !== window || e.data?.source !== p.limitStreamSource) return;
+      const limits = p.parseMessageLimit(e.data.messageLimit);
+      if (!limits.length) return;
+      this._streamLimits = { limits, at: Date.now() };
+      store?.set({ [key]: this._streamLimits }).catch(() => {});
+      this.handleDOMChange();
+    });
+  }
+
+  /**
+   * Limits to show: the newer of /usage (empty on some plans) and the last streamed value. A limit
+   * past its reset time shows as 0%. Adapters that stream limits show a placeholder until the first reply.
+   */
+  _currentLimits(apiLimits = []) {
+    const streamed = this._streamLimits;
+    const useStream = streamed && (!apiLimits.length || streamed.at > (this._api?.at || 0));
+    const now = Date.now();
+    const limits = (useStream ? streamed.limits : apiLimits)
+      .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
+    if (!limits.length && this.provider.limitStreamSource) return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
+    return limits;
   }
 
   async handleDOMChange(event = {}) {
@@ -162,10 +201,13 @@ export class ProviderCoordinator {
         const savedVisible = saved.messages.filter(m => m.role !== 'tool').length;
         messages = mergeLiveTurns(saved.messages, dom.length > savedVisible ? dom.slice(savedVisible) : [], { conversationId, baseIsFinal: true });
       } else {
-        dataSource = conversationId && p.hasApi ? 'dom_fallback' : 'dom';
+        // Saved copy read fine but holds no turns yet (brand-new chat): the page has the whole chat.
+        // Saved turns that normalize to nothing (format change) stay a fallback, flagged as partial.
+        const unsaved = Boolean(saved) && !saved.rawMessages;
+        dataSource = !(conversationId && p.hasApi) ? 'dom' : unsaved ? 'dom_unsaved' : 'dom_fallback';
         messages = dom;
         // A saved chat read only from the page may miss turns (API failed, or lazy-loaded history)
-        completenessSource = conversationId && (p.hasApi || p.pageMayBePartial) ? 'dom_partial' : 'dom_complete';
+        completenessSource = !unsaved && conversationId && (p.hasApi || p.pageMayBePartial) ? 'dom_partial' : 'dom_complete';
       }
       const complete = completenessSource !== 'dom_partial';
       const awaitingData = Boolean(conversationId) && messages.length === 0;
@@ -195,12 +237,19 @@ export class ProviderCoordinator {
       const plan = ev.plan?.value || 'unknown';
       const limit = p.resolveLimit(modelRaw, plan);
 
-      // Tokens: o200k BPE as an estimate (the provider's tokenizer is not public)
+      // Tokens: o200k BPE as an estimate (the provider's tokenizer is not public), scaled by the
+      // adapter's correction factor for counted text (fixed-cost estimates are already in its tokens)
+      const scale = p.tokenScale || 1;
+      const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
-        return { id: m.id, role: m.role, tokens: r.tokens, hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
+        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
       });
       const attachments = saved?.attachments || { count: 0, estimatedTokens: 0, hasUnknown: false };
+      // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
+      // Only once the chat has a message: nothing is sent before that.
+      const hidden = messages.length ? (saved?.hidden || []).map(i => (i.tokens !== undefined ? i
+        : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, 'o200k_base')) })) : [];
 
       const state = ContextCalculator.calculate({
         messages: tokenized,
@@ -216,6 +265,8 @@ export class ProviderCoordinator {
         },
         plan: ev.plan,
         attachments,
+        hidden,
+        dropStaleTools: Boolean(p.dropsOldToolResults),
         tools: { observed: tokenized.some(m => m.role === 'tool'), list: [] },
         completeness,
         isPartial: !complete,
@@ -229,6 +280,14 @@ export class ProviderCoordinator {
       state.observables.dataSource = dataSource;
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
+      // Plan usage limits as the site reports them (Claude only); read with the conversation
+      state.limits = this._currentLimits(saved?.limits || []);
+      // Sites that only show a notice once a limit is hit (Gemini)
+      const reached = p.detectLimitReached?.(document);
+      if (reached) state.limits.push(reached);
+      if (p.longChatNoteAt && state.utilization.percentage >= p.longChatNoteAt) {
+        state.limits.push({ key: 'long_chat', label: 'Long chat', note: `each message uses more of your ${p.name} limit; a new chat is lighter` });
+      }
       if (api.error) state.observables.apiError = saved ? `Conversation API failed (${api.error}); using the last good copy` : `Conversation API failed (${api.error}); reading the page`;
       state.completeness.isLowerBound = !complete;
       state.completeness.hiddenContextMeasured = false;
@@ -248,9 +307,10 @@ export class ProviderCoordinator {
         usedTokens: state.tokens.totalMeasurable,
         contextLimit: state.model.contextWindow,
         remainingTokens: state.tokens.remaining,
-        messages: tokenized,
+        messages: state.tokens.contextMessages,
         attachments,
         isLowerBound: !complete,
+        hiddenTokens: state.tokens.hidden,
         sessionStartTokens: conversationId ? (this._sessionStartTokens.get(conversationId) ?? null) : null
       });
 
@@ -260,13 +320,15 @@ export class ProviderCoordinator {
         generatedAt: new Date().toISOString(),
         conversation: {
           ref: this._conversationRef(conversationId), loading: awaitingData, dataSource, apiError: api.error || null,
-          turns: { api: saved ? saved.visibleTurns : null, page: dom.length, counted: messages.length }, completeness: { source: completenessSource, lowerBound: !complete }
+          turns: { api: saved ? saved.visibleTurns : null, apiRaw: saved ? (saved.rawMessages ?? null) : null, apiCounted: saved ? saved.messages.length : null, page: dom.length, counted: messages.length }, completeness: { source: completenessSource, lowerBound: !complete },
+          hiddenContext: hidden.map(i => `${i.kind}:${i.tokens}`) // Kinds and counts only, never the text
         },
         candidates: { model: modelCandidates.map(c => `${c.source}:${c.value}`), plan: planCandidates.map(c => `${c.source}:${c.value}`) },
         conflicts: reconciled.conflicts.map(c => ({ field: c.field, winning: `${c.winning.source}:${c.winning.value}`, discarded: `${c.discarded.source}:${c.discarded.value}` })),
         agreements: reconciled.agreements,
         resolved: { model: modelRaw, plan, limit: state.model.contextWindow, limitStatus: ev.limit.status, limitReference: ev.limit.reference },
-        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: 'o200k_base (approximate for this provider)' },
+        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: `o200k_base x${scale} (approximate for this provider)` },
+        limits: state.limits.map(l => `${l.key}:${typeof l.percent === 'number' ? `${l.percent}%` : l.remaining ?? (l.note ? 'note' : 'pending')}`),
         confidence: { level: state.confidence.level, percentage: state.confidence.percentage, highBlockers: state.confidence.highBlockers || [] },
         intelligence: { health: state.intelligence.health.level, advice: state.intelligence.advice.title }
       };
@@ -284,7 +346,9 @@ export class ProviderCoordinator {
   /** Toolbar badge; at most one message per 250 ms (streaming updates the page many times a second). */
   syncState(state) {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    this._pendingSync = state;
+    // The badge needs numbers only: never ship hidden text or message lists to the worker/storage
+    const { contextMessages, hiddenItems, ...tokens } = state.tokens || {};
+    this._pendingSync = { ...state, tokens: { ...tokens, hiddenItems: (hiddenItems || []).map(({ text, ...rest }) => rest) } };
     if (this._syncTimer) return;
     const send = () => {
       if (!this._pendingSync) return;

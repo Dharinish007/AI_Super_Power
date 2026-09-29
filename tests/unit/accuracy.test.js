@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ContentScriptCoordinator, SYSTEM_PROMPT_ESTIMATE as SP } from '../../content/content-main.js';
+import { ContentScriptCoordinator, SYSTEM_PROMPT_ESTIMATE as SP, chatgptLimits } from '../../content/content-main.js';
 import { ModelDetector } from '../../content/model-detector.js';
 import { PlanDetector, normalizePlanTier } from '../../content/plan-detector.js';
 import { Tokenizer } from '../../engine/tokenizer.js';
@@ -158,6 +158,32 @@ export async function runAccuracyTests() {
         s2.tokens.hidden === SP && s2.tokens.hiddenItems.some(i => i.kind === 'account_memory' && i.included === false));
       const vm2 = toWidgetState(s2, { provider: 'ChatGPT' });
       assert('Widget exposes hidden items with text for the viewer', vm2.hiddenItems.length === 2 && vm2.hiddenItems[0].text.includes('tea') && vm2.hiddenItems[0].note === 'not counted');
+    }
+
+    // ------------------------------------------------------------ ChatGPT plan allowances (conversation/init, real shape)
+    {
+      const now = Date.parse('2026-09-29T08:54:00Z');
+      const raw = {
+        limitsProgress: [
+          { feature: 'deep_research', remaining: 5, resetAfter: '2026-10-29T08:53:57.879422+00:00' },
+          { feature: 'file_upload', remaining: 79, resetAfter: '2026-09-29T11:53:39.879436+00:00' },
+          { feature: 'reason', remaining: 300, resetAfter: '2026-09-29T09:53:58.879148+00:00' },
+          { feature: 'old_thing', remaining: 1, resetAfter: '2026-09-28T00:00:00+00:00' }
+        ],
+        blocked: ['image_gen'], modelLimits: []
+      };
+      const limits = chatgptLimits(raw, now);
+      assert('ChatGPT limits: friendly names, counts, reset times from conversation/init',
+        limits.find(l => l.key === 'deep_research').label === 'Deep research' && limits.find(l => l.key === 'reason').label === 'Thinking' &&
+        limits.find(l => l.key === 'deep_research').remaining === 5 && limits.find(l => l.key === 'reason').resetsAt === Date.parse('2026-09-29T09:53:58.879148+00:00'));
+      assert('ChatGPT limits: a blocked feature is listed as used up', limits.find(l => l.key === 'image_gen').blocked === true);
+      assert('ChatGPT limits: entries past their reset time are dropped', !limits.some(l => l.key === 'old_thing'));
+      assert('ChatGPT limits: nothing observed -> none', chatgptLimits(null).length === 0);
+      const { c, run } = harness({ api: tree(CONV_A, [{ role: 'user', text: 'hi' }, { role: 'assistant', text: 'yo', slug: 'gpt-5-6' }]) });
+      c.requestObserver.observedLimits = { limitsProgress: [{ feature: 'deep_research', remaining: 5, resetAfter: new Date(Date.now() + 86400000).toISOString() }] };
+      const s = await run();
+      const vm = toWidgetState(s, { provider: 'ChatGPT' });
+      assert('ChatGPT pipeline: allowances reach the widget as count limits', vm.limits.length === 1 && vm.limits[0].remaining === 5 && vm.limits[0].resetIn === '1d 0h');
     }
 
     // ------------------------------------------------------------ tool calls skipped, current tool output kept, window fitting

@@ -21,6 +21,17 @@ export function formatModelName(slug) {
   return `GPT-${version}${rest}`;
 }
 
+/** "3h 57m", "2d 4h", "12m" until `at` (ms); null when unknown or past. */
+export function formatResetIn(at, now = Date.now()) {
+  if (!at) return null;
+  const min = Math.round((at - now) / 60000);
+  if (min <= 0) return null;
+  const d = Math.floor(min / 1440);
+  const hr = Math.floor((min % 1440) / 60);
+  if (d) return `${d}d ${hr}h`;
+  return hr ? `${hr}h ${min % 60}m` : `${min}m`;
+}
+
 /**
  * @param {Object} s Context state produced by ContextCalculator + coordinator
  * @param {{ provider?: string }} [opts]
@@ -40,7 +51,7 @@ export function toWidgetState(s, opts = {}) {
       provider, conversationId: s?.observables?.conversationId || null, model: 'Detecting…', modelFamily: null, plan: null,
       usedTokens: 0, contextLimit: null, remainingTokens: null, percentage: null,
       limitStatus: 'UNKNOWN', confidence: 0, confidenceLevel: 'LOW',
-      evidence: [], breakdown: [], hiddenItems: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
+      evidence: [], breakdown: [], stats: { user: 0, assistant: 0, hidden: 0 }, hiddenItems: [], limits: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
     };
   }
 
@@ -96,19 +107,28 @@ export function toWidgetState(s, opts = {}) {
       ...(hiddenItems.length
         ? [
             { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
-            ...hiddenItems.filter(i => i.estimated).map(i => ({ label: `${provider} system prompt`, value: `≈${(i.tokens || 0).toLocaleString()}`, tag: 'ESTIMATED' }))
+            // One row for every estimate (system prompt, and on Claude the enabled tools); details in the viewer
+            ...(hiddenItems.some(i => i.estimated)
+              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED' }]
+              : [])
           ]
         : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
       // Saved in the chat but not in the current context: shown, never counted in Used
       ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
+    // Headline split for the panel's stat row (display only; same numbers as the breakdown)
+    stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
     // What the page never shows: label, token count and the text itself, for the viewer
     hiddenItems: hiddenItems.map(i => ({
       label: i.label, tokens: i.tokens || 0, text: i.text || '',
       note: i.included === false ? 'not counted' : (i.estimated ? 'estimate' : null)
     })),
-    source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)' : 'Page text',
+    // Plan usage limits (Claude only; empty elsewhere): percent used and time until reset
+    // Percent-based (Claude) or count-based (ChatGPT: `remaining`, `blocked`)
+    limits: (s.limits || []).map(l => ({ key: l.key, label: l.label, percent: l.percent, remaining: l.remaining, blocked: Boolean(l.blocked), note: l.note || null, resetIn: formatResetIn(l.resetsAt) })),
+    source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
+      : dataSource === 'dom_unsaved' ? 'Page text (not saved yet)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,
     // usedTokens counts visible conversation text only; true when turns may also be missing
     isLowerBound,
