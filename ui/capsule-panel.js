@@ -5,7 +5,7 @@
  * interface, content/page-actions.js), so it runs the same in the page or in the side panel.
  */
 
-import { CapsuleStore, buildCapsulePrompt, parseCapsule, formatForInsert, chatLimitReached, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert, projectsOf, searchItems, formatManyForInsert } from '../content/capsule.js';
+import { CapsuleStore, buildCapsulePrompt, parseCapsule, formatForInsert, chatLimitReached, quickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert, projectsOf, searchItems, formatManyForInsert } from '../content/capsule.js';
 import { formatModelName } from '../content/widget-state.js';
 import { h, textButton, download, setText, show, fmtK } from './dom.js';
 
@@ -225,9 +225,7 @@ export function CapsulePanel(parent, ctx) {
   // Step 2: no AI. A selection is used as-is; otherwise goal + latest turns + code from the page
   quickBtn.addEventListener('click', onPage(async () => {
     const selection = await takeSelection();
-    const capsule = selection
-      ? { title: selection.split('\n').find(l => l.trim()).trim().slice(0, 60), body: selection }
-      : buildQuickCapsule(await ctx.page.transcript());
+    const capsule = await quickCapsule(selection, () => ctx.page.transcript());
     if (!capsule) return ctx.toast('Open a conversation first');
     openDraft({ ...capsule, source: provider });
   }));

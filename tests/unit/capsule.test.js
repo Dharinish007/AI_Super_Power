@@ -8,7 +8,7 @@ import {
   buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
   chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
   formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert,
-  normalizeTags, normalizeProject, projectsOf, searchItems, formatManyForInsert
+  normalizeTags, normalizeProject, projectsOf, searchItems, formatManyForInsert, captureCapsule
 } from '../../content/capsule.js';
 
 /** chrome.storage.local stand-in */
@@ -302,5 +302,46 @@ export async function runCapsuleTests() {
   assert('Import: tags / project / pin validated', impd.some(c => c.body === 'x' && JSON.stringify(c.tags) === '["not-an-array-but-text"]' && c.project === 'p' && c.pinned === false) &&
     impd.some(c => c.body === 'y' && JSON.stringify(c.tags) === '["ok"]' && c.pinned === true));
 
+  // captureCapsule: the Capsule widget's one click
+  const fakePage = (o = {}) => {
+    const p = { provider: 'ChatGPT', filled: null, watchers: [],
+      hasConversation: async () => o.conv ?? true, takeSelection: async () => o.sel ?? '', limitReached: async () => o.limit ?? false,
+      transcript: async () => o.transcript ?? [{ role: 'user', text: 'Build a login page' }, { role: 'assistant', text: 'Sure, here it is' }],
+      fill: async (t) => { p.filled = t; return o.fill ?? true; },
+      watchCapsule: async (cb) => { p.watchers.push(cb); return () => { p.stopped = true; }; } };
+    return p;
+  };
+  const statuses = (arr) => (s) => arr.push(s);
+
+  const cs1 = new CapsuleStore(fakeArea()); const st1 = []; const p1 = fakePage();
+  await captureCapsule({ method: 'ask-ai', page: p1, store: cs1, onStatus: statuses(st1) });
+  assert('Ask AI: prompt filled, waiting', p1.filled.includes(CAPSULE_START) && st1[0].state === 'waiting');
+  p1.watchers[0]({ title: 'Login', body: '## Goal\nlogin' });
+  await new Promise(r => setTimeout(r, 0));
+  const saved1 = await cs1.list();
+  assert('Ask AI: reply saved automatically with its title and site', saved1.length === 1 && saved1[0].title === 'Login' && saved1[0].source === 'ChatGPT');
+  assert('Ask AI: saved status', st1.at(-1).state === 'saved' && st1.at(-1).title === 'Login' && st1.at(-1).quick === false);
+
+  const cs2 = new CapsuleStore(fakeArea()); const st2 = []; const p2 = fakePage();
+  await captureCapsule({ method: 'quick', page: p2, store: cs2, onStatus: statuses(st2) });
+  assert('Quick: saved at once, nothing filled', p2.filled === null && (await cs2.list()).length === 1 && st2.at(-1).quick === true);
+
+  const cs3 = new CapsuleStore(fakeArea()); const st3 = []; const p3 = fakePage({ limit: true });
+  await captureCapsule({ method: 'ask-ai', page: p3, store: cs3, onStatus: statuses(st3) });
+  assert('Limit reached: Ask AI falls back to Quick and says why', p3.filled === null && st3.at(-1).state === 'saved' && st3.at(-1).reason === 'limit');
+
+  const st4 = []; await captureCapsule({ method: 'ask-ai', page: fakePage({ conv: false }), store: new CapsuleStore(fakeArea()), onStatus: statuses(st4) });
+  assert('No conversation -> error', st4.at(-1).state === 'error' && st4.at(-1).text === 'Open a conversation first');
+  const st5 = []; await captureCapsule({ method: 'ask-ai', page: fakePage({ fill: false }), store: new CapsuleStore(fakeArea()), onStatus: statuses(st5) });
+  assert('Chat box missing -> error', st5.at(-1).state === 'error' && st5.at(-1).text === 'Chat box not found');
+
+  const st6 = []; const p6 = fakePage();
+  const run6 = await captureCapsule({ method: 'ask-ai', page: p6, store: new CapsuleStore(fakeArea()), onStatus: statuses(st6) });
+  run6.cancel();
+  assert('Cancel stops waiting', p6.stopped === true && st6.at(-1).state === 'cancelled');
+
+  const cs7 = new CapsuleStore(fakeArea()); const st7 = [];
+  await captureCapsule({ method: 'quick', page: fakePage({ sel: 'Only this part\nmore' }), store: cs7, onStatus: statuses(st7) });
+  assert('Quick with a selection: selection kept as-is', (await cs7.list())[0].body === 'Only this part\nmore' && (await cs7.list())[0].title === 'Only this part');
   return { passed, failed };
 }

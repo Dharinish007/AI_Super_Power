@@ -4450,6 +4450,19 @@ function buildQuickCapsule(messages) {
 }
 
 /**
+ * The no-AI Capsule: a selection is used as-is (first line is the title); otherwise it is built from
+ * the page's conversation. The transcript is only read when there is no selection.
+ * @param {string} selection
+ * @param {() => Promise<Array<{ role: string, text: string, code?: string[] }>>} getTranscript
+ * @returns {Promise<{ title: string, body: string }|null>}
+ */
+async function quickCapsule(selection, getTranscript) {
+  return selection
+    ? { title: selection.split('\n').find(l => l.trim()).trim().slice(0, 60), body: selection }
+    : buildQuickCapsule(await getTranscript());
+}
+
+/**
  * Hand-off: a Capsule prompt (with the conversation) waiting in storage until the user opens another
  * AI and clicks Paste & create there. One at a time; a new one replaces the old. Expires after a day.
  */
@@ -4814,6 +4827,36 @@ function insertText(el, text) {
     if (!el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }))) return true;
   } catch (_) {}
   try { return Boolean(doc?.execCommand?.('insertText', false, text)); } catch (_) { return false; }
+}
+
+/**
+ * The Capsule widget's one click. 'ask-ai' fills the chat box with the Capsule prompt (the user sends
+ * it) and saves the Capsule found in the reply; 'quick' builds it from the page and saves at once.
+ * When the site's limit is reached, 'ask-ai' cannot work and Quick is used instead.
+ * @param {{ method: 'ask-ai'|'quick', page: Object, store: CapsuleStore, onStatus: (s: Object) => void }} o
+ * @returns {Promise<{ cancel: () => void }>}
+ */
+async function captureCapsule({ method, page, store, onStatus }) {
+  const none = { cancel() {} };
+  if (!(await page.hasConversation())) { onStatus({ state: 'error', text: 'Open a conversation first' }); return none; }
+  const selection = await page.takeSelection();
+  const limit = await page.limitReached();
+  const save = async (capsule, quick, reason) => {
+    try {
+      const saved = await store.save({ ...capsule, source: page.provider });
+      onStatus({ state: 'saved', title: saved.title, quick, ...(reason ? { reason } : {}) });
+    } catch (_) { onStatus({ state: 'error', text: 'Save failed' }); }
+  };
+  if (method === 'quick' || limit) {
+    const capsule = await quickCapsule(selection, () => page.transcript());
+    if (!capsule) { onStatus({ state: 'error', text: 'Open a conversation first' }); return none; }
+    await save(capsule, true, limit && method !== 'quick' ? 'limit' : undefined);
+    return none;
+  }
+  if (!(await page.fill(buildCapsulePrompt(selection)))) { onStatus({ state: 'error', text: 'Chat box not found' }); return none; }
+  const stop = await page.watchCapsule((capsule) => save(capsule, false));
+  onStatus({ state: 'waiting' });
+  return { cancel() { stop(); onStatus({ state: 'cancelled' }); } };
 }
 
 
@@ -5480,9 +5523,7 @@ function CapsulePanel(parent, ctx) {
   // Step 2: no AI. A selection is used as-is; otherwise goal + latest turns + code from the page
   quickBtn.addEventListener('click', onPage(async () => {
     const selection = await takeSelection();
-    const capsule = selection
-      ? { title: selection.split('\n').find(l => l.trim()).trim().slice(0, 60), body: selection }
-      : buildQuickCapsule(await ctx.page.transcript());
+    const capsule = await quickCapsule(selection, () => ctx.page.transcript());
     if (!capsule) return ctx.toast('Open a conversation first');
     openDraft({ ...capsule, source: provider });
   }));
