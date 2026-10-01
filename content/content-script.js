@@ -5025,6 +5025,9 @@ function toWidgetState(s, opts = {}) {
  * locally and inserted into any supported AI so the user never re-explains it.
  *
  *   buildCapsulePrompt  text placed in the chat box (the user presses Enter; nothing is sent for them)
+ *   chatLimitReached    the site's limit blocks chatting: the AI cannot write the Capsule here
+ *   buildQuickCapsule   Capsule built from the page without any AI (always works)
+ *   saveHandoff / …     hand-off: the prompt plus the conversation, pasted into another AI to write it
  *   parseCapsule        Capsule between the START / END markers of a reply (or a whole reply, loose)
  *   readLatestCapsule   newest Capsule among the latest assistant replies on the page
  *   formatForInsert     what Insert puts in the chat box
@@ -5036,6 +5039,16 @@ const CAPSULE_START = '=== CAPSULE START ===';
 const CAPSULE_END = '=== CAPSULE END ===';
 const CAPSULE_MAX_SELECTION = 4000;
 const CAPSULES_KEY = 'capsules';
+const CAPSULE_HANDOFF_KEY = 'capsuleHandoff';
+// Hand-off conversation size: ~15K tokens, fits even Gemini's free 32K window with room for the reply
+const CAPSULE_MAX_TRANSCRIPT = 60000;
+const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
+// Quick Capsule (no AI): what is kept from the chat
+const QUICK_TURNS = 6;
+const QUICK_GOAL_CHARS = 600;
+const QUICK_TURN_CHARS = 800;
+const QUICK_SNIPPETS = 5;
+const QUICK_SNIPPET_CHARS = 1500;
 const CAPSULE_TITLE_MAX = 80;
 // Only the newest replies can hold the Capsule just asked for
 const CAPSULE_REPLIES_SCANNED = 3;
@@ -5044,14 +5057,18 @@ const CAPSULE_REPLIES_SCANNED = 3;
  * Prompt asking the current AI to write the Capsule. Four-backtick fence: the Capsule may contain
  * ``` code, and text inside a code block keeps its headings and line breaks on every site.
  * @param {string} [selection] Chat text the user selected: the Capsule then focuses on it
+ * @param {string} [transcript] Hand-off: a conversation from another chat (formatTranscript) to summarize
  * @returns {string}
  */
-function buildCapsulePrompt(selection = '') {
+function buildCapsulePrompt(selection = '', transcript = '') {
   let focus = String(selection || '').trim();
   if (focus.length > CAPSULE_MAX_SELECTION) focus = `${focus.slice(0, CAPSULE_MAX_SELECTION)} […]`;
+  const intro = transcript
+    ? 'Create a Capsule of the conversation between the <conversation> tags below (it comes from another chat): a compact, self-contained brief that lets a different AI continue that work without seeing the chat.'
+    : 'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.';
   return [
-    'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.',
-    ...(focus ? ['', 'Focus only on this part of our conversation (use the rest only to understand it):', '"""', focus, '"""'] : []),
+    intro,
+    ...(focus ? ['', 'Focus only on this part of the conversation (use the rest only to understand it):', '"""', focus, '"""'] : []),
     '',
     'Rules:',
     '- Keep exact names, numbers, file paths, commands, code and decisions. Do not invent anything.',
@@ -5069,8 +5086,114 @@ function buildCapsulePrompt(selection = '') {
     '## Open questions / next step',
     '## Key snippets',
     CAPSULE_END,
-    '````'
+    '````',
+    ...(transcript ? ['', '<conversation>', transcript, '</conversation>', '', 'Now write the Capsule in the format above.'] : [])
   ].join('\n');
+}
+
+/**
+ * The limit that stops chatting on this site right now, or null: Gemini's "limit reached" notice,
+ * a ChatGPT model with no messages left, or a Claude usage window at 100%. Feature allowances (image
+ * generation, deep research…) do not stop the chat and are ignored.
+ * @param {Array<{ key: string, blocked?: boolean, percent?: number|null }>} [limits] Widget view-state limits
+ */
+function chatLimitReached(limits = []) {
+  return (limits || []).find(l => l && (
+    ((l.key === 'limit' || String(l.key).startsWith('model:')) && l.blocked) ||
+    (typeof l.percent === 'number' && l.percent >= 100)
+  )) || null;
+}
+
+/**
+ * The visible conversation, read live (line breaks kept), in page order. Code blocks are also kept
+ * apart for the Quick Capsule's snippets.
+ * @param {Document} doc
+ * @param {string} userSelector Matches the user's messages
+ * @param {string} replySelector Matches assistant replies
+ * @returns {Array<{ role: 'user'|'assistant', text: string, code: string[] }>}
+ */
+function readTranscript(doc, userSelector, replySelector) {
+  if (!doc || !userSelector || !replySelector) return [];
+  const nodes = [...doc.querySelectorAll(`${userSelector}, ${replySelector}`)];
+  const matched = new Set(nodes);
+  const inner = (el) => String(el?.innerText || el?.textContent || '').trim();
+  // Live text includes button labels of the sites' code blocks and message toolbars
+  const clean = (s) => s.split('\n')
+    .filter(l => !/^\s*(Copy|Copy code|Copied!|Edit|Retry|Share)\s*$/i.test(l))
+    .map(l => l.replace(/\s*\b(Copy code|Copied!)\s*$/i, '')) // "bash Copy code" header -> "bash"
+    .join('\n').trim();
+  return nodes
+    .filter(n => { for (let p = n.parentElement; p; p = p.parentElement) if (matched.has(p)) return false; return true; })
+    .map(n => ({
+      role: n.matches(replySelector) ? 'assistant' : 'user',
+      text: clean(inner(n)),
+      code: [...n.querySelectorAll('pre')].map(pre => inner(pre.querySelector('code') || pre)).filter(Boolean)
+    }))
+    .filter(m => m.text);
+}
+
+/**
+ * Conversation as plain text for a hand-off prompt, at most `max` characters: the first message
+ * (usually the goal) plus as many of the latest as fit.
+ * @param {Array<{ role: string, text: string }>} messages
+ */
+function formatTranscript(messages, max = CAPSULE_MAX_TRANSCRIPT) {
+  const turns = (messages || []).map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.text}`);
+  if (!turns.length) return '';
+  const first = turns[0].slice(0, Math.floor(max / 4));
+  const kept = [];
+  let size = first.length;
+  for (let i = turns.length - 1; i > 0; i--) {
+    if (size + turns[i].length + 2 > max) {
+      const room = max - size - 10;
+      if (!kept.length && room > 0) kept.unshift(`[…] ${turns[i].slice(-room)}`); // Newest message alone is too long: keep its end
+      break;
+    }
+    kept.unshift(turns[i]);
+    size += turns[i].length + 2;
+  }
+  const skipped = turns.length - 1 - kept.length;
+  return [first, ...(skipped > 0 ? [`[… ${skipped} earlier messages left out …]`] : []), ...kept].join('\n\n');
+}
+
+/**
+ * A Capsule built without any AI (for when the site's limit is reached): the goal (first message),
+ * the latest turns and the latest code blocks, each cut to size. The user trims it in the editor.
+ * @param {Array<{ role: string, text: string, code?: string[] }>} messages From readTranscript
+ * @returns {{ title: string, body: string }|null}
+ */
+function buildQuickCapsule(messages) {
+  if (!messages?.length) return null;
+  const cut = (s, n) => (s.length > n ? `${s.slice(0, n)} […]` : s);
+  const firstUser = messages.find(m => m.role === 'user');
+  const recent = messages.slice(-QUICK_TURNS).map(m => `${m.role === 'user' ? '**You:**' : '**AI:**'} ${cut(m.text, QUICK_TURN_CHARS)}`);
+  const code = messages.filter(m => m.role === 'assistant').flatMap(m => m.code || []).slice(-QUICK_SNIPPETS)
+    .map(c => `\`\`\`\n${cut(c, QUICK_SNIPPET_CHARS)}\n\`\`\``);
+  const body = [
+    firstUser && `## Goal\n${cut(firstUser.text, QUICK_GOAL_CHARS)}`,
+    `## Recent conversation\n${recent.join('\n\n')}`,
+    code.length && `## Key snippets\n${code.join('\n\n')}`
+  ].filter(Boolean).join('\n\n');
+  const title = (firstUser?.text.split('\n').find(l => l.trim()) || 'Quick Capsule').trim();
+  return { title: title.slice(0, 60), body };
+}
+
+/**
+ * Hand-off: a Capsule prompt (with the conversation) waiting in storage until the user opens another
+ * AI and clicks Paste & create there. One at a time; a new one replaces the old. Expires after a day.
+ */
+async function saveHandoff(area, { prompt, source }) {
+  await area.set({ [CAPSULE_HANDOFF_KEY]: { prompt, source, at: Date.now() } });
+}
+
+/** @returns {Promise<{ prompt: string, source: string, at: number }|null>} */
+async function readHandoff(area, now = Date.now()) {
+  const h = (await area.get(CAPSULE_HANDOFF_KEY))?.[CAPSULE_HANDOFF_KEY];
+  return h && typeof h.prompt === 'string' && typeof h.at === 'number' && now - h.at < HANDOFF_TTL_MS ? h : null;
+}
+
+async function clearHandoff(area) {
+  await area.remove(CAPSULE_HANDOFF_KEY);
 }
 
 /**
@@ -5239,6 +5362,7 @@ function insertText(el, text) {
 
 
 
+
 const STYLES = `
   :host { all: initial; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -5377,6 +5501,8 @@ const STYLES = `
   textarea.field { min-height: 220px; resize: vertical; font: 11px/1.5 var(--mono); scrollbar-width: thin; }
   .card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; gap: 6px; }
   .card.wait { border-style: dashed; border-color: var(--accent); }
+  .card.warn { border-color: var(--warn); }
+  .card.warn .t { color: var(--warn-text); }
   .card .t { font-weight: 600; overflow-wrap: anywhere; }
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
@@ -5591,7 +5717,24 @@ function CapsulePanel(parent, ctx) {
   const view = h('div', 'body caps hide', parent);
   const store = ctx.storage ? new CapsuleStore(ctx.storage) : null;
 
+  // The site's limit is reached: the AI here cannot write the Capsule
+  const limitCard = h('div', 'card warn hide', view);
+  limitCard.setAttribute('role', 'status');
+  const limitText = h('div', 't', limitCard);
+  h('div', 'm', limitCard, `${ctx.provider} can't write a Capsule right now. Use ⚡ Quick (no AI), or 🔀 make it in another AI.`);
+
+  // A hand-off made on another chat or site, waiting to be pasted here
+  const handoffCard = h('div', 'card hide', view);
+  const handoffText = h('div', 't', handoffCard);
+  h('div', 'm', handoffCard, `Paste it here, press Enter, and ${ctx.provider} writes the Capsule.`);
+  const handoffBtns = h('div', 'btns', handoffCard);
+
   const create = textButton(view, '📦 Create Capsule', null, 'btn primary');
+  const alt = h('div', 'btns', view);
+  const quickBtn = textButton(alt, '⚡ Quick (no AI)');
+  quickBtn.dataset.tip = 'Build it from this chat without any AI: goal, latest turns, code';
+  const handoffBtn = textButton(alt, '🔀 Make in another AI');
+  handoffBtn.dataset.tip = 'Copy this chat with the Capsule prompt; paste it into another AI that still has messages left';
   const hint = h('div', 'fine', view, 'Select part of the chat first to capture only that part.');
 
   const wait = h('div', 'card wait hide', view);
@@ -5616,15 +5759,31 @@ function CapsulePanel(parent, ctx) {
   const empty = h('div', 'fine', view, 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
 
   let pendingSelection = '';
-  let editing = null; // { id, source } of the Capsule in the editor
+  let editing = null; // { id, source, fromHandoff } of the Capsule in the editor
   let watcher = null; // { observer, timer } while waiting for the reply
+  let current = 'idle';
+  let limit = null; // Limit that blocks chatting here (chatLimitReached)
+  let handoff = null; // Waiting hand-off (readHandoff)
 
   const mode = (m) => {
-    show(create, m === 'idle');
-    show(hint, m === 'idle');
+    current = m;
+    const idle = m === 'idle';
+    show(limitCard, idle && Boolean(limit));
+    show(handoffCard, idle && Boolean(handoff));
+    show(create, idle);
+    show(alt, idle);
+    show(hint, idle);
     show(wait, m === 'waiting');
     show(draft, m === 'draft');
   };
+
+  /** Selection is read on press: the click itself may move focus away from the chat. */
+  const takeSelection = () => {
+    const s = (pendingSelection || String(window.getSelection?.() || '')).trim();
+    pendingSelection = '';
+    return s;
+  };
+  for (const b of [create, quickBtn, handoffBtn]) b.addEventListener('pointerdown', () => { pendingSelection = String(window.getSelection?.() || ''); });
 
   function stopWaiting() {
     if (!watcher) return;
@@ -5634,9 +5793,10 @@ function CapsulePanel(parent, ctx) {
     mode('idle');
   }
 
-  function openDraft(capsule) {
+  /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
+  function openDraft(capsule, fromHandoff = false) {
     stopWaiting();
-    editing = { id: capsule.id || null, source: capsule.source || ctx.provider };
+    editing = { id: capsule.id || null, source: capsule.source || ctx.provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
     mode('draft');
@@ -5644,15 +5804,18 @@ function CapsulePanel(parent, ctx) {
     titleIn.focus({ preventScroll: true });
   }
 
-  /** @param {string|null} ignoreBody Capsule already on the page before this one was asked for */
-  function startWaiting(ignoreBody) {
+  /**
+   * @param {string|null} ignoreBody Capsule already on the page before this one was asked for
+   * @param {{ source: string }|null} [from] Hand-off being written: the Capsule keeps its original site
+   */
+  function startWaiting(ignoreBody, from = null) {
     stopWaiting();
     const check = () => {
       if (!watcher) return;
       watcher.timer = null;
       const capsule = readLatestCapsule(document, ctx.replySelector, ignoreBody);
       if (!capsule) return;
-      openDraft({ ...capsule, source: ctx.provider });
+      openDraft({ ...capsule, source: from?.source || ctx.provider }, Boolean(from));
       ctx.reveal();
       ctx.toast('Capsule ready: review and save');
     };
@@ -5660,29 +5823,64 @@ function CapsulePanel(parent, ctx) {
     const observer = new MutationObserver(() => { if (watcher && !watcher.timer) watcher.timer = setTimeout(check, 500); });
     watcher = { observer, timer: null };
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    watcher.from = from;
     mode('waiting');
   }
 
-  const copy = (capsule, done) => navigator.clipboard.writeText(formatForInsert(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
-
-  // Selection is read on press: the click itself may move focus away from the chat
-  create.addEventListener('pointerdown', () => { pendingSelection = String(window.getSelection?.() || ''); });
-  create.addEventListener('click', () => {
-    const selection = (pendingSelection || String(window.getSelection?.() || '')).trim();
-    pendingSelection = '';
-    if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open a conversation first');
+  /** Fills the chat box with a prompt and waits for the Capsule in the reply. */
+  function promptAndWait(prompt, from = null) {
     const input = ctx.findInput();
     if (!input) return ctx.toast('Chat box not found');
     const ignoreBody = readLatestCapsule(document, ctx.replySelector)?.body ?? null;
-    if (!insertText(input, buildCapsulePrompt(selection))) return ctx.toast('Could not fill the chat box');
-    startWaiting(ignoreBody);
+    if (!insertText(input, prompt)) return ctx.toast('Could not fill the chat box');
+    startWaiting(ignoreBody, from);
     ctx.toast('Prompt ready: press Enter to send');
+  }
+
+  const chat = () => readTranscript(document, ctx.userSelector, ctx.replySelector);
+  const copy = (capsule, done) => navigator.clipboard.writeText(formatForInsert(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
+
+  create.addEventListener('click', () => {
+    const selection = takeSelection();
+    if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open a conversation first');
+    promptAndWait(buildCapsulePrompt(selection));
+  });
+
+  // Step 2: no AI. A selection is used as-is; otherwise goal + latest turns + code from the page
+  quickBtn.addEventListener('click', () => {
+    const selection = takeSelection();
+    const capsule = selection
+      ? { title: selection.split('\n').find(l => l.trim()).trim().slice(0, 60), body: selection }
+      : buildQuickCapsule(chat());
+    if (!capsule) return ctx.toast('Open a conversation first');
+    openDraft({ ...capsule, source: ctx.provider });
+  });
+
+  // Step 3: the prompt plus this conversation wait in storage (and the clipboard) for another AI
+  handoffBtn.addEventListener('click', async () => {
+    const selection = takeSelection();
+    const messages = chat();
+    if (!messages.length) return ctx.toast('Open a conversation first');
+    if (!ctx.storage) return ctx.toast('Storage unavailable');
+    const prompt = buildCapsulePrompt(selection, formatTranscript(messages));
+    try { await saveHandoff(ctx.storage, { prompt, source: ctx.provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
+    navigator.clipboard?.writeText(prompt).catch(() => {});
+    ctx.toast('Ready: open another AI → Capsules → Paste & create');
+  });
+
+  textButton(handoffBtns, 'Paste & create', () => {
+    if (handoff) promptAndWait(handoff.prompt, { source: handoff.source });
+  });
+  textButton(handoffBtns, 'Dismiss', async () => {
+    try { await clearHandoff(ctx.storage); } catch (_) {}
+    refresh();
   });
 
   textButton(waitBtns, 'Use last reply', () => {
     const capsule = parseCapsule(latestReplyText(document, ctx.replySelector), { loose: true });
     if (!capsule) return ctx.toast('No reply yet');
-    openDraft({ ...capsule, source: ctx.provider });
+    const from = watcher?.from;
+    openDraft({ ...capsule, source: from?.source || ctx.provider }, Boolean(from));
   });
   textButton(waitBtns, 'Cancel', stopWaiting);
 
@@ -5690,6 +5888,7 @@ function CapsulePanel(parent, ctx) {
     if (!store) return ctx.toast('Storage unavailable');
     try {
       await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value });
+      if (editing?.fromHandoff) await clearHandoff(ctx.storage);
     } catch (e) {
       return ctx.toast(e?.message === 'Capsule is empty' ? 'Capsule is empty' : 'Save failed');
     }
@@ -5729,8 +5928,23 @@ function CapsulePanel(parent, ctx) {
     }, 'btn danger');
   }
 
+  /** @param {Array} limits Widget view-state limits */
+  function setLimits(limits) {
+    limit = chatLimitReached(limits);
+    // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
+    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.provider);
+    if (limit) setText(limitText, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
+    mode(current);
+  }
+
   async function refresh() {
     if (!store) return;
+    try {
+      handoff = await readHandoff(ctx.storage);
+    } catch (_) { handoff = null; }
+    const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
+    if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
+    mode(current);
     let items;
     try { items = await store.list(); } catch (_) { return; }
     list.textContent = '';
@@ -5740,7 +5954,7 @@ function CapsulePanel(parent, ctx) {
     for (const c of items) renderItem(c);
   }
 
-  return { view, refresh, stop: stopWaiting };
+  return { view, refresh, setLimits, stop: stopWaiting };
 }
 
 class ContextWidget {
@@ -5753,6 +5967,7 @@ class ContextWidget {
       provider: adapter.provider || 'AI',
       findInput: adapter.findInput || (() => null),
       replySelector: adapter.replySelector || null,
+      userSelector: adapter.userSelector || null,
       onRefresh: adapter.onRefresh || (() => {}),
       getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
     };
@@ -5799,7 +6014,7 @@ class ContextWidget {
     // A Capsule saved or deleted on another site / tab shows up here too
     try {
       chrome.storage?.onChanged?.addListener((changes, area) => {
-        if (area === 'local' && changes[CAPSULES_KEY]) this.parts?.caps.refresh();
+        if (area === 'local' && (changes[CAPSULES_KEY] || changes[CAPSULE_HANDOFF_KEY])) this.parts?.caps.refresh();
       });
     } catch (_) {}
     this.parts.caps.refresh();
@@ -5902,6 +6117,7 @@ class ContextWidget {
       provider,
       findInput: () => this.adapter.findInput(),
       replySelector: this.adapter.replySelector,
+      userSelector: this.adapter.userSelector,
       storage: this._storage(),
       toast: (text) => this._toast(text),
       reveal: () => {
@@ -5985,6 +6201,7 @@ class ContextWidget {
   update(viewState) {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
+    this.parts?.caps.setLimits(viewState?.limits);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
     if (!this.hostElement.isConnected) (document.body || document.documentElement).appendChild(this.hostElement);
     this.render();
@@ -6691,6 +6908,7 @@ class ContentScriptCoordinator {
       provider: 'ChatGPT',
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
+      userSelector: "[data-message-author-role='user']",
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });
@@ -7630,6 +7848,7 @@ const ClaudeProvider = {
   hosts: ['claude.ai'],
   inputSelector: 'div.ProseMirror[contenteditable="true"], [data-testid="chat-input"], fieldset [contenteditable="true"]',
   replySelector: '.font-claude-response, .font-claude-message', // Assistant replies (Capsule reader)
+  userSelector: '[data-testid="user-message"]', // The user's messages (Capsule transcript)
   hasApi: true,
 
   conversationId(url) {
@@ -7898,6 +8117,7 @@ const GeminiProvider = {
   hosts: ['gemini.google.com'],
   inputSelector: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
   replySelector: 'model-response', // Assistant replies (Capsule reader)
+  userSelector: 'user-query', // The user's messages (Capsule transcript)
   hasApi: false,
 
   /**
@@ -8086,6 +8306,7 @@ class ProviderCoordinator {
       provider: provider.name,
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
+      userSelector: provider.userSelector,
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

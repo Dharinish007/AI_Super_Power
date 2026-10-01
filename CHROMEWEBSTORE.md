@@ -38,7 +38,7 @@ Key Features:
 Every declared permission serves a single necessary purpose.
 
 ### `storage`
-- **Justification:** Saves widget preferences (position, expanded state, theme and tab, per site), the last plan-usage percentages, and the Capsules the user explicitly saves (title and text) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
+- **Justification:** Saves widget preferences (position, expanded state, theme and tab, per site), the last plan-usage percentages, the Capsules the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
 
 ### Host Permission: `https://chatgpt.com/*` and `https://chat.openai.com/*`
 - **Justification:** Runs the content script on ChatGPT to read the open conversation, detect the model and plan, and draw the context meter. It reads the conversation through ChatGPT's own same-origin endpoints (`/api/auth/session`, `/backend-api/conversation/{id}`, `/backend-api/memories`). Those are the same requests the page itself makes, sent only to ChatGPT.

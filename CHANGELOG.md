@@ -19,6 +19,7 @@ All notable changes to AI Context Monitor. Versions follow `manifest.json`; bump
 
 ### Added
 - **Capsules** (widget → Capsules tab): the current AI writes a Capsule of the conversation (or the selected part), the extension detects the reply, the user edits and saves it locally, and Insert puts it in the chat box of ChatGPT, Claude or Gemini. `content/capsule.js`, `tests/unit/capsule.test.js`; privacy policy and store listing updated (saved Capsules are stored text).
+- **Capsules when the limit is reached:** the Capsules tab detects a blocking limit (ChatGPT model at 0, Claude at 100%, Gemini notice) and offers **⚡ Quick (no AI)** (Capsule built from the page) and **🔀 Make in another AI** (hand-off: the prompt plus the conversation, pasted into another AI with **Paste & create**).
 - `PRIVACY.md` (privacy policy for the store listing) and this changelog.
 - Tests: bundle up to date with its sources, sliced table build, API parse errors.
 - GitHub Actions CI (`.github/workflows/ci.yml`): lint, tests, manifest validation, packaging, and the store zip as a downloadable artifact.

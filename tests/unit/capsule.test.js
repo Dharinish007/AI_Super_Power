@@ -4,8 +4,9 @@
  */
 
 import {
-  CAPSULE_START, CAPSULE_END, CAPSULE_MAX_SELECTION, CAPSULES_KEY,
-  buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText
+  CAPSULE_START, CAPSULE_END, CAPSULE_MAX_SELECTION, CAPSULES_KEY, CAPSULE_HANDOFF_KEY,
+  buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
+  chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff
 } from '../../content/capsule.js';
 
 /** chrome.storage.local stand-in */
@@ -14,9 +15,20 @@ function fakeArea() {
   return {
     data,
     async get(key) { return key in data ? { [key]: structuredClone(data[key]) } : {}; },
-    async set(obj) { Object.assign(data, structuredClone(obj)); }
+    async set(obj) { Object.assign(data, structuredClone(obj)); },
+    async remove(key) { delete data[key]; }
   };
 }
+
+/** Message element stand-in: role via its selector, optional nesting and <pre> blocks. */
+function fakeMsg(role, text, { code = [], parent = null } = {}) {
+  return {
+    role, innerText: text, parentElement: parent,
+    matches: (sel) => sel === (role === 'user' ? 'U' : 'R'),
+    querySelectorAll: () => code.map(c => ({ querySelector: () => ({ innerText: c }) }))
+  };
+}
+const fakeChat = (nodes) => ({ querySelectorAll: () => nodes });
 
 const fakeDoc = (texts) => ({ querySelectorAll: () => texts.map(t => ({ innerText: t })) });
 
@@ -110,6 +122,67 @@ export async function runCapsuleTests() {
   assert('No chat box -> false', insertText(null, 'CAP') === false);
   if (!hadDT) delete globalThis.DataTransfer;
   if (!hadCE) delete globalThis.ClipboardEvent;
+
+  // Step 1: limit that blocks chatting
+  assert('Gemini "limit reached" notice blocks', chatLimitReached([{ key: 'limit', blocked: true }])?.key === 'limit');
+  assert('ChatGPT model with no messages left blocks', chatLimitReached([{ key: 'model:gpt-5', blocked: true }])?.key === 'model:gpt-5');
+  assert('Claude usage window at 100% blocks', chatLimitReached([{ key: 'session', percent: 100 }])?.key === 'session');
+  assert('Claude at 99%, a used-up feature (image gen) or nothing: not blocked',
+    chatLimitReached([{ key: 'session', percent: 99 }, { key: 'image_gen', blocked: true }, { key: 'model:gpt-5', blocked: false }]) === null &&
+    chatLimitReached() === null && chatLimitReached(null) === null);
+
+  // Step 2: reading the chat + Quick Capsule (no AI)
+  const wrap = fakeMsg('assistant', 'outer');
+  const chat = [
+    fakeMsg('user', 'Build a todo app in React\nwith local storage'),
+    fakeMsg('assistant', 'Sure, here is the plan', { code: ['npm create vite@latest'] }),
+    wrap, fakeMsg('assistant', 'inner copy', { parent: wrap }),
+    fakeMsg('user', '   '),
+    fakeMsg('user', 'Add dark mode')
+  ];
+  const labels = readTranscript(fakeChat([fakeMsg('assistant', 'Run this:\nbash Copy code\nnpm i\nCopy\nEdit\nDone, copy code below.')]), 'U', 'R');
+  assert('Transcript: button labels removed, words in sentences kept', labels[0].text === 'Run this:\nbash\nnpm i\nDone, copy code below.');
+  const msgs = readTranscript(fakeChat(chat), 'U', 'R');
+  assert('Transcript: page order, roles, nested match and empty messages dropped', msgs.map(m => `${m.role}:${m.text}`).join('|') ===
+    'user:Build a todo app in React\nwith local storage|assistant:Sure, here is the plan|assistant:outer|user:Add dark mode');
+  assert('Transcript: code blocks kept apart', msgs[1].code[0] === 'npm create vite@latest');
+  assert('Transcript: missing selector -> empty', readTranscript(fakeChat(chat), null, 'R').length === 0);
+
+  const quick = buildQuickCapsule(msgs);
+  assert('Quick Capsule: title from the first message line', quick.title === 'Build a todo app in React');
+  assert('Quick Capsule: goal, recent turns and snippets', quick.body.startsWith('## Goal\nBuild a todo app') &&
+    quick.body.includes('## Recent conversation\n**You:** Build') && quick.body.includes('**AI:** Sure') &&
+    quick.body.includes('## Key snippets\n```\nnpm create vite@latest\n```'));
+  const many = Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `turn ${i} ${'x'.repeat(i === 19 ? 2000 : 0)}`, code: [] }));
+  const q2 = buildQuickCapsule(many);
+  assert('Quick Capsule: only the last 6 turns, long ones cut, no empty snippets section',
+    !q2.body.includes('turn 13 ') && q2.body.includes('turn 14') && q2.body.includes('x […]') && !q2.body.includes('Key snippets'));
+  assert('Quick Capsule: no messages -> null', buildQuickCapsule([]) === null);
+
+  // Step 3: hand-off
+  const tr = formatTranscript([{ role: 'user', text: 'goal' }, { role: 'assistant', text: 'reply' }]);
+  assert('Transcript text labels each turn', tr === 'User: goal\n\nAI: reply');
+  const big = formatTranscript([{ role: 'user', text: 'G' }, ...Array.from({ length: 50 }, (_, i) => ({ role: 'assistant', text: `m${i} ${'y'.repeat(100)}` }))], 1000);
+  assert('Long chat: first message + newest that fit, gap marked', big.startsWith('User: G\n\n[… ') && big.includes('m49') && !big.includes('m0 ') && big.length <= 1100);
+  const huge = formatTranscript([{ role: 'user', text: 'G' }, { role: 'assistant', text: 'z'.repeat(5000) + 'END' }], 1000);
+  assert('Newest message alone too long: its end is kept', huge.includes('[…] ') && huge.endsWith('END') && huge.length < 1100);
+  assert('No messages -> empty transcript', formatTranscript([]) === '');
+
+  const hp = buildCapsulePrompt('', 'User: goal');
+  assert('Hand-off prompt: names the conversation, format, then the conversation last',
+    hp.includes('<conversation> tags') && hp.indexOf(CAPSULE_END) < hp.indexOf('<conversation>\nUser: goal\n</conversation>') && hp.endsWith('Now write the Capsule in the format above.'));
+  assert('Normal prompt has no conversation block', !buildCapsulePrompt().includes('<conversation>'));
+
+  const harea = fakeArea();
+  assert('No hand-off waiting', (await readHandoff(harea)) === null);
+  await saveHandoff(harea, { prompt: 'P', source: 'ChatGPT' });
+  const ho = await readHandoff(harea);
+  assert('Hand-off saved and read back', ho?.prompt === 'P' && ho.source === 'ChatGPT' && typeof ho.at === 'number');
+  assert('Hand-off expires after a day', (await readHandoff(harea, Date.now() + 25 * 3600 * 1000)) === null);
+  await clearHandoff(harea);
+  assert('Hand-off cleared', (await readHandoff(harea)) === null && !(CAPSULE_HANDOFF_KEY in harea.data));
+  harea.data[CAPSULE_HANDOFF_KEY] = { prompt: 42 };
+  assert('Corrupt hand-off ignored', (await readHandoff(harea)) === null);
 
   return { passed, failed };
 }

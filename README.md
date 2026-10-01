@@ -90,6 +90,10 @@ ChatGPT Web Page
 3. **Save** stores it in `chrome.storage.local`, one list shared by ChatGPT, Claude and Gemini.
 4. **Insert** puts it in the chat box of any of the three sites (copied to the clipboard if the box is not found); **Copy**, **Edit** and **Delete** (click twice) manage it.
 
+When the site's limit is reached (ChatGPT model with no messages left, Claude usage at 100%, Gemini's limit notice), the tab says so and offers two ways that need no messages on this site:
+- **⚡ Quick (no AI)** builds the Capsule from the page: the goal (first message), the last 6 turns and the latest code blocks, or just the selected text.
+- **🔀 Make in another AI** stores the Capsule prompt plus this conversation (up to 60K characters: the first message and the newest that fit) in `chrome.storage.local`, and copies it. On another AI, the Capsules tab shows **Paste & create**; that AI writes the Capsule, which keeps its original site. A hand-off expires after a day.
+
 ---
 
 ## 4. Known Limitations

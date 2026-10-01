@@ -31,6 +31,7 @@ export class ProviderCoordinator {
       provider: provider.name,
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
+      userSelector: provider.userSelector,
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

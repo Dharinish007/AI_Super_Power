@@ -119,6 +119,7 @@ export class ContentScriptCoordinator {
       provider: 'ChatGPT',
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
+      userSelector: "[data-message-author-role='user']",
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

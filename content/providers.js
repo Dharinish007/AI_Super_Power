@@ -118,6 +118,7 @@ export const ClaudeProvider = {
   hosts: ['claude.ai'],
   inputSelector: 'div.ProseMirror[contenteditable="true"], [data-testid="chat-input"], fieldset [contenteditable="true"]',
   replySelector: '.font-claude-response, .font-claude-message', // Assistant replies (Capsule reader)
+  userSelector: '[data-testid="user-message"]', // The user's messages (Capsule transcript)
   hasApi: true,
 
   conversationId(url) {
@@ -386,6 +387,7 @@ export const GeminiProvider = {
   hosts: ['gemini.google.com'],
   inputSelector: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
   replySelector: 'model-response', // Assistant replies (Capsule reader)
+  userSelector: 'user-query', // The user's messages (Capsule transcript)
   hasApi: false,
 
   /**
