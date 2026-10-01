@@ -263,6 +263,7 @@ export class ContextCalculator {
       observables: {
         messagesCount: messages.length,
         attachmentsCount: attachments.count,
+        attachmentFiles: attachments.files || [],
         toolsObserved: tools.observed,
         toolsList: tools.list || [],
         memoryObserved: memory.observed,

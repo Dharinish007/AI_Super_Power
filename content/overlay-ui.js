@@ -23,7 +23,7 @@
  */
 
 import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert } from './capsule.js';
-import { formatModelName, alertLevel, formatChatExport } from './widget-state.js';
+import { formatModelName, alertLevel, formatChatExport, chatIdFromHref, recordUsage } from './widget-state.js';
 
 const STYLES = `
   :host { all: initial; }
@@ -110,8 +110,8 @@ const STYLES = `
   .sec-b { padding: 0 16px 12px; }
   .sec-b[hidden] { display: none; }
 
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
   .row .k { color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .row .k { color: var(--muted); white-space: nowrap; }
   .row .v { text-align: right; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
   .divider { border-top: 1px dashed var(--border); margin: 6px 0; }
 
@@ -138,6 +138,8 @@ const STYLES = `
   .toast { position: absolute; left: 50%; bottom: 48px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px;
     background: var(--text); color: var(--surface); font-size: 11.5px; font-weight: 600; pointer-events: none; opacity: 0; transition: opacity .15s ease; }
   .toast.show { opacity: 1; }
+  .spark { display: block; width: 100%; height: 40px; }
+  .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
   .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
     font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
   .tip.show { opacity: 1; }
@@ -756,6 +758,10 @@ export class ContextWidget {
     this._drag = null;
     this._justDragged = false;
     this._storeKey = typeof location !== 'undefined' ? `ui:${location.hostname}` : 'ui';
+    this._usageKey = typeof location !== 'undefined' ? `usage:${location.hostname}` : 'usage';
+    this.compact = false; // Hero number as 61.3K instead of 61,302
+    this.badges = true; // Usage % next to the chats in the site's sidebar
+    this._usage = {};
   }
 
   mount() {
@@ -792,6 +798,7 @@ export class ContextWidget {
     this.parts.caps.refresh();
     this.parts.skills.refresh();
     this._loadPrefs();
+    this._startBadgeWatch();
     this.render();
   }
 
@@ -895,6 +902,21 @@ export class ContextWidget {
       textButton(exportBtns, label).addEventListener('click', () => exportChat(format));
     }
 
+    const growth = Section(body, 'Growth');
+    const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    spark.setAttribute('viewBox', '0 0 200 40');
+    spark.setAttribute('preserveAspectRatio', 'none');
+    spark.setAttribute('class', 'spark');
+    spark.setAttribute('role', 'img');
+    const sparkLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    spark.appendChild(sparkLine);
+    growth.body.appendChild(spark);
+    const growthText = h('div', 'fine', growth.body);
+
+    const att = Section(body, 'Attachments');
+    const attRows = RowList(att.body);
+    h('div', 'fine', att.body, 'Images use an estimate; documents the site reads server-side have no known cost here.');
+
     const hid = Section(body, 'Hidden context');
     const hidStack = HiddenStack(hid.body);
     h('div', 'fine', hid.body, `Read from ${provider}'s own data. ≈ marks estimates; anything else ${provider} adds on its servers is not visible.`);
@@ -906,7 +928,12 @@ export class ContextWidget {
     const diagWarn = h('div', 'line warn', diag.body);
     const diagRows = RowList(diag.body);
     const evidence = h('ul', 'evidence', diag.body);
-    h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not.');
+    h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not. Everything runs in your browser: nothing is sent anywhere.');
+
+    const display = Section(body, 'Display');
+    const displayBtns = h('div', 'btns', display.body);
+    const compactBtn = textButton(displayBtns, '', () => { this.compact = !this.compact; this._savePrefs(); this.render(); });
+    const badgesBtn = textButton(displayBtns, '', () => { this.badges = !this.badges; this._savePrefs(); this._paintBadges(); this.render(); });
 
     const panelCtx = {
       provider,
@@ -990,7 +1017,7 @@ export class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, bigRows, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      pill, pillDot, pillNum, pillLvl, panel, bigRows, spark, sparkLine, growthText, attRows, att, compactBtn, badgesBtn, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
       sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
@@ -1000,6 +1027,7 @@ export class ContextWidget {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
     this._maybeAlert(viewState);
+    this._trackUsage(viewState);
     this.parts?.caps.setView(viewState);
     this.parts?.skills.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
@@ -1067,6 +1095,14 @@ export class ContextWidget {
     const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
     p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
     p.bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
+    this._renderSpark(vm, ready);
+    show(p.att.el, (vm.attachmentFiles || []).length > 0);
+    p.attRows.update((vm.attachmentFiles || []).map(f => ({
+      label: f.name,
+      value: f.tokens !== null ? `~${f.tokens.toLocaleString()}` : f.inText ? 'in message text' : 'cost unknown'
+    })));
+    setText(p.compactBtn, `Exact numbers: ${this.compact ? 'off' : 'on'}`);
+    setText(p.badgesBtn, `Sidebar badges: ${this.badges ? 'on' : 'off'}`);
     p.totals.update([
       { label: 'Used', value: tokens(vm.usedTokens) },
       { label: 'Remaining', value: tokens(vm.remainingTokens) },
@@ -1109,14 +1145,14 @@ export class ContextWidget {
     const from = this._shownTokens;
     if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
       this._shownTokens = target;
-      setText(el, fmtInt(target));
+      setText(el, this._num(target));
       return;
     }
     const start = performance.now();
     const step = (t) => {
       const k = Math.min(1, (t - start) / 400);
       const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
-      setText(el, fmtInt(v));
+      setText(el, this._num(v));
       this._shownTokens = k < 1 ? v : target;
       this._countRaf = k < 1 ? requestAnimationFrame(step) : null;
     };
@@ -1147,6 +1183,72 @@ export class ContextWidget {
     this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
   }
 
+  _num(n) { return this.compact ? fmtK(Math.round(n)) : fmtInt(n); }
+
+  /** Tokens by turn as a line, scaled to the window when known (so the slope reads as "how fast it fills"). */
+  _renderSpark(vm, ready) {
+    const { spark, sparkLine, growthText } = this.parts;
+    const g = ready ? vm.growth : null;
+    if (!g || g.points.length < 2) {
+      sparkLine.setAttribute('points', '');
+      setText(growthText, 'Appears after a few messages.');
+      return;
+    }
+    const top = Math.max(vm.contextLimit || 0, g.total) || 1;
+    const pts = g.points.map((v, i) => `${((i / (g.points.length - 1)) * 200).toFixed(1)},${(38 - (v / top) * 36).toFixed(1)}`).join(' ');
+    if (sparkLine.getAttribute('points') !== pts) sparkLine.setAttribute('points', pts);
+    spark.setAttribute('aria-label', `Message tokens by turn: ${fmtInt(g.total)} over ${g.turns} turns`);
+    setText(growthText, `${g.turns} turns · ${fmtInt(g.total)} message tokens${vm.contextLimit ? ` of ${fmtK(vm.contextLimit)}` : ''}`);
+  }
+
+  /** Remembers this chat's usage and shows it next to the chat in the sidebar. */
+  _trackUsage(vm) {
+    if (!vm.ready || !vm.conversationId || vm.percentage === null) return;
+    const before = this._usage[vm.conversationId]?.pct;
+    this._usage = recordUsage(this._usage, vm.conversationId, vm.percentage);
+    if (this._usage[vm.conversationId]?.pct === before) return;
+    this._paintBadges();
+    clearTimeout(this._usageTimer);
+    this._usageTimer = setTimeout(() => {
+      try { this._storage()?.set({ [this._usageKey]: this._usage }).catch(() => {}); } catch (_) {}
+    }, 1000);
+  }
+
+  _paintBadges() {
+    const links = document.querySelectorAll('a[href*="/c/"], a[href*="/chat/"], a[href*="/app/"]');
+    const inChat = [this.adapter.replySelector, this.adapter.userSelector].filter(Boolean).join(',');
+    for (const a of links) {
+      let badge = a.querySelector(':scope > [data-ctx-badge]');
+      const id = this.badges && !(inChat && a.closest(inChat)) ? chatIdFromHref(a.getAttribute('href')) : null;
+      const u = id && this._usage[id];
+      if (!u) { badge?.remove(); continue; }
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.setAttribute('data-ctx-badge', '');
+        badge.style.cssText = 'flex:none;margin-left:6px;padding:0 5px;border:1px solid currentColor;border-radius:4px;font:600 10px/16px system-ui,sans-serif;opacity:.75;';
+        a.appendChild(badge);
+      }
+      const text = `${u.pct}%`;
+      if (badge.textContent !== text) badge.textContent = text;
+      badge.title = `Context ${text} full (Context Monitor)`;
+      const color = u.pct > 85 ? '#F87171' : u.pct >= 60 ? '#FBBF24' : '';
+      if (badge.style.color !== color) badge.style.color = color;
+    }
+  }
+
+  _startBadgeWatch() {
+    this._storage()?.get(this._usageKey).then((r) => {
+      if (r?.[this._usageKey] && typeof r[this._usageKey] === 'object') this._usage = { ...r[this._usageKey], ...this._usage };
+      this._paintBadges();
+    }).catch(() => {});
+    // The site re-renders its sidebar constantly: repaint at most every 400 ms, only when something changed
+    this._badgeObserver = new MutationObserver(() => {
+      if (this._badgeTimer) return;
+      this._badgeTimer = setTimeout(() => { this._badgeTimer = null; this._paintBadges(); }, 400);
+    });
+    this._badgeObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+  }
+
   /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
   _maybeAlert(vm) {
     if (!vm.ready || vm.percentage === null) return;
@@ -1157,6 +1259,7 @@ export class ContextWidget {
     this._toast(lvl === 95
       ? `Context ${vm.percentage}% full: start a new chat soon`
       : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
+    if (!reducedMotion()) this.parts.bar.animate?.([{ transform: 'scaleY(1)' }, { transform: 'scaleY(2.2)' }, { transform: 'scaleY(1)' }], { duration: 700, iterations: 2 });
   }
 
   _showTip(target) {
@@ -1311,6 +1414,8 @@ export class ContextWidget {
         if (THEMES.includes(s.theme)) this.theme = s.theme;
         if (['context', 'capsules', 'skills'].includes(s.tab)) this.tab = s.tab;
         this.isExpanded = Boolean(s.expanded);
+        this.compact = Boolean(s.compact);
+        this.badges = s.badges !== false;
         this.render();
       }).catch(() => {});
     } catch (_) {}
@@ -1321,11 +1426,12 @@ export class ContextWidget {
     if (!store) return;
     clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
-      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme, tab: this.tab } }).catch(() => {}); } catch (_) {}
+      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme, tab: this.tab, compact: this.compact, badges: this.badges } }).catch(() => {}); } catch (_) {}
     }, 200);
   }
 
   unmount() {
+    this._badgeObserver?.disconnect();
     this.parts?.caps.stop();
     this.parts?.skills.stop();
     this.hostElement?.remove();

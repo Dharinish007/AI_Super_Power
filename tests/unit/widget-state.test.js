@@ -3,7 +3,8 @@
  * The UI must display engine values unchanged: only formatting, never recalculation.
  */
 
-import { toWidgetState, formatModelName, alertLevel, exchangesLeft, biggestMessages, formatChatExport } from '../../content/widget-state.js';
+import { ClaudeProvider } from '../../content/providers.js';
+import { toWidgetState, formatModelName, alertLevel, exchangesLeft, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage } from '../../content/widget-state.js';
 
 export function runWidgetStateTests() {
   console.log('--- Running Widget View-State Tests ---');
@@ -74,6 +75,46 @@ export function runWidgetStateTests() {
   const js = JSON.parse(formatChatExport(chat, 'json', { provider: 'ChatGPT' }));
   assert('export json: provider and ordered messages', js.provider === 'ChatGPT' && js.messages.length === 2 && js.messages[1].role === 'assistant');
   assert('export: unknown format is refused', (() => { try { formatChatExport(chat, 'pdf'); return false; } catch (_) { return true; } })());
+
+  // Set 4: growth, attachments, sidebar badges
+  const g = growthSeries(ctxMsgs);
+  assert('growthSeries: cumulative tokens per turn', g.points.join() === '40,940,1240,1240' && g.total === 1240 && g.turns === 4);
+  const longChat = Array.from({ length: 500 }, () => ({ role: 'user', tokens: 10 }));
+  const gl = growthSeries(longChat, 48);
+  assert('growthSeries: long chats are thinned but keep the true total', gl.points.length <= 48 && gl.points[gl.points.length - 1] === 5000 && gl.turns === 500);
+  assert('growthSeries: nothing in, nothing out', growthSeries(undefined).points.length === 0);
+  assert('View state carries the growth curve', vmBig.growth.total === 1240);
+
+  const files = normalizeAttachments([
+    { name: 'a.png', type: 'image', estimatedTokens: 300, isUnknown: false },
+    { name: 'b.pdf', type: 'document', size: '2 MB', estimatedTokens: 0, isUnknown: true },
+    { name: 'c.txt', type: 'file', tokens: 120 },
+    null
+  ]);
+  assert('normalizeAttachments: known cost, unknown cost, plain tokens', files.length === 3 && files[0].tokens === 300 && files[1].tokens === null && files[1].size === '2 MB' && files[2].tokens === 120);
+  assert('normalizeAttachments: text already counted in the message is flagged', normalizeAttachments([{ name: 'n.md', type: 'document', inText: true }])[0].inText === true);
+  const claudeFiles = ClaudeProvider.normalizeConversation({
+    uuid: 'c1',
+    chat_messages: [{ uuid: 'm1', sender: 'human', text: 'hi', index: 0,
+      attachments: [{ file_name: 'notes.md', extracted_content: 'abc' }, { file_name: 'scan.pdf' }],
+      files: [{ file_name: 'pic.png', file_kind: 'image' }] }]
+  }).attachments;
+  assert('Claude lists every file; extracted text is flagged as already counted',
+    claudeFiles.count === 3 && claudeFiles.files.length === 3 && claudeFiles.files[0].inText === true && !claudeFiles.files[1].inText && claudeFiles.files[2].name === 'pic.png');
+  assert('normalizeAttachments: not a list -> empty', normalizeAttachments(undefined).length === 0);
+  const vmFiles = toWidgetState({ ...engine, observables: { ...engine.observables, attachmentFiles: [{ name: 'a.png', type: 'image', tokens: 300 }] } }, { provider: 'ChatGPT' });
+  assert('View state carries the attachment list', vmFiles.attachmentFiles.length === 1 && vmFiles.attachmentFiles[0].name === 'a.png');
+
+  assert('chatIdFromHref: ChatGPT, Claude, Gemini links',
+    chatIdFromHref('/c/68f1a2b3-1111-2222-3333-444455556666') === '68f1a2b3-1111-2222-3333-444455556666'
+    && chatIdFromHref('https://claude.ai/chat/0a1b2c3d-aaaa-bbbb-cccc-ddddeeeeffff?x=1') === '0a1b2c3d-aaaa-bbbb-cccc-ddddeeeeffff'
+    && chatIdFromHref('/app/1234abcd5678ef90') === '1234abcd5678ef90');
+  assert('chatIdFromHref: other links give null', chatIdFromHref('/gpts') === null && chatIdFromHref('/c/new') === null && chatIdFromHref(null) === null);
+  let usage = recordUsage({}, 'a'.repeat(12), 41.6, 1000);
+  assert('recordUsage: stores a rounded percentage', usage['a'.repeat(12)].pct === 42 && usage['a'.repeat(12)].at === 1000);
+  for (let i = 0; i < 5; i++) usage = recordUsage(usage, 'id' + String(i).repeat(10), 10, 2000 + i, 3);
+  assert('recordUsage: keeps only the newest N chats', Object.keys(usage).length === 3 && !usage['a'.repeat(12)] && Boolean(usage['id' + '4'.repeat(10)]));
+  assert('recordUsage: unknown percentage is ignored', Object.keys(recordUsage({}, 'x'.repeat(12), null, 1)).length === 0);
 
   assert('alertLevel: below 80% is quiet', alertLevel(79.9) === 0 && alertLevel(null) === 0);
   assert('alertLevel: 80 and 95 are the steps', alertLevel(80) === 80 && alertLevel(94.9) === 80 && alertLevel(95) === 95 && alertLevel(120) === 95);

@@ -48,6 +48,48 @@ export function exchangesLeft(vm) {
   return perExchange > 0 ? Math.floor(vm.remainingTokens / perExchange) : null;
 }
 
+/**
+ * Running token total after each turn (what the chat has cost so far), thinned to at most `max`
+ * points so a very long chat stays cheap to draw; the last point is always the true total.
+ * @param {Array<{ tokens: number }>} messages
+ * @returns {{ points: number[], total: number, turns: number }}
+ */
+export function growthSeries(messages, max = 48) {
+  let sum = 0;
+  const cumulative = (messages || []).map(m => (sum += m.tokens || 0));
+  if (cumulative.length <= max) return { points: cumulative, total: sum, turns: cumulative.length };
+  const step = (cumulative.length - 1) / (max - 1);
+  return { points: Array.from({ length: max }, (_, i) => cumulative[Math.round(i * step)]), total: sum, turns: cumulative.length };
+}
+
+/** Attachment rows from either detector shape: { name, type, size, tokens } with tokens null when the cost is unknown. */
+export function normalizeAttachments(files) {
+  if (!Array.isArray(files)) return [];
+  return files.filter(Boolean).map(f => ({
+    name: String(f.name || 'File'),
+    type: f.type || 'file',
+    size: f.size || null,
+    inText: Boolean(f.inText),
+    tokens: Number.isFinite(f.tokens) ? f.tokens : (f.isUnknown || !Number.isFinite(f.estimatedTokens) ? null : f.estimatedTokens)
+  }));
+}
+
+/** Conversation id from a sidebar link (ChatGPT /c/, Claude /chat/, Gemini /app/); null for anything else. */
+export function chatIdFromHref(href) {
+  const m = String(href || '').match(/\/(?:c|chat|app)\/([0-9a-z][0-9a-z-]{7,})(?:[/?#]|$)/i);
+  return m ? m[1] : null;
+}
+
+/** Remembers a chat's last usage percentage; keeps only the `limit` most recently seen chats. Returns a new map. */
+export function recordUsage(map, id, pct, now = Date.now(), limit = 200) {
+  if (!id || pct === null || pct === undefined || !Number.isFinite(pct)) return { ...map };
+  const next = { ...map, [id]: { pct: Math.round(pct), at: now } };
+  const ids = Object.keys(next);
+  if (ids.length <= limit) return next;
+  ids.sort((a, b) => next[b].at - next[a].at);
+  return Object.fromEntries(ids.slice(0, limit).map(k => [k, next[k]]));
+}
+
 /** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
 export function biggestMessages(messages, n = 5) {
   return (messages || [])
@@ -168,6 +210,8 @@ export function toWidgetState(s, opts = {}) {
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
     biggest: biggestMessages(s.tokens?.contextMessages),
+    growth: growthSeries(s.tokens?.contextMessages),
+    attachmentFiles: normalizeAttachments(s.observables?.attachmentFiles),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
     // What the page never shows: label, token count and the text itself, for the viewer
     hiddenItems: hiddenItems.map(i => ({
