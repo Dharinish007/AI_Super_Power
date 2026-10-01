@@ -330,6 +330,7 @@ export const ClaudeProvider = {
     const messages = [];
     let files = 0;
     let unknownFiles = 0;
+    const fileList = [];
     for (const m of chain) {
       const role = m.sender === 'human' ? 'user' : 'assistant';
       const text = [];
@@ -349,12 +350,15 @@ export const ClaudeProvider = {
       }
       for (const a of m.attachments || []) {
         files++;
+        // Extracted text is part of the message and already counted there; anything else has no known cost
+        fileList.push({ name: a.file_name, type: 'document', inText: Boolean(a.extracted_content) });
         if (a.extracted_content) text.push(a.extracted_content);
         else unknownFiles++;
       }
-      const fileCount = (m.files || []).length + (m.files_v2 || []).length;
-      files += fileCount;
-      unknownFiles += fileCount;
+      const stored = [...(m.files || []), ...(m.files_v2 || [])];
+      for (const f of stored) fileList.push({ name: f.file_name, type: f.file_kind || 'file' });
+      files += stored.length;
+      unknownFiles += stored.length;
       if (text.length) messages.push({ id: m.uuid, role, text: text.join('\n\n'), parts: [{ type: 'text', text: text.join('\n\n') }], isStreaming: false });
       if (tool.length) messages.push({ id: `${m.uuid}-tool`, role: 'tool', text: tool.join('\n\n'), parts: [{ type: 'text', text: tool.join('\n\n') }], isStreaming: false });
     }
@@ -364,7 +368,7 @@ export const ClaudeProvider = {
       messages,
       visibleTurns: chain.length,
       rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
-      attachments: { count: files, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
+      attachments: { count: files, files: fileList, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
   }
 };
@@ -497,14 +501,15 @@ export const GeminiProvider = {
     const queries = doc.querySelectorAll('user-query');
     let images = 0;
     let files = 0;
+    const list = [];
     for (const q of queries) {
       // Each uploaded file is a <user-query-file-preview>; an image one holds an <img>
       for (const f of q.querySelectorAll('user-query-file-preview')) {
-        if (f.querySelector('img')) images++;
-        else files++;
+        if (f.querySelector('img')) { images++; list.push({ name: 'Image ' + images, type: 'image', tokens: GEMINI_IMAGE_TOKENS }); }
+        else { files++; list.push({ name: 'File ' + files, type: 'file' }); }
       }
     }
-    return { count: images + files, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
+    return { count: images + files, files: list, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
   },
 
   conversationId(url) {
