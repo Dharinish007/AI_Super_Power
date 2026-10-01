@@ -1291,6 +1291,13 @@ class Tokenizer {
     this.encoders = new Map();
     // Count-only BPE (what countTokens uses), created by warm() or the first count
     this.counter = null;
+    // Other providers' tokenizers, registered once loaded (e.g. 'gemma4' on Gemini): name -> { count(text) }
+    this.extraCounters = new Map();
+  }
+
+  /** Counts for `name` use this counter from now on (resolveEncoding / isExact report it). */
+  useCounter(name, counter) {
+    this.extraCounters.set(name, counter);
   }
 
   /**
@@ -1299,7 +1306,9 @@ class Tokenizer {
    * The argument is accepted for callers that name an encoding; there is only one table.
    * @returns {BpeCounter}
    */
-  getCounter() {
+  getCounter(encodingOrModel) {
+    const extra = this.extraCounters.get(encodingOrModel);
+    if (extra) return extra;
     if (!this.counter) this.counter = new BpeCounter(o200kData, { deferred: true });
     if (!this.counter.built) {
       this.counter.build(Infinity);
@@ -1330,16 +1339,17 @@ class Tokenizer {
    * @returns {boolean}
    */
   isExact(encodingOrModel) {
+    if (this.extraCounters.has(encodingOrModel)) return true;
     return this.getEncodingForModel(encodingOrModel) === BUNDLED_ENCODING;
   }
 
   /**
-   * The encoding counts are made with. Only BUNDLED_ENCODING ships, so this is always o200k_base;
-   * isExact() tells whether that matches the model's own tokenizer.
+   * The encoding counts are made with: a registered extra counter when one was asked for and has
+   * loaded (useCounter), otherwise BUNDLED_ENCODING; isExact() tells whether that matches the model's own tokenizer.
    * @returns {string}
    */
-  resolveEncoding() {
-    return BUNDLED_ENCODING;
+  resolveEncoding(encoding) {
+    return this.extraCounters.has(encoding) ? encoding : BUNDLED_ENCODING;
   }
 
   /**
@@ -1429,7 +1439,7 @@ class Tokenizer {
       return 0;
     }
     try {
-      return this.getCounter(encodingOrModel).count(text);
+      return this.getCounter(this.resolveEncoding(encodingOrModel)).count(text);
     } catch (_) {
       // Unexpected input for the fast path: fall back to the reference encoder
       const tokens = this.encodeSafely(this.getEncoder(encodingOrModel), text);
@@ -1567,6 +1577,173 @@ class Tokenizer {
       activeEncoders: Array.from(this.encoders.keys())
     };
   }
+}
+
+
+  /**
+ * Count-only Gemma 4 tokenizer: the tokenizer Gemini counts with (Google's SDK maps gemini-3.5-flash,
+ * gemini-3.1-pro and later to Gemma 4). Data: assets/gemma4-tokenizer.bin, built from Gemma 4's
+ * tokenizer.json by scripts/build-gemma-tokenizer.js.
+ *
+ * Same pipeline as Hugging Face tokenizers for that file: added tokens split out first; spaces become
+ * "▁"; byte-fallback BPE where the lowest-rank adjacent pair merges first (leftmost on ties).
+ * Exactness against the reference implementation is checked by tests/unit/gemma-tokenizer.test.js.
+ *
+ * Speed: the whole text is one BPE word in Gemma (no pre-split), but no vocab token spans a newline
+ * next to another character, and "▁" only starts tokens (one exception, ">▁</"). So the text is cut
+ * at those points into words that BPE alone gives the same result for, and each word is counted once.
+ */
+
+const VOCAB_BITS = 262144; // 2^18 ids: pair key = left * 2^18 + right
+const POS_BITS = 67108864; // 2^26: heap key = rank * 2^26 + position
+
+class GemmaCounter {
+  /** @param {ArrayBuffer} buffer contents of gemma4-tokenizer.bin */
+  constructor(buffer) {
+    const view = new DataView(buffer);
+    if (String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== 'GEM4') throw new Error('Not a Gemma 4 tokenizer file');
+    const count = view.getUint32(4, true);
+    // A copy keeps the arrays aligned whatever the buffer's offset
+    this.merges = new Uint32Array(buffer.slice(8, 8 + count * 12));
+    this.byteIds = new Uint32Array(buffer.slice(8 + count * 12, 8 + count * 12 + 1024));
+    const jsonAt = 8 + count * 12 + 1024;
+    const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, jsonAt + 4, view.getUint32(jsonAt, true))));
+    this.chars = new Map(Object.entries(meta.chars));
+    this.ranks = new Map();
+    this._next = 0; // Next merge to add to `ranks` (see build)
+    this.built = false;
+    // Longest first, so "<|tool_call>" wins over a shorter added token at the same place
+    const added = meta.added.slice().sort((a, b) => b.length - a.length).map(s => s.replace(/[\\^$*+?.()|[\]{}]/g, '\\$&'));
+    this.addedRe = added.length ? new RegExp(added.join('|'), 'g') : null;
+    this.words = new Map(); // word -> token count
+    this.encoder = new TextEncoder();
+  }
+
+  /**
+   * Adds merges to the lookup until it is complete or about budgetMs has passed (the full build is
+   * ~0.8 s), so it can run in slices between the page's own tasks.
+   * @returns {boolean} true once complete
+   */
+  build(budgetMs) {
+    const total = this.merges.length / 3;
+    const deadline = Date.now() + budgetMs;
+    while (this._next < total) {
+      const r = this._next++;
+      this.ranks.set(this.merges[r * 3] * VOCAB_BITS + this.merges[r * 3 + 1], r);
+      if ((r & 4095) === 0 && Date.now() >= deadline) return false;
+    }
+    this.built = true;
+    return true;
+  }
+
+  /** @param {string} text */
+  count(text) {
+    if (!this.built) this.build(Infinity);
+    if (!text) return 0;
+    let total = 0;
+    let start = 0;
+    if (this.addedRe) {
+      this.addedRe.lastIndex = 0;
+      for (const m of text.matchAll(this.addedRe)) {
+        total += this.countPlain(text.slice(start, m.index)) + 1;
+        start = m.index + m[0].length;
+      }
+    }
+    return total + this.countPlain(text.slice(start));
+  }
+
+  countPlain(text) {
+    if (!text) return 0;
+    const s = text.replace(/ /g, '▁');
+    let total = 0;
+    let from = 0;
+    for (let i = 1; i < s.length; i++) {
+      const c = s[i];
+      const p = s[i - 1];
+      const cut = (c === '\n') !== (p === '\n') || (c === '▁' && p !== '▁' && p !== '>');
+      if (cut) {
+        total += this.countWord(s.slice(from, i));
+        from = i;
+      }
+    }
+    return total + this.countWord(s.slice(from));
+  }
+
+  countWord(word) {
+    const hit = this.words.get(word);
+    if (hit !== undefined) return hit;
+    const n = this.bpe(word);
+    if (this.words.size >= 200000) this.words.clear(); // Bounded; refills with what is in use
+    this.words.set(word, n);
+    return n;
+  }
+
+  /** Token count of one word: byte-fallback BPE, lowest rank first, leftmost on ties. */
+  bpe(word) {
+    const ids = [];
+    for (const ch of word) {
+      const id = this.chars.get(ch);
+      if (id !== undefined) ids.push(id);
+      else for (const b of this.encoder.encode(ch)) ids.push(this.byteIds[b]);
+    }
+    const n = ids.length;
+    if (n < 2) return n;
+    const next = new Int32Array(n);
+    const prev = new Int32Array(n);
+    for (let i = 0; i < n; i++) { next[i] = i + 1 < n ? i + 1 : -1; prev[i] = i - 1; }
+    const heap = [];
+    const push = (pos) => {
+      const r = next[pos] === -1 ? undefined : this.ranks.get(ids[pos] * VOCAB_BITS + ids[next[pos]]);
+      if (r !== undefined) heapPush(heap, r * POS_BITS + pos);
+    };
+    for (let i = 0; i < n - 1; i++) push(i);
+    let symbols = n;
+    while (heap.length) {
+      const key = heapPop(heap);
+      const pos = key % POS_BITS;
+      const rank = (key - pos) / POS_BITS;
+      const right = next[pos];
+      // Stale entry: the left symbol was merged away or its right neighbour changed
+      if (ids[pos] === -1 || right === -1 || this.ranks.get(ids[pos] * VOCAB_BITS + ids[right]) !== rank) continue;
+      ids[pos] = this.merges[rank * 3 + 2];
+      ids[right] = -1;
+      next[pos] = next[right];
+      if (next[right] !== -1) prev[next[right]] = pos;
+      symbols--;
+      if (prev[pos] !== -1) push(prev[pos]);
+      push(pos);
+    }
+    return symbols;
+  }
+}
+
+function heapPush(h, v) {
+  let i = h.push(v) - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (h[p] <= v) break;
+    h[i] = h[p];
+    i = p;
+  }
+  h[i] = v;
+}
+
+function heapPop(h) {
+  const top = h[0];
+  const last = h.pop();
+  if (h.length) {
+    let i = 0;
+    for (;;) {
+      const l = 2 * i + 1;
+      if (l >= h.length) break;
+      const c = l + 1 < h.length && h[l + 1] < h[l] ? l + 1 : l;
+      if (h[c] >= last) break;
+      h[i] = h[c];
+      i = c;
+    }
+    h[i] = last;
+  }
+  return top;
 }
 
 
@@ -2514,6 +2691,7 @@ class ContextCalculator {
       observables: {
         messagesCount: messages.length,
         attachmentsCount: attachments.count,
+        attachmentFiles: attachments.files || [],
         toolsObserved: tools.observed,
         toolsList: tools.list || [],
         memoryObserved: memory.observed,
@@ -2528,6 +2706,7 @@ class ContextCalculator {
         nonTextPartsList
       },
       accuracy,
+      tokenizerExact: input.tokenizerExact !== false,
       confidence,
       evidence: input.evidence || {
         model: {
@@ -4903,6 +5082,87 @@ function formatResetIn(at, now = Date.now()) {
   return hr ? `${hr}h ${min % 60}m` : `${min}m`;
 }
 
+/** Alert step reached by a percentage: 0 (quiet), 80 or 95. */
+function alertLevel(pct) {
+  return pct >= 95 ? 95 : pct >= 80 ? 80 : 0;
+}
+
+/**
+ * Rough count of user+assistant exchanges that still fit, from this chat's own average size.
+ * null when the window is unknown or too few turns exist to average.
+ * @param {{ remainingTokens: number|null, turns: number, stats?: { user: number, assistant: number } }} vm
+ */
+function exchangesLeft(vm) {
+  if (vm.remainingTokens === null || vm.remainingTokens === undefined || !vm.stats || vm.turns < 4) return null;
+  const perExchange = ((vm.stats.user + vm.stats.assistant) / vm.turns) * 2;
+  return perExchange > 0 ? Math.floor(vm.remainingTokens / perExchange) : null;
+}
+
+/**
+ * Running token total after each turn (what the chat has cost so far), thinned to at most `max`
+ * points so a very long chat stays cheap to draw; the last point is always the true total.
+ * @param {Array<{ tokens: number }>} messages
+ * @returns {{ points: number[], total: number, turns: number }}
+ */
+function growthSeries(messages, max = 48) {
+  let sum = 0;
+  const cumulative = (messages || []).map(m => (sum += m.tokens || 0));
+  if (cumulative.length <= max) return { points: cumulative, total: sum, turns: cumulative.length };
+  const step = (cumulative.length - 1) / (max - 1);
+  return { points: Array.from({ length: max }, (_, i) => cumulative[Math.round(i * step)]), total: sum, turns: cumulative.length };
+}
+
+/** Attachment rows from either detector shape: { name, type, size, tokens } with tokens null when the cost is unknown. */
+function normalizeAttachments(files) {
+  if (!Array.isArray(files)) return [];
+  return files.filter(Boolean).map(f => ({
+    name: String(f.name || 'File'),
+    type: f.type || 'file',
+    size: f.size || null,
+    inText: Boolean(f.inText),
+    tokens: Number.isFinite(f.tokens) ? f.tokens : (f.isUnknown || !Number.isFinite(f.estimatedTokens) ? null : f.estimatedTokens)
+  }));
+}
+
+/** Conversation id from a sidebar link (ChatGPT /c/, Claude /chat/, Gemini /app/); null for anything else. */
+function chatIdFromHref(href) {
+  const m = String(href || '').match(/\/(?:c|chat|app)\/([0-9a-z][0-9a-z-]{7,})(?:[/?#]|$)/i);
+  return m ? m[1] : null;
+}
+
+/** Remembers a chat's last usage percentage; keeps only the `limit` most recently seen chats. Returns a new map. */
+function recordUsage(map, id, pct, now = Date.now(), limit = 200) {
+  if (!id || pct === null || pct === undefined || !Number.isFinite(pct)) return { ...map };
+  const next = { ...map, [id]: { pct: Math.round(pct), at: now } };
+  const ids = Object.keys(next);
+  if (ids.length <= limit) return next;
+  ids.sort((a, b) => next[b].at - next[a].at);
+  return Object.fromEntries(ids.slice(0, limit).map(k => [k, next[k]]));
+}
+
+/** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
+function biggestMessages(messages, n = 5) {
+  return (messages || [])
+    .map((m, i) => ({ turn: i + 1, role: m.role, tokens: m.tokens || 0, preview: m.preview || '' }))
+    .filter(m => m.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, n);
+}
+
+/**
+ * The chat as a file body.
+ * @param {Array<{ role: string, text: string }>} messages
+ * @param {'md'|'txt'|'json'} format
+ * @param {{ provider?: string, title?: string }} [meta]
+ */
+function formatChatExport(messages, format, { provider = 'AI', title = 'Chat export' } = {}) {
+  const who = (m) => (m.role === 'user' ? 'You' : provider);
+  if (format === 'json') return JSON.stringify({ provider, messages: messages.map(m => ({ role: m.role, text: m.text })) }, null, 2);
+  if (format === 'txt') return messages.map(m => who(m) + ': ' + m.text).join('\n\n');
+  if (format === 'md') return '# ' + title + '\n\n' + messages.map(m => '**' + who(m) + '**\n\n' + m.text).join('\n\n---\n\n') + '\n';
+  throw new Error(`Unknown export format: ${format}`);
+}
+
 /**
  * @param {Object} s Context state produced by ContextCalculator + coordinator
  * @param {{ provider?: string }} [opts]
@@ -4950,9 +5210,18 @@ function toWidgetState(s, opts = {}) {
   const dropped = s.tokens?.excluded?.outOfWindow || { count: 0, tokens: 0 };
   const confidence = s.confidence?.percentage ?? Math.round((s.confidence?.score || 0) * 100);
 
-  const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
+  // How the conversation count was learned. An approximate tokenizer (Claude, Gemini) caps it at ESTIMATED.
+  const convoClass = s.accuracy?.conversation && (s.tokenizerExact === false && s.accuracy.conversation === 'EXACT' ? 'ESTIMATED' : s.accuracy.conversation);
+  const convoTag = convoClass ? {
+    tag: convoClass,
+    why: convoClass === 'EXACT' ? 'Counted locally with the model\'s own tokenizer over the full conversation the site returned.'
+      : authoritative ? 'Full conversation from the site, counted locally; this provider\'s own tokenizer is not public, so the count is approximate.'
+        : 'Counted locally from the text visible on the page; the site may count a little differently.'
+  } : {};
 
-  return {
+  const isLowerBound =s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
+
+  const vm = {
     provider,
     conversationId: s.observables?.conversationId || null,
     model,
@@ -4967,28 +5236,32 @@ function toWidgetState(s, opts = {}) {
     confidenceLevel: s.confidence?.level || 'LOW',
     evidence: (s.confidence?.factors || []).map(f => ({ ok: f.type === 'positive', text: f.text })),
     breakdown: [
-      { label: 'You', value: (s.tokens?.user ?? 0).toLocaleString() },
-      { label: `${provider} + tools`, value: (s.tokens?.assistant ?? 0).toLocaleString() },
+      { label: 'You', value: (s.tokens?.user ?? 0).toLocaleString(), ...convoTag },
+      { label: `${provider} + tools`, value: (s.tokens?.assistant ?? 0).toLocaleString(), ...convoTag },
       {
         label: 'Attachments',
         value: s.observables?.attachmentsCount
           ? `${s.observables.attachmentsCount} · ${(s.tokens?.attachments ?? 0).toLocaleString()} est.`
-          : 'None'
+          : 'None',
+        ...(s.accuracy?.attachments ? { tag: s.accuracy.attachments, why: 'Files and images are listed from the page; their token cost is not reported by the site.' } : {})
       },
       ...(hiddenItems.length
         ? [
             { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
             // One row for every estimate (system prompt, and on Claude the enabled tools); details in the viewer
             ...(hiddenItems.some(i => i.estimated)
-              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED' }]
+              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED', why: 'Fixed cost of the hidden instructions and tools; the size is an estimate, not reported by the site.' }]
               : [])
           ]
-        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
+        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN', why: 'Server-side instructions, memory and tools are not visible to the page, so they cannot be counted.' }]),
       // Saved in the chat but not in the current context: shown, never counted in Used
       ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
+    biggest: biggestMessages(s.tokens?.contextMessages),
+    growth: growthSeries(s.tokens?.contextMessages),
+    attachmentFiles: normalizeAttachments(s.observables?.attachmentFiles),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
     // What the page never shows: label, token count and the text itself, for the viewer
     hiddenItems: hiddenItems.map(i => ({
@@ -5015,6 +5288,8 @@ function toWidgetState(s, opts = {}) {
     diagnostics: s.diagnostics || null,
     ready: true
   };
+  vm.exchangesLeft = exchangesLeft(vm);
+  return vm;
 }
 
 
@@ -5431,6 +5706,8 @@ function insertText(el, text) {
     return true;
   }
   const doc = el.ownerDocument || (typeof document !== 'undefined' ? document : null);
+  // Text already in the box (a draft, or a Capsule inserted before a Skill) stays a separate paragraph
+  if (String(el.textContent || '').trim()) text = `\n\n${text}`;
   // Caret to the end, so a draft the user already typed stays first
   try {
     const sel = doc?.defaultView?.getSelection?.();
@@ -5564,7 +5841,7 @@ const STYLES = `
   .sec-b[hidden] { display: none; }
 
   .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
-  .row .k { color: var(--muted); white-space: nowrap; }
+  .row .k { color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .row .v { text-align: right; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
   .divider { border-top: 1px dashed var(--border); margin: 6px 0; }
 
@@ -5591,6 +5868,8 @@ const STYLES = `
   .toast { position: absolute; left: 50%; bottom: 48px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px;
     background: var(--text); color: var(--surface); font-size: 11.5px; font-weight: 600; pointer-events: none; opacity: 0; transition: opacity .15s ease; }
   .toast.show { opacity: 1; }
+  .spark { display: block; width: 100%; height: 40px; }
+  .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
   .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
     font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
   .tip.show { opacity: 1; }
@@ -5699,14 +5978,16 @@ function iconButton(parent, d, label) {
 }
 
 /** The single "≈" badge (estimated / unverified / unknown), explained in a tooltip. */
-function approx(parent, tip) {
-  const s = h('span', 'approx', parent, '≈');
+function approx(parent, tip, mark = '≈') {
+  const s = h('span', 'approx', parent, mark);
   s.dataset.tip = tip;
   s.setAttribute('aria-label', tip);
   s.tabIndex = 0;
   return s;
 }
 const TAG_TIPS = {
+  EXACT: 'Exact: counted from the full conversation',
+  OBSERVED: 'Observed: read directly from the page',
   ESTIMATED: 'Estimated: not reported by the site',
   UNKNOWN: 'Not measurable from the page',
   UNVERIFIED: 'Window from our limits table, not confirmed for this plan'
@@ -5757,7 +6038,7 @@ function RowList(parent) {
         const row = h('div', 'row', el);
         h('span', 'k', row, r.label);
         const v = h('span', 'v', row, r.value);
-        if (r.tip) approx(v, r.tip);
+        if (r.tip) approx(v, r.tip, r.mark);
       }
     }
   };
@@ -6199,6 +6480,7 @@ class ContextWidget {
     this.theme = 'auto';
     this.pos = { ...DEFAULT_POS };
     this.latestState = null;
+    this._alerted = new Map();
     this.parts = null;
     this._shownTokens = null;
     this._countRaf = null;
@@ -6206,6 +6488,10 @@ class ContextWidget {
     this._drag = null;
     this._justDragged = false;
     this._storeKey = typeof location !== 'undefined' ? `ui:${location.hostname}` : 'ui';
+    this._usageKey = typeof location !== 'undefined' ? `usage:${location.hostname}` : 'usage';
+    this.compact = false; // Hero number as 61.3K instead of 61,302
+    this.badges = true; // Usage % next to the chats in the site's sidebar
+    this._usage = {};
   }
 
   mount() {
@@ -6242,6 +6528,7 @@ class ContextWidget {
     this.parts.caps.refresh();
     this.parts.skills.refresh();
     this._loadPrefs();
+    this._startBadgeWatch();
     this.render();
   }
 
@@ -6324,6 +6611,42 @@ class ContextWidget {
     h('div', 'divider', brk.body);
     const totals = RowList(brk.body);
 
+    const bigSec = Section(body, 'Biggest messages');
+    const bigRows = RowList(bigSec.body);
+    h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
+    const exportBtns = h('div', 'btns', bigSec.body);
+    const exportChat = (format) => {
+      const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
+      if (!msgs.length) return this._toast('Open a conversation first');
+      const type = format === 'json' ? 'application/json' : 'text/plain';
+      const url = URL.createObjectURL(new Blob([formatChatExport(msgs, format, { provider })], { type }));
+      const a = h('a', null, bigSec.body);
+      a.href = url;
+      a.download = `chat-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
+    };
+    for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
+      textButton(exportBtns, label).addEventListener('click', () => exportChat(format));
+    }
+
+    const growth = Section(body, 'Growth');
+    const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    spark.setAttribute('viewBox', '0 0 200 40');
+    spark.setAttribute('preserveAspectRatio', 'none');
+    spark.setAttribute('class', 'spark');
+    spark.setAttribute('role', 'img');
+    const sparkLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    spark.appendChild(sparkLine);
+    growth.body.appendChild(spark);
+    const growthText = h('div', 'fine', growth.body);
+
+    const att = Section(body, 'Attachments');
+    const attRows = RowList(att.body);
+    h('div', 'fine', att.body, 'Images use an estimate; documents the site reads server-side have no known cost here.');
+
     const hid = Section(body, 'Hidden context');
     const hidStack = HiddenStack(hid.body);
     h('div', 'fine', hid.body, `Read from ${provider}'s own data. ≈ marks estimates; anything else ${provider} adds on its servers is not visible.`);
@@ -6335,7 +6658,12 @@ class ContextWidget {
     const diagWarn = h('div', 'line warn', diag.body);
     const diagRows = RowList(diag.body);
     const evidence = h('ul', 'evidence', diag.body);
-    h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not.');
+    h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not. Everything runs in your browser: nothing is sent anywhere.');
+
+    const display = Section(body, 'Display');
+    const displayBtns = h('div', 'btns', display.body);
+    const compactBtn = textButton(displayBtns, '', () => { this.compact = !this.compact; this._savePrefs(); this.render(); });
+    const badgesBtn = textButton(displayBtns, '', () => { this.badges = !this.badges; this._savePrefs(); this._paintBadges(); this.render(); });
 
     const panelCtx = {
       provider,
@@ -6419,7 +6747,7 @@ class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      pill, pillDot, pillNum, pillLvl, panel, bigRows, spark, sparkLine, growthText, attRows, att, compactBtn, badgesBtn, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
       sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
@@ -6428,6 +6756,8 @@ class ContextWidget {
   update(viewState) {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
+    this._maybeAlert(viewState);
+    this._trackUsage(viewState);
     this.parts?.caps.setView(viewState);
     this.parts?.skills.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
@@ -6477,7 +6807,7 @@ class ContextWidget {
     const width = known ? `${Math.min(100, vm.percentage)}%` : '';
     if (p.fill.style.width !== width) p.fill.style.width = width;
     if (known) setAttr(p.bar, 'aria-valuenow', String(vm.percentage)); else p.bar.removeAttribute('aria-valuenow');
-    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window` : 'window unknown');
+    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
     show(p.windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
     p.windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
     const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
@@ -6493,7 +6823,16 @@ class ContextWidget {
     setText(p.sHidden.v, ready ? fmtK(st.hidden) : '—');
 
     const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? TAG_TIPS[b.tag] || b.tag : null })));
+    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
+    p.bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
+    this._renderSpark(vm, ready);
+    show(p.att.el, (vm.attachmentFiles || []).length > 0);
+    p.attRows.update((vm.attachmentFiles || []).map(f => ({
+      label: f.name,
+      value: f.tokens !== null ? `~${f.tokens.toLocaleString()}` : f.inText ? 'in message text' : 'cost unknown'
+    })));
+    setText(p.compactBtn, `Exact numbers: ${this.compact ? 'off' : 'on'}`);
+    setText(p.badgesBtn, `Sidebar badges: ${this.badges ? 'on' : 'off'}`);
     p.totals.update([
       { label: 'Used', value: tokens(vm.usedTokens) },
       { label: 'Remaining', value: tokens(vm.remainingTokens) },
@@ -6536,14 +6875,14 @@ class ContextWidget {
     const from = this._shownTokens;
     if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
       this._shownTokens = target;
-      setText(el, fmtInt(target));
+      setText(el, this._num(target));
       return;
     }
     const start = performance.now();
     const step = (t) => {
       const k = Math.min(1, (t - start) / 400);
       const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
-      setText(el, fmtInt(v));
+      setText(el, this._num(v));
       this._shownTokens = k < 1 ? v : target;
       this._countRaf = k < 1 ? requestAnimationFrame(step) : null;
     };
@@ -6566,12 +6905,91 @@ class ContextWidget {
     this._savePrefs();
   }
 
-  _toast(text) {
+  _toast(text, ms = 1500) {
     const t = this.parts.toast;
     t.textContent = text;
     t.classList.add('show');
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+    this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+  }
+
+  _num(n) { return this.compact ? fmtK(Math.round(n)) : fmtInt(n); }
+
+  /** Tokens by turn as a line, scaled to the window when known (so the slope reads as "how fast it fills"). */
+  _renderSpark(vm, ready) {
+    const { spark, sparkLine, growthText } = this.parts;
+    const g = ready ? vm.growth : null;
+    if (!g || g.points.length < 2) {
+      sparkLine.setAttribute('points', '');
+      setText(growthText, 'Appears after a few messages.');
+      return;
+    }
+    const top = Math.max(vm.contextLimit || 0, g.total) || 1;
+    const pts = g.points.map((v, i) => `${((i / (g.points.length - 1)) * 200).toFixed(1)},${(38 - (v / top) * 36).toFixed(1)}`).join(' ');
+    if (sparkLine.getAttribute('points') !== pts) sparkLine.setAttribute('points', pts);
+    spark.setAttribute('aria-label', `Message tokens by turn: ${fmtInt(g.total)} over ${g.turns} turns`);
+    setText(growthText, `${g.turns} turns · ${fmtInt(g.total)} message tokens${vm.contextLimit ? ` of ${fmtK(vm.contextLimit)}` : ''}`);
+  }
+
+  /** Remembers this chat's usage and shows it next to the chat in the sidebar. */
+  _trackUsage(vm) {
+    if (!vm.ready || !vm.conversationId || vm.percentage === null) return;
+    const before = this._usage[vm.conversationId]?.pct;
+    this._usage = recordUsage(this._usage, vm.conversationId, vm.percentage);
+    if (this._usage[vm.conversationId]?.pct === before) return;
+    this._paintBadges();
+    clearTimeout(this._usageTimer);
+    this._usageTimer = setTimeout(() => {
+      try { this._storage()?.set({ [this._usageKey]: this._usage }).catch(() => {}); } catch (_) {}
+    }, 1000);
+  }
+
+  _paintBadges() {
+    const links = document.querySelectorAll('a[href*="/c/"], a[href*="/chat/"], a[href*="/app/"]');
+    const inChat = [this.adapter.replySelector, this.adapter.userSelector].filter(Boolean).join(',');
+    for (const a of links) {
+      let badge = a.querySelector(':scope > [data-ctx-badge]');
+      const id = this.badges && !(inChat && a.closest(inChat)) ? chatIdFromHref(a.getAttribute('href')) : null;
+      const u = id && this._usage[id];
+      if (!u) { badge?.remove(); continue; }
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.setAttribute('data-ctx-badge', '');
+        badge.style.cssText = 'flex:none;margin-left:6px;padding:0 5px;border:1px solid currentColor;border-radius:4px;font:600 10px/16px system-ui,sans-serif;opacity:.75;';
+        a.appendChild(badge);
+      }
+      const text = `${u.pct}%`;
+      if (badge.textContent !== text) badge.textContent = text;
+      badge.title = `Context ${text} full (Context Monitor)`;
+      const color = u.pct > 85 ? '#F87171' : u.pct >= 60 ? '#FBBF24' : '';
+      if (badge.style.color !== color) badge.style.color = color;
+    }
+  }
+
+  _startBadgeWatch() {
+    this._storage()?.get(this._usageKey).then((r) => {
+      if (r?.[this._usageKey] && typeof r[this._usageKey] === 'object') this._usage = { ...r[this._usageKey], ...this._usage };
+      this._paintBadges();
+    }).catch(() => {});
+    // The site re-renders its sidebar constantly: repaint at most every 400 ms, only when something changed
+    this._badgeObserver = new MutationObserver(() => {
+      if (this._badgeTimer) return;
+      this._badgeTimer = setTimeout(() => { this._badgeTimer = null; this._paintBadges(); }, 400);
+    });
+    this._badgeObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+  }
+
+  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
+  _maybeAlert(vm) {
+    if (!vm.ready || vm.percentage === null) return;
+    const lvl = alertLevel(vm.percentage);
+    const key = vm.conversationId || '';
+    if (lvl <= (this._alerted.get(key) || 0)) return;
+    this._alerted.set(key, lvl);
+    this._toast(lvl === 95
+      ? `Context ${vm.percentage}% full: start a new chat soon`
+      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
+    if (!reducedMotion()) this.parts.bar.animate?.([{ transform: 'scaleY(1)' }, { transform: 'scaleY(2.2)' }, { transform: 'scaleY(1)' }], { duration: 700, iterations: 2 });
   }
 
   _showTip(target) {
@@ -6726,6 +7144,8 @@ class ContextWidget {
         if (THEMES.includes(s.theme)) this.theme = s.theme;
         if (['context', 'capsules', 'skills'].includes(s.tab)) this.tab = s.tab;
         this.isExpanded = Boolean(s.expanded);
+        this.compact = Boolean(s.compact);
+        this.badges = s.badges !== false;
         this.render();
       }).catch(() => {});
     } catch (_) {}
@@ -6736,11 +7156,12 @@ class ContextWidget {
     if (!store) return;
     clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
-      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme, tab: this.tab } }).catch(() => {}); } catch (_) {}
+      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme, tab: this.tab, compact: this.compact, badges: this.badges } }).catch(() => {}); } catch (_) {}
     }, 200);
   }
 
   unmount() {
+    this._badgeObserver?.disconnect();
     this.parts?.caps.stop();
     this.parts?.skills.stop();
     this.hostElement?.remove();
@@ -7973,6 +8394,8 @@ class ContentScriptCoordinator {
  * the o200k BPE tokenizer and confidence can never be HIGH for these sites.
  */
 
+
+
 // element -> { raw, text }: cleaning clones the node, so unchanged elements reuse the last result
 const textCache = new WeakMap();
 // Set while a MutationObserver reports every page change through invalidateText(): cached text is
@@ -8293,6 +8716,7 @@ const ClaudeProvider = {
     const messages = [];
     let files = 0;
     let unknownFiles = 0;
+    const fileList = [];
     for (const m of chain) {
       const role = m.sender === 'human' ? 'user' : 'assistant';
       const text = [];
@@ -8312,12 +8736,15 @@ const ClaudeProvider = {
       }
       for (const a of m.attachments || []) {
         files++;
+        // Extracted text is part of the message and already counted there; anything else has no known cost
+        fileList.push({ name: a.file_name, type: 'document', inText: Boolean(a.extracted_content) });
         if (a.extracted_content) text.push(a.extracted_content);
         else unknownFiles++;
       }
-      const fileCount = (m.files || []).length + (m.files_v2 || []).length;
-      files += fileCount;
-      unknownFiles += fileCount;
+      const stored = [...(m.files || []), ...(m.files_v2 || [])];
+      for (const f of stored) fileList.push({ name: f.file_name, type: f.file_kind || 'file' });
+      files += stored.length;
+      unknownFiles += stored.length;
       if (text.length) messages.push({ id: m.uuid, role, text: text.join('\n\n'), parts: [{ type: 'text', text: text.join('\n\n') }], isStreaming: false });
       if (tool.length) messages.push({ id: `${m.uuid}-tool`, role: 'tool', text: tool.join('\n\n'), parts: [{ type: 'text', text: tool.join('\n\n') }], isStreaming: false });
     }
@@ -8327,7 +8754,7 @@ const ClaudeProvider = {
       messages,
       visibleTurns: chain.length,
       rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
-      attachments: { count: files, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
+      attachments: { count: files, files: fileList, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
   }
 };
@@ -8338,10 +8765,21 @@ const ClaudeProvider = {
 // plan, not the model: no AI plan 32K, Google AI Plus 128K, Google AI Pro and Ultra 1M.
 const GEMINI_LIMIT_SOURCE = 'Gemini Apps Help: limits by plan (support.google.com/gemini/answer/16275805)';
 const GEMINI_LIMITS = { free: 32000, plus: 128000, pro: 1000000, ultra: 1000000 };
-// ponytail: unpublished, a rough guess; replace with a measured value when one exists
-const GEMINI_SYSTEM_PROMPT_ESTIMATE = 1500;
-// ai.google.dev/gemini-api/docs/tokens: an image (up to 384px each side) is 258 tokens; larger ones are tiled, so this is a floor
-const GEMINI_IMAGE_TOKENS = 258;
+// Gemini's system prompt is never sent to the page. Sizes are the public leaks in
+// github.com/asgeirtj/system_prompts_leaks (Google/gemini-*.md), counted with Gemma 4 and rounded to 100
+// (measured 2026-10-01; the date is the leak's commit). Each includes that account's tools and features,
+// so a prompt with other features enabled differs: these stay estimates.
+const GEMINI_SYSTEM_PROMPTS = [
+  { family: 'flash', version: 3, tokens: 3400, date: '2026-09' },
+  { family: 'flash', version: 3.5, tokens: 3900, date: '2026-07' },
+  { family: 'flash', version: 3.7, tokens: 7900, date: '2026-08' },
+  { family: 'flash', version: 3.8, tokens: 13800, date: '2026-09' },
+  { family: 'pro', version: 3, tokens: 3000, date: '2025-12' },
+  { family: 'pro', version: 3.1, tokens: 6100, date: '2026-09' }
+];
+// Tokens per image at the default resolution. Gemini 3+: 1120 (ai.google.dev/gemini-api/docs/media-resolution,
+// checked 2026-10-01); 2.x: 258 per 768px tile (docs/tokens), so 258 is a floor there
+const geminiImageTokens = (model) => (Number(String(model || '').match(/(\d+(?:\.\d+)?)/)?.[1] ?? Infinity) >= 3 ? 1120 : 258);
 // support.google.com/gemini/answer/14620100 (Business / Enterprise, checked 2026-10-01): 1M on every edition where
 // Gemini is a core service; 32K only where it is an additional service (not detectable from the page)
 const GEMINI_WORKSPACE_SOURCE = 'Gemini Apps Help: work accounts, Business / Enterprise (support.google.com/gemini/answer/14620100)';
@@ -8351,6 +8789,10 @@ const GEMINI_WORKSPACE_LIMIT = 1000000;
 // page, continuation token at [1]. Each turn: [[c_id, r_id], _, [[userText]], [candidates, …, chosen id at 3,
 // model name at 21], [epochSeconds]]; a candidate is [rc_id, [replyText], …].
 const GEMINI_RPC_READ = 'hNvQHb';
+// Plan tier + usage windows (rpc "jSf9Qc", source path /usage). Tier ids from HanaokaYuzu/Gemini-API
+// (client.py _fetch_usage_info, 2026-08): 1 free, 2 Pro, 3 / 6 Ultra, 4 Plus
+const GEMINI_RPC_USAGE = 'jSf9Qc';
+const GEMINI_TIERS = { 1: 'free', 2: 'pro', 3: 'ultra', 4: 'plus', 6: 'ultra' };
 const GEMINI_PAGE_SIZE = 10;
 const GEMINI_MAX_PAGES = 100; // 1,000 turns
 
@@ -8402,12 +8844,29 @@ const GeminiProvider = {
   hasApi: true,
 
   /**
+   * Gemini's own tokenizer: Google's SDK counts gemini-3.1 and later (3.5 Flash, 3.1 Pro, …) with Gemma 4
+   * (googleapis/python-genai _local_tokenizer_loader.py). Older models used Gemma 3, so counts for them
+   * stay approximate. A model with no version shown is the app's current one.
+   */
+  tokenizer: {
+    name: 'gemma4',
+    file: 'assets/gemma4-tokenizer.bin',
+    create: (buffer) => new GemmaCounter(buffer),
+    exactFor(model) {
+      const v = String(model || '').match(/(\d+(?:\.\d+)?)/);
+      return !v || Number(v[1]) >= 3.1;
+    }
+  },
+
+  /**
    * The whole saved chat through Gemini's own read call (the page only holds the turns scrolled into
    * view). Pages until there is no continuation token; one retry on a failed page.
    */
   async fetchConversation(conversationId) {
     const session = geminiSession(document);
     if (!session) return null;
+    // Plan and usage limits come with every read; best effort, never blocks the conversation
+    const usage = geminiRpc(session, GEMINI_RPC_USAGE, [], '/usage').catch(() => null);
     const turns = [];
     let token = null;
     for (let page = 0; page < GEMINI_MAX_PAGES; page++) {
@@ -8419,7 +8878,30 @@ const GeminiProvider = {
       token = data[1];
       if (!token) break;
     }
-    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits: [] };
+    const { plan, limits } = this.parseUsage(await usage);
+    // A work account's window follows its Workspace edition, not this tier (the page's "Work" label decides)
+    const workAccount = Boolean(document.querySelector('[class*="tier-enterprise"]'));
+    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: workAccount ? null : plan, hidden: null, attachments: null, limits };
+  },
+
+  /**
+   * Gemini's usage RPC (checked live 2026-10-01): [tierId, [[remainingCredits, usedFraction, window, [[resetSeconds, nanos]]], …], overage].
+   * Window 1 = 5 hours, 2 = weekly, 3 = AI credits (skipped).
+   * @returns {{ plan: Object|null, limits: Array<{ key: string, label: string, percent: number, resetsAt: number|null }> }}
+   */
+  parseUsage(data) {
+    if (!Array.isArray(data)) return { plan: null, limits: [] };
+    const value = GEMINI_TIERS[data[0]];
+    const plan = value ? { value, evidenceType: 'OBSERVED' } : null;
+    const names = { 1: ['session', 'Session (5h)'], 2: ['weekly', 'Weekly'] };
+    const limits = [];
+    for (const item of Array.isArray(data[1]) ? data[1] : []) {
+      const name = names[item?.[2]];
+      if (!name || typeof item[1] !== 'number') continue;
+      const reset = item[3]?.[0]?.[0];
+      limits.push({ key: name[0], label: name[1], percent: Math.round(item[1] * 100), resetsAt: typeof reset === 'number' ? reset * 1000 : null });
+    }
+    return { plan, limits };
   },
 
   /** Saved turns (oldest first) as messages; the reply is the chosen candidate. */
@@ -8445,10 +8927,11 @@ const GeminiProvider = {
    * Gem instructions are not readable: the prompt is a fixed estimate. Images use Google's published
    * 258 tokens per image; other files have no readable size and stay unknown.
    */
-  pageHiddenContext() {
+  pageHiddenContext(model) {
+    const p = this.systemPromptEstimate(model);
     const items = [{
-      kind: 'system_prompt', label: 'Gemini system prompt (estimate)', tokens: GEMINI_SYSTEM_PROMPT_ESTIMATE, estimated: true,
-      text: `Not readable from the page. Estimated at ~${GEMINI_SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens.`
+      kind: 'system_prompt', label: `Gemini system prompt (estimate, ${p.basis})`, tokens: p.tokens, estimated: true,
+      text: `Not readable from the page. Sized from the public ${p.basis} system prompt leak (${p.date}), ~${p.tokens.toLocaleString()} tokens; enabled tools change it.`
     }];
     if (/\/gem\//.test(location.pathname)) {
       items.push({ kind: 'project', label: 'Gem instructions (not readable)', tokens: 0, estimated: true, text: 'This chat uses a Gem; its instructions are sent but cannot be read from the page.' });
@@ -8456,18 +8939,34 @@ const GeminiProvider = {
     return items;
   },
 
-  pageAttachments(doc) {
+  /**
+   * Leaked prompt closest to the model: same family (Flash-Lite and Thinking count as Flash), the highest
+   * leaked version at or below the model's, else the lowest above; no version -> the family's latest.
+   * @returns {{ tokens: number, basis: string, date: string }}
+   */
+  systemPromptEstimate(model) {
+    const s = String(model || '').toLowerCase();
+    const family = /\bpro\b/.test(s) ? 'pro' : 'flash';
+    const version = Number(s.match(/(\d+(?:\.\d+)?)/)?.[1]) || Infinity;
+    const leaks = GEMINI_SYSTEM_PROMPTS.filter(l => l.family === family);
+    const pick = leaks.filter(l => l.version <= version).pop() || leaks[0];
+    return { tokens: pick.tokens, basis: `${pick.version} ${family === 'pro' ? 'Pro' : 'Flash'}`, date: pick.date };
+  },
+
+  pageAttachments(doc, model) {
     const queries = doc.querySelectorAll('user-query');
     let images = 0;
     let files = 0;
+    const list = [];
+    const perImage = geminiImageTokens(model);
     for (const q of queries) {
       // Each uploaded file is a <user-query-file-preview>; an image one holds an <img>
       for (const f of q.querySelectorAll('user-query-file-preview')) {
-        if (f.querySelector('img')) images++;
-        else files++;
+        if (f.querySelector('img')) { images++; list.push({ name: 'Image ' + images, type: 'image', tokens: perImage }); }
+        else { files++; list.push({ name: 'File ' + files, type: 'file' }); }
       }
     }
-    return { count: images + files, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
+    return { count: images + files, files: list, estimatedTokens: images * perImage, hasUnknown: files > 0, source: 'dom' };
   },
 
   conversationId(url) {
@@ -8618,8 +9117,11 @@ class ProviderCoordinator {
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
       userSelector: provider.userSelector,
-      // Same estimate as the context count: o200k scaled to the site's tokenizer (Claude counts more)
-      countTokens: (text) => Math.round(this.tokenizer.countTokens(text) * (provider.tokenScale || 1)),
+      // Same count as the context: the site's own tokenizer once loaded, else o200k scaled to it (Claude counts more)
+      countTokens: (text) => {
+        const { encoding, scale } = this._counting();
+        return Math.round(this.tokenizer.countTokens(text, encoding) * scale);
+      },
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });
@@ -8645,6 +9147,7 @@ class ProviderCoordinator {
     trustTextCache(true);
     this.domObserver.start();
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
+    this._loadSiteTokenizer();
     this._listenForLimits();
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -8655,6 +9158,33 @@ class ProviderCoordinator {
         return true;
       });
     }
+  }
+
+  /**
+   * The site's own tokenizer (adapter `tokenizer`, e.g. Gemma 4 on Gemini), loaded from the extension
+   * package once and built in ~8 ms slices; o200k counts until it is ready, then the chat is recounted.
+   */
+  async _loadSiteTokenizer() {
+    const t = this.provider.tokenizer;
+    if (!t || typeof chrome === 'undefined' || !chrome.runtime?.getURL) return;
+    try {
+      const buffer = await (await fetch(chrome.runtime.getURL(t.file))).arrayBuffer();
+      const counter = t.create(buffer);
+      while (!counter.build(8)) await new Promise(resolve => setTimeout(resolve, 0));
+      this.tokenizer.useCounter(t.name, counter);
+      this.handleDOMChange();
+    } catch (err) {
+      console.warn(`[Context Monitor] ${this.provider.name} tokenizer unavailable, counting with o200k:`, err);
+    }
+  }
+
+  /** Encoding to count with, its correction factor, and whether it is the model's own tokenizer. */
+  _counting(modelRaw = null) {
+    const t = this.provider.tokenizer;
+    if (t && this.tokenizer.resolveEncoding(t.name) === t.name) {
+      return { encoding: t.name, scale: 1, exact: t.exactFor ? t.exactFor(modelRaw) : true };
+    }
+    return { encoding: 'o200k_base', scale: this.provider.tokenScale || 1, exact: false };
   }
 
   /** Same-origin JSON GET with the page's cookies; throws on HTTP errors. */
@@ -8827,19 +9357,19 @@ class ProviderCoordinator {
       const plan = ev.plan?.value || 'unknown';
       const limit = p.resolveLimit(modelRaw, plan);
 
-      // Tokens: o200k BPE as an estimate (the provider's tokenizer is not public), scaled by the
-      // adapter's correction factor for counted text (fixed-cost estimates are already in its tokens)
-      const scale = p.tokenScale || 1;
+      // Tokens: the site's own tokenizer when it is public and loaded (Gemini); otherwise o200k BPE as
+      // an estimate, scaled by the adapter's correction factor (fixed-cost estimates are already in tokens)
+      const { encoding, scale, exact } = this._counting(modelRaw);
       const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
-        const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
-        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
+        const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], encoding);
+        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming), preview: String(m.text || '').slice(0, 80) };
       });
-      const attachments = saved?.attachments || p.pageAttachments?.(document) || { count: 0, estimatedTokens: 0, hasUnknown: false };
+      const attachments = saved?.attachments || p.pageAttachments?.(document, modelRaw) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
       // Only once the chat has a message: nothing is sent before that.
-      const hidden = messages.length ? (saved?.hidden || p.pageHiddenContext?.() || []).map(i => (i.tokens !== undefined ? i
-        : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, 'o200k_base')) })) : [];
+      const hidden = messages.length ? (saved?.hidden || p.pageHiddenContext?.(modelRaw) || []).map(i => (i.tokens !== undefined ? i
+        : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, encoding)) })) : [];
 
       const state = ContextCalculator.calculate({
         messages: tokenized,
@@ -8851,7 +9381,7 @@ class ProviderCoordinator {
           limitStatus: limit.status,
           limitSource: limit.source,
           recognized: limit.recognized,
-          encoding: 'o200k_base'
+          encoding
         },
         plan: ev.plan,
         attachments,
@@ -8864,7 +9394,7 @@ class ProviderCoordinator {
         conflicts: reconciled.conflicts,
         agreements: reconciled.agreements,
         networkHealth: { networkAvailable: false },
-        tokenizerExact: false
+        tokenizerExact: exact
       });
 
       state.observables.dataSource = dataSource;
@@ -8889,7 +9419,7 @@ class ProviderCoordinator {
         reference: windowKnown ? limit.source : null,
         evidenceType: windowKnown ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
       };
-      ev.tokens = { total: { value: state.tokens.totalMeasurable, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED, approximate: true } };
+      ev.tokens = { total: { value: state.tokens.totalMeasurable, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED, approximate: !exact || hidden.some(i => i.estimated) } };
 
       if (!awaitingData && conversationId && !this._sessionStartTokens.has(conversationId)) this._sessionStartTokens.set(conversationId, state.tokens.totalMeasurable);
       state.intelligence = analyzeContext({
@@ -8917,7 +9447,7 @@ class ProviderCoordinator {
         conflicts: reconciled.conflicts.map(c => ({ field: c.field, winning: `${c.winning.source}:${c.winning.value}`, discarded: `${c.discarded.source}:${c.discarded.value}` })),
         agreements: reconciled.agreements,
         resolved: { model: modelRaw, plan, limit: state.model.contextWindow, limitStatus: ev.limit.status, limitReference: ev.limit.reference },
-        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: `o200k_base x${scale} (approximate for this provider)` },
+        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: exact ? `${encoding} (the model's own tokenizer)` : `${encoding} x${scale} (approximate for this provider)` },
         limits: state.limits.map(l => `${l.key}:${typeof l.percent === 'number' ? `${l.percent}%` : l.remaining ?? (l.note ? 'note' : 'pending')}`),
         confidence: { level: state.confidence.level, percentage: state.confidence.percentage, highBlockers: state.confidence.highBlockers || [] },
         intelligence: { health: state.intelligence.health.level, advice: state.intelligence.advice.title }

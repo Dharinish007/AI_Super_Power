@@ -21,6 +21,7 @@ import { runConfidenceDiagnosticsTests } from './unit/confidence-diagnostics.tes
 import { runProvidersTests } from './unit/providers.test.js';
 import { runPerformanceTests } from './unit/performance.test.js';
 import { runCapsuleTests } from './unit/capsule.test.js';
+import { runGemmaTokenizerTests } from './unit/gemma-tokenizer.test.js';
 
 console.log('========================================================');
 console.log('  ChatGPT Context Monitor - Production Test Suite');
@@ -143,6 +144,12 @@ console.log('');
 const r19 = await runCapsuleTests();
 totalPassed += r19.passed;
 totalFailed += r19.failed;
+console.log('');
+
+// 20. Gemma 4 tokenizer (Gemini) == reference implementation
+const r20 = runGemmaTokenizerTests();
+totalPassed += r20.passed;
+totalFailed += r20.failed;
 console.log('');
 
 const t1 = performance.now();

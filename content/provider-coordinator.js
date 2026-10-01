@@ -32,8 +32,11 @@ export class ProviderCoordinator {
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
       userSelector: provider.userSelector,
-      // Same estimate as the context count: o200k scaled to the site's tokenizer (Claude counts more)
-      countTokens: (text) => Math.round(this.tokenizer.countTokens(text) * (provider.tokenScale || 1)),
+      // Same count as the context: the site's own tokenizer once loaded, else o200k scaled to it (Claude counts more)
+      countTokens: (text) => {
+        const { encoding, scale } = this._counting();
+        return Math.round(this.tokenizer.countTokens(text, encoding) * scale);
+      },
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });
@@ -59,6 +62,7 @@ export class ProviderCoordinator {
     trustTextCache(true);
     this.domObserver.start();
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
+    this._loadSiteTokenizer();
     this._listenForLimits();
     if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
       chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -69,6 +73,33 @@ export class ProviderCoordinator {
         return true;
       });
     }
+  }
+
+  /**
+   * The site's own tokenizer (adapter `tokenizer`, e.g. Gemma 4 on Gemini), loaded from the extension
+   * package once and built in ~8 ms slices; o200k counts until it is ready, then the chat is recounted.
+   */
+  async _loadSiteTokenizer() {
+    const t = this.provider.tokenizer;
+    if (!t || typeof chrome === 'undefined' || !chrome.runtime?.getURL) return;
+    try {
+      const buffer = await (await fetch(chrome.runtime.getURL(t.file))).arrayBuffer();
+      const counter = t.create(buffer);
+      while (!counter.build(8)) await new Promise(resolve => setTimeout(resolve, 0));
+      this.tokenizer.useCounter(t.name, counter);
+      this.handleDOMChange();
+    } catch (err) {
+      console.warn(`[Context Monitor] ${this.provider.name} tokenizer unavailable, counting with o200k:`, err);
+    }
+  }
+
+  /** Encoding to count with, its correction factor, and whether it is the model's own tokenizer. */
+  _counting(modelRaw = null) {
+    const t = this.provider.tokenizer;
+    if (t && this.tokenizer.resolveEncoding(t.name) === t.name) {
+      return { encoding: t.name, scale: 1, exact: t.exactFor ? t.exactFor(modelRaw) : true };
+    }
+    return { encoding: 'o200k_base', scale: this.provider.tokenScale || 1, exact: false };
   }
 
   /** Same-origin JSON GET with the page's cookies; throws on HTTP errors. */
@@ -241,19 +272,19 @@ export class ProviderCoordinator {
       const plan = ev.plan?.value || 'unknown';
       const limit = p.resolveLimit(modelRaw, plan);
 
-      // Tokens: o200k BPE as an estimate (the provider's tokenizer is not public), scaled by the
-      // adapter's correction factor for counted text (fixed-cost estimates are already in its tokens)
-      const scale = p.tokenScale || 1;
+      // Tokens: the site's own tokenizer when it is public and loaded (Gemini); otherwise o200k BPE as
+      // an estimate, scaled by the adapter's correction factor (fixed-cost estimates are already in tokens)
+      const { encoding, scale, exact } = this._counting(modelRaw);
       const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
-        const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
+        const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], encoding);
         return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming), preview: String(m.text || '').slice(0, 80) };
       });
-      const attachments = saved?.attachments || p.pageAttachments?.(document) || { count: 0, estimatedTokens: 0, hasUnknown: false };
+      const attachments = saved?.attachments || p.pageAttachments?.(document, modelRaw) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
       // Only once the chat has a message: nothing is sent before that.
-      const hidden = messages.length ? (saved?.hidden || p.pageHiddenContext?.() || []).map(i => (i.tokens !== undefined ? i
-        : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, 'o200k_base')) })) : [];
+      const hidden = messages.length ? (saved?.hidden || p.pageHiddenContext?.(modelRaw) || []).map(i => (i.tokens !== undefined ? i
+        : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, encoding)) })) : [];
 
       const state = ContextCalculator.calculate({
         messages: tokenized,
@@ -265,7 +296,7 @@ export class ProviderCoordinator {
           limitStatus: limit.status,
           limitSource: limit.source,
           recognized: limit.recognized,
-          encoding: 'o200k_base'
+          encoding
         },
         plan: ev.plan,
         attachments,
@@ -278,7 +309,7 @@ export class ProviderCoordinator {
         conflicts: reconciled.conflicts,
         agreements: reconciled.agreements,
         networkHealth: { networkAvailable: false },
-        tokenizerExact: false
+        tokenizerExact: exact
       });
 
       state.observables.dataSource = dataSource;
@@ -303,7 +334,7 @@ export class ProviderCoordinator {
         reference: windowKnown ? limit.source : null,
         evidenceType: windowKnown ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
       };
-      ev.tokens = { total: { value: state.tokens.totalMeasurable, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED, approximate: true } };
+      ev.tokens = { total: { value: state.tokens.totalMeasurable, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED, approximate: !exact || hidden.some(i => i.estimated) } };
 
       if (!awaitingData && conversationId && !this._sessionStartTokens.has(conversationId)) this._sessionStartTokens.set(conversationId, state.tokens.totalMeasurable);
       state.intelligence = analyzeContext({
@@ -331,7 +362,7 @@ export class ProviderCoordinator {
         conflicts: reconciled.conflicts.map(c => ({ field: c.field, winning: `${c.winning.source}:${c.winning.value}`, discarded: `${c.discarded.source}:${c.discarded.value}` })),
         agreements: reconciled.agreements,
         resolved: { model: modelRaw, plan, limit: state.model.contextWindow, limitStatus: ev.limit.status, limitReference: ev.limit.reference },
-        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: `o200k_base x${scale} (approximate for this provider)` },
+        tokens: { used: state.tokens.totalMeasurable, remaining: state.tokens.remaining, percentage: state.utilization.percentage, tokenizer: exact ? `${encoding} (the model's own tokenizer)` : `${encoding} x${scale} (approximate for this provider)` },
         limits: state.limits.map(l => `${l.key}:${typeof l.percent === 'number' ? `${l.percent}%` : l.remaining ?? (l.note ? 'note' : 'pending')}`),
         confidence: { level: state.confidence.level, percentage: state.confidence.percentage, highBlockers: state.confidence.highBlockers || [] },
         intelligence: { health: state.intelligence.health.level, advice: state.intelligence.advice.title }

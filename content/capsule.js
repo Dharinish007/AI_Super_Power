@@ -411,6 +411,8 @@ export function insertText(el, text) {
     return true;
   }
   const doc = el.ownerDocument || (typeof document !== 'undefined' ? document : null);
+  // Text already in the box (a draft, or a Capsule inserted before a Skill) stays a separate paragraph
+  if (String(el.textContent || '').trim()) text = `\n\n${text}`;
   // Caret to the end, so a draft the user already typed stays first
   try {
     const sel = doc?.defaultView?.getSelection?.();

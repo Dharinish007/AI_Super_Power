@@ -97,6 +97,8 @@ When the site's limit is reached (ChatGPT model with no messages left, Claude us
 - **⚡ Quick (no AI)** builds the Capsule from the page: the goal (first message), the last 6 turns and the latest code blocks, or just the selected text.
 - **🔀 Make in another AI** stores the Capsule prompt plus this conversation (up to 60K characters: the first message and the newest that fit) in `chrome.storage.local`, and copies it. On another AI, the Capsules tab shows **Paste & create**; that AI writes the Capsule, which keeps its original site. A hand-off expires after a day.
 
+**Skills** (widget → **Skills** tab): reusable instructions for how the AI should answer ("Code reviewer", "Explain simply"). **＋ New Skill** opens the editor; three starter Skills appear the first time (deleting them is remembered). Insert adds `Follow these instructions for the rest of this chat (Skill: …)` plus the text. Insert always appends to the chat box, so a Capsule then a Skill go in one message. Same list, cost line and Export / Import (`skills-YYYY-MM-DD.json`) as Capsules, stored under `skills`.
+
 ---
 
 ## 4. Known Limitations

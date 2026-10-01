@@ -118,6 +118,8 @@ export async function runCapsuleTests() {
   const doc = { execCommand: (cmd, _ui, v) => { typed = cmd === 'insertText' ? v : null; return true; } };
   const plain = { tagName: 'DIV', focus() {}, ownerDocument: doc, dispatchEvent() { return true; } };
   assert('Unhandled paste falls back to insertText', insertText(plain, 'CAP') === true && typed === 'CAP');
+  const filled = { tagName: 'DIV', textContent: 'Capsule text', focus() {}, ownerDocument: doc, dispatchEvent() { return true; } };
+  assert('Rich editor with text already in it: a blank line before the new text', insertText(filled, 'SKILL') && typed === '\n\nSKILL');
   const dead = { tagName: 'DIV', focus() {}, ownerDocument: { execCommand: () => false }, dispatchEvent() { return true; } };
   assert('Nothing takes the text -> false (caller copies instead)', insertText(dead, 'CAP') === false);
   assert('No chat box -> false', insertText(null, 'CAP') === false);

@@ -23,7 +23,8 @@ AI Context Monitor is a browser extension that shows how much of the AI model's 
 
 - `chrome.storage.local`: widget position, expanded state, theme and open tab for each site, and your last Claude usage-limit percentages and reset times.
 - `chrome.storage.local`: Capsules you saved (title, text, site name, dates). You can edit or delete each one in the Capsules tab.
-- A Capsules file, only when you click Export: it is downloaded to your device by your browser and goes nowhere else. Import reads a file you pick.
+- `chrome.storage.local`: Skills (instructions you write, plus three starter Skills you can edit or delete).
+- A Capsules or Skills file, only when you click Export: it is downloaded to your device by your browser and goes nowhere else. Import reads a file you pick.
 - `chrome.storage.local`: at most one pending hand-off (Capsule prompt plus the conversation you chose to hand off), removed when used, dismissed, or after a day.
 
 Nothing else is stored: no other message text, no memory text, conversation IDs, tokens or cookies. The toolbar badge receives only the current percentage.
