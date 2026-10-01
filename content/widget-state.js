@@ -32,6 +32,22 @@ export function formatResetIn(at, now = Date.now()) {
   return hr ? `${hr}h ${min % 60}m` : `${min}m`;
 }
 
+/** Alert step reached by a percentage: 0 (quiet), 80 or 95. */
+export function alertLevel(pct) {
+  return pct >= 95 ? 95 : pct >= 80 ? 80 : 0;
+}
+
+/**
+ * Rough count of user+assistant exchanges that still fit, from this chat's own average size.
+ * null when the window is unknown or too few turns exist to average.
+ * @param {{ remainingTokens: number|null, turns: number, stats?: { user: number, assistant: number } }} vm
+ */
+export function exchangesLeft(vm) {
+  if (vm.remainingTokens === null || vm.remainingTokens === undefined || !vm.stats || vm.turns < 4) return null;
+  const perExchange = ((vm.stats.user + vm.stats.assistant) / vm.turns) * 2;
+  return perExchange > 0 ? Math.floor(vm.remainingTokens / perExchange) : null;
+}
+
 /**
  * @param {Object} s Context state produced by ContextCalculator + coordinator
  * @param {{ provider?: string }} [opts]
@@ -81,7 +97,7 @@ export function toWidgetState(s, opts = {}) {
 
   const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
 
-  return {
+  const vm = {
     provider,
     conversationId: s.observables?.conversationId || null,
     model,
@@ -144,4 +160,6 @@ export function toWidgetState(s, opts = {}) {
     diagnostics: s.diagnostics || null,
     ready: true
   };
+  vm.exchangesLeft = exchangesLeft(vm);
+  return vm;
 }

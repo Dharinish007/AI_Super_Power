@@ -23,7 +23,7 @@
  */
 
 import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert } from './capsule.js';
-import { formatModelName } from './widget-state.js';
+import { formatModelName, alertLevel } from './widget-state.js';
 
 const STYLES = `
   :host { all: initial; }
@@ -746,6 +746,7 @@ export class ContextWidget {
     this.theme = 'auto';
     this.pos = { ...DEFAULT_POS };
     this.latestState = null;
+    this._alerted = new Map();
     this.parts = null;
     this._shownTokens = null;
     this._countRaf = null;
@@ -975,6 +976,7 @@ export class ContextWidget {
   update(viewState) {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
+    this._maybeAlert(viewState);
     this.parts?.caps.setView(viewState);
     this.parts?.skills.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
@@ -1024,7 +1026,7 @@ export class ContextWidget {
     const width = known ? `${Math.min(100, vm.percentage)}%` : '';
     if (p.fill.style.width !== width) p.fill.style.width = width;
     if (known) setAttr(p.bar, 'aria-valuenow', String(vm.percentage)); else p.bar.removeAttribute('aria-valuenow');
-    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window` : 'window unknown');
+    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
     show(p.windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
     p.windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
     const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
@@ -1113,12 +1115,24 @@ export class ContextWidget {
     this._savePrefs();
   }
 
-  _toast(text) {
+  _toast(text, ms = 1500) {
     const t = this.parts.toast;
     t.textContent = text;
     t.classList.add('show');
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+    this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+  }
+
+  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
+  _maybeAlert(vm) {
+    if (!vm.ready || vm.percentage === null) return;
+    const lvl = alertLevel(vm.percentage);
+    const key = vm.conversationId || '';
+    if (lvl <= (this._alerted.get(key) || 0)) return;
+    this._alerted.set(key, lvl);
+    this._toast(lvl === 95
+      ? `Context ${vm.percentage}% full: start a new chat soon`
+      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
   }
 
   _showTip(target) {
