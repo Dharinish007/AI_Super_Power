@@ -2528,6 +2528,7 @@ class ContextCalculator {
         nonTextPartsList
       },
       accuracy,
+      tokenizerExact: input.tokenizerExact !== false,
       confidence,
       evidence: input.evidence || {
         model: {
@@ -4903,6 +4904,45 @@ function formatResetIn(at, now = Date.now()) {
   return hr ? `${hr}h ${min % 60}m` : `${min}m`;
 }
 
+/** Alert step reached by a percentage: 0 (quiet), 80 or 95. */
+function alertLevel(pct) {
+  return pct >= 95 ? 95 : pct >= 80 ? 80 : 0;
+}
+
+/**
+ * Rough count of user+assistant exchanges that still fit, from this chat's own average size.
+ * null when the window is unknown or too few turns exist to average.
+ * @param {{ remainingTokens: number|null, turns: number, stats?: { user: number, assistant: number } }} vm
+ */
+function exchangesLeft(vm) {
+  if (vm.remainingTokens === null || vm.remainingTokens === undefined || !vm.stats || vm.turns < 4) return null;
+  const perExchange = ((vm.stats.user + vm.stats.assistant) / vm.turns) * 2;
+  return perExchange > 0 ? Math.floor(vm.remainingTokens / perExchange) : null;
+}
+
+/** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
+function biggestMessages(messages, n = 5) {
+  return (messages || [])
+    .map((m, i) => ({ turn: i + 1, role: m.role, tokens: m.tokens || 0, preview: m.preview || '' }))
+    .filter(m => m.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, n);
+}
+
+/**
+ * The chat as a file body.
+ * @param {Array<{ role: string, text: string }>} messages
+ * @param {'md'|'txt'|'json'} format
+ * @param {{ provider?: string, title?: string }} [meta]
+ */
+function formatChatExport(messages, format, { provider = 'AI', title = 'Chat export' } = {}) {
+  const who = (m) => (m.role === 'user' ? 'You' : provider);
+  if (format === 'json') return JSON.stringify({ provider, messages: messages.map(m => ({ role: m.role, text: m.text })) }, null, 2);
+  if (format === 'txt') return messages.map(m => who(m) + ': ' + m.text).join('\n\n');
+  if (format === 'md') return '# ' + title + '\n\n' + messages.map(m => '**' + who(m) + '**\n\n' + m.text).join('\n\n---\n\n') + '\n';
+  throw new Error(`Unknown export format: ${format}`);
+}
+
 /**
  * @param {Object} s Context state produced by ContextCalculator + coordinator
  * @param {{ provider?: string }} [opts]
@@ -4950,9 +4990,18 @@ function toWidgetState(s, opts = {}) {
   const dropped = s.tokens?.excluded?.outOfWindow || { count: 0, tokens: 0 };
   const confidence = s.confidence?.percentage ?? Math.round((s.confidence?.score || 0) * 100);
 
-  const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
+  // How the conversation count was learned. An approximate tokenizer (Claude, Gemini) caps it at ESTIMATED.
+  const convoClass = s.accuracy?.conversation && (s.tokenizerExact === false && s.accuracy.conversation === 'EXACT' ? 'ESTIMATED' : s.accuracy.conversation);
+  const convoTag = convoClass ? {
+    tag: convoClass,
+    why: convoClass === 'EXACT' ? 'Counted locally with the model\'s own tokenizer over the full conversation the site returned.'
+      : authoritative ? 'Full conversation from the site, counted locally; this provider\'s own tokenizer is not public, so the count is approximate.'
+        : 'Counted locally from the text visible on the page; the site may count a little differently.'
+  } : {};
 
-  return {
+  const isLowerBound =s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
+
+  const vm = {
     provider,
     conversationId: s.observables?.conversationId || null,
     model,
@@ -4967,28 +5016,30 @@ function toWidgetState(s, opts = {}) {
     confidenceLevel: s.confidence?.level || 'LOW',
     evidence: (s.confidence?.factors || []).map(f => ({ ok: f.type === 'positive', text: f.text })),
     breakdown: [
-      { label: 'You', value: (s.tokens?.user ?? 0).toLocaleString() },
-      { label: `${provider} + tools`, value: (s.tokens?.assistant ?? 0).toLocaleString() },
+      { label: 'You', value: (s.tokens?.user ?? 0).toLocaleString(), ...convoTag },
+      { label: `${provider} + tools`, value: (s.tokens?.assistant ?? 0).toLocaleString(), ...convoTag },
       {
         label: 'Attachments',
         value: s.observables?.attachmentsCount
           ? `${s.observables.attachmentsCount} · ${(s.tokens?.attachments ?? 0).toLocaleString()} est.`
-          : 'None'
+          : 'None',
+        ...(s.accuracy?.attachments ? { tag: s.accuracy.attachments, why: 'Files and images are listed from the page; their token cost is not reported by the site.' } : {})
       },
       ...(hiddenItems.length
         ? [
             { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
             // One row for every estimate (system prompt, and on Claude the enabled tools); details in the viewer
             ...(hiddenItems.some(i => i.estimated)
-              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED' }]
+              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED', why: 'Fixed cost of the hidden instructions and tools; the size is an estimate, not reported by the site.' }]
               : [])
           ]
-        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
+        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN', why: 'Server-side instructions, memory and tools are not visible to the page, so they cannot be counted.' }]),
       // Saved in the chat but not in the current context: shown, never counted in Used
       ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
+    biggest: biggestMessages(s.tokens?.contextMessages),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
     // What the page never shows: label, token count and the text itself, for the viewer
     hiddenItems: hiddenItems.map(i => ({
@@ -5015,6 +5066,8 @@ function toWidgetState(s, opts = {}) {
     diagnostics: s.diagnostics || null,
     ready: true
   };
+  vm.exchangesLeft = exchangesLeft(vm);
+  return vm;
 }
 
 
@@ -5034,6 +5087,7 @@ function toWidgetState(s, opts = {}) {
  *   CapsuleStore        list / save / remove / importMany in chrome.storage.local (one list shared by all sites)
  *   exportCapsules      export file text; normalizeCapsule checks each imported Capsule
  *   Skills              the same store under SKILLS_KEY: reusable instructions (formatSkillForInsert, STARTER_SKILLS)
+ *   Library             tags, project and pin on every item; searchItems, formatManyForInsert (tick several)
  *   insertText          puts text in a site's chat box (rich editor or textarea)
  */
 
@@ -5112,6 +5166,14 @@ function chatLimitReached(limits = []) {
   )) || null;
 }
 
+/** Live page text without the button labels of the sites' code blocks and message toolbars. */
+function cleanPageText(s) {
+  return String(s || '').split('\n')
+    .filter(l => !/^\s*(Copy|Copy code|Copied!|Edit|Retry|Share)\s*$/i.test(l))
+    .map(l => l.replace(/\s*\b(Copy code|Copied!)\s*$/i, '')) // "bash Copy code" header -> "bash"
+    .join('\n').trim();
+}
+
 /**
  * The visible conversation, read live (line breaks kept), in page order. Code blocks are also kept
  * apart for the Quick Capsule's snippets.
@@ -5125,16 +5187,11 @@ function readTranscript(doc, userSelector, replySelector) {
   const nodes = [...doc.querySelectorAll(`${userSelector}, ${replySelector}`)];
   const matched = new Set(nodes);
   const inner = (el) => String(el?.innerText || el?.textContent || '').trim();
-  // Live text includes button labels of the sites' code blocks and message toolbars
-  const clean = (s) => s.split('\n')
-    .filter(l => !/^\s*(Copy|Copy code|Copied!|Edit|Retry|Share)\s*$/i.test(l))
-    .map(l => l.replace(/\s*\b(Copy code|Copied!)\s*$/i, '')) // "bash Copy code" header -> "bash"
-    .join('\n').trim();
   return nodes
     .filter(n => { for (let p = n.parentElement; p; p = p.parentElement) if (matched.has(p)) return false; return true; })
     .map(n => ({
       role: n.matches(replySelector) ? 'assistant' : 'user',
-      text: clean(inner(n)),
+      text: cleanPageText(inner(n)),
       code: [...n.querySelectorAll('pre')].map(pre => inner(pre.querySelector('code') || pre)).filter(Boolean)
     }))
     .filter(m => m.text);
@@ -5219,11 +5276,13 @@ function parseCapsule(text, { loose = false } = {}) {
   const fence = body.match(/^(`{3,})[\w-]*\n/);
   if (fence && body.endsWith(`\n${fence[1]}`)) body = body.slice(fence[0].length, -fence[1].length - 1).trim();
 
+  // Title line: only the first line ("Title: x", "**Title:** x"); a "title:" further down (YAML in a
+  // snippet) is content and stays
   let title = '';
-  const m = body.match(/^[ \t]*\**title\**:\**[ \t]*(.+)$/im); // "Title: x", "**Title:** x"
+  const m = body.match(/^\**title\**:\**[ \t]*(.+)/i);
   if (m) {
     title = m[1];
-    body = (body.slice(0, m.index) + body.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+    body = body.slice(m[0].length).trim();
   }
   if (!body) return null;
   title = (title || body.split('\n').find(l => l.trim()) || '').replace(/^[#\s*"'`]+|[*"'`\s]+$/g, '');
@@ -5235,7 +5294,7 @@ function latestReplyText(doc, replySelector) {
   if (!doc || !replySelector) return '';
   const replies = doc.querySelectorAll(replySelector);
   const last = replies[replies.length - 1];
-  return last ? String(last.innerText || last.textContent || '').trim() : '';
+  return last ? cleanPageText(last.innerText || last.textContent) : '';
 }
 
 /**
@@ -5341,17 +5400,31 @@ class CapsuleStore {
     const list = await this.list();
     const now = Date.now();
     const i = capsule.id ? list.findIndex(c => c.id === capsule.id) : -1;
+    const old = i >= 0 ? list[i] : null;
     const item = {
-      id: i >= 0 ? list[i].id : newCapsuleId(),
+      id: old ? old.id : newCapsuleId(),
       title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || `Untitled ${this.noun}`,
       body,
-      source: capsule.source || (i >= 0 ? list[i].source : null) || 'AI',
-      createdAt: i >= 0 ? list[i].createdAt : now,
+      source: capsule.source || old?.source || 'AI',
+      // Library fields: given ones replace, missing ones are kept (Update and Edit keep tags and pin)
+      tags: normalizeTags(capsule.tags ?? old?.tags),
+      project: normalizeProject(capsule.project !== undefined ? capsule.project : old?.project),
+      pinned: Boolean(capsule.pinned ?? old?.pinned),
+      createdAt: old ? old.createdAt : now,
       updatedAt: now
     };
     if (i >= 0) list[i] = item; else list.unshift(item);
     await this.area.set({ [this.key]: list });
     return item;
+  }
+
+  /** Pin or unpin; not an edit, so updatedAt (which import merges by) is unchanged. */
+  async setPinned(id, pinned) {
+    const list = await this.list();
+    const item = list.find(c => c.id === id);
+    if (!item) return;
+    item.pinned = Boolean(pinned);
+    await this.area.set({ [this.key]: list });
   }
 
   async remove(id) {
@@ -5406,9 +5479,94 @@ function normalizeCapsule(raw, now = Date.now(), noun = 'Capsule') {
     title: str(raw.title, CAPSULE_TITLE_MAX) || `Untitled ${noun}`,
     body: raw.body.trim().slice(0, CAPSULE_MAX_BODY),
     source: str(raw.source, 20) || 'Import',
+    tags: normalizeTags(raw.tags),
+    project: normalizeProject(raw.project),
+    pinned: raw.pinned === true,
     createdAt,
     updatedAt: Math.max(createdAt, time(raw.updatedAt))
   };
+}
+
+const TAGS_MAX = 10;
+const TAG_CHARS = 30;
+const PROJECT_CHARS = 40;
+
+/**
+ * Tags from the editor ("work, #Auth") or a stored / imported array: lowercase, no '#' or ',',
+ * at most 30 characters each, at most 10, no duplicates. Anything else gives [].
+ * @param {string|string[]|undefined} input
+ * @returns {string[]}
+ */
+function normalizeTags(input) {
+  const raw = typeof input === 'string' ? input.split(',') : Array.isArray(input) ? input : [];
+  const out = [];
+  for (const t of raw) {
+    if (typeof t !== 'string') continue;
+    const tag = t.replace(/[#,]/g, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, TAG_CHARS);
+    if (tag && !out.includes(tag)) out.push(tag);
+    if (out.length === TAGS_MAX) break;
+  }
+  return out;
+}
+
+/** Project name (≤ 40 characters), or null for none. */
+function normalizeProject(input) {
+  return typeof input === 'string' && input.trim() ? input.trim().slice(0, PROJECT_CHARS) : null;
+}
+
+/** Projects in use, A-Z (for the filter and the editor's suggestions). */
+function projectsOf(items) {
+  return [...new Set((items || []).map(c => c.project).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Library search. Every term must match (title, tags, project or text); `#tag` matches tags only.
+ * Order: pinned first, then best match (title 3, tag or project 2, text 1 per term), then newest.
+ * An empty query lists everything, pinned first, newest first.
+ * @param {Array} items Saved Capsules or Skills
+ * @param {string} [query]
+ * @param {{ project?: string|null }} [opts] Only this project
+ */
+function searchItems(items, query = '', { project = null } = {}) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const scored = [];
+  for (const c of items || []) {
+    if (project && c.project !== project) continue;
+    const tags = c.tags || [];
+    let score = 0;
+    let all = true;
+    for (const term of terms) {
+      if (term.startsWith('#') && term.length > 1) {
+        const t = term.slice(1);
+        if (tags.some(tag => tag.startsWith(t))) score += 2; else { all = false; break; }
+        continue;
+      }
+      const s = (String(c.title || '').toLowerCase().includes(term) ? 3 : 0) +
+        (tags.some(tag => tag.includes(term)) || String(c.project || '').toLowerCase().includes(term) ? 2 : 0) +
+        (String(c.body || '').toLowerCase().includes(term) ? 1 : 0);
+      if (!s) { all = false; break; }
+      score += s;
+    }
+    if (all) scored.push({ c, score });
+  }
+  return scored
+    .sort((a, b) => (b.c.pinned ? 1 : 0) - (a.c.pinned ? 1 : 0) || b.score - a.score || (b.c.updatedAt || 0) - (a.c.updatedAt || 0))
+    .map(x => x.c);
+}
+
+/**
+ * One insert for several ticked items: a header line, then each as "### title" + text. A single item
+ * keeps its usual wording.
+ * @param {Array<{ title: string, body: string }>} items
+ * @param {'capsule'|'skill'} [kind]
+ */
+function formatManyForInsert(items, kind = 'capsule') {
+  const list = items || [];
+  if (list.length === 1) return kind === 'skill' ? formatSkillForInsert(list[0]) : formatForInsert(list[0]);
+  const parts = list.map(c => `### ${c.title}\n${c.body}`).join('\n\n');
+  return kind === 'skill'
+    ? `Follow these instructions for the rest of this chat (Skills: ${list.map(c => c.title).join(', ')}):\n\n${parts}`
+    : `Context from earlier AI conversations (${list.length} Capsules). Use it as background for what I ask next.\n\n${parts}`;
 }
 
 /**
@@ -5431,6 +5589,8 @@ function insertText(el, text) {
     return true;
   }
   const doc = el.ownerDocument || (typeof document !== 'undefined' ? document : null);
+  // Text already in the box (a draft, or a Capsule inserted before a Skill) stays a separate paragraph
+  if (String(el.textContent || '').trim()) text = `\n\n${text}`;
   // Caret to the end, so a draft the user already typed stays first
   try {
     const sel = doc?.defaultView?.getSelection?.();
@@ -5563,7 +5723,7 @@ const STYLES = `
   .sec-b { padding: 0 16px 12px; }
   .sec-b[hidden] { display: none; }
 
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
+  .row .k { color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .row .k { color: var(--muted); white-space: nowrap; }
   .row .v { text-align: right; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
   .divider { border-top: 1px dashed var(--border); margin: 6px 0; }
@@ -5620,6 +5780,23 @@ const STYLES = `
   .card.warn { border-color: var(--warn); }
   .card.warn .t { color: var(--warn-text); }
   .card .m.bad { color: var(--danger); }
+  .hero .card { margin-top: 10px; }
+
+  /* Library: search, tags, pin, tick several */
+  .two { display: flex; gap: 6px; }
+  .two .field { flex: 1; min-width: 0; }
+  .two select.field { flex: 0 1 auto; max-width: 120px; }
+  .card .th { display: flex; align-items: center; gap: 8px; }
+  .card .th .t { flex: 1; min-width: 0; }
+  .card input[type=checkbox] { width: 14px; height: 14px; flex: none; accent-color: var(--accent); cursor: pointer; }
+  .card.on { border-color: var(--accent); }
+  .pin { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; opacity: .35; filter: grayscale(1); }
+  .pin:hover { opacity: .8; background: var(--hover); }
+  .pin.on { opacity: 1; filter: none; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { font-size: 11px; color: var(--accent); padding: 0 4px; border-radius: 4px; }
+  .chip:hover { background: var(--hover); }
+  .pick { position: sticky; bottom: 0; z-index: 1; background: var(--surface); border-color: var(--accent); box-shadow: 0 -6px 16px rgba(0, 0, 0, .18); }
   .card .t { font-weight: 600; overflow-wrap: anywhere; }
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
@@ -5699,14 +5876,16 @@ function iconButton(parent, d, label) {
 }
 
 /** The single "≈" badge (estimated / unverified / unknown), explained in a tooltip. */
-function approx(parent, tip) {
-  const s = h('span', 'approx', parent, '≈');
+function approx(parent, tip, mark = '≈') {
+  const s = h('span', 'approx', parent, mark);
   s.dataset.tip = tip;
   s.setAttribute('aria-label', tip);
   s.tabIndex = 0;
   return s;
 }
 const TAG_TIPS = {
+  EXACT: 'Exact: counted from the full conversation',
+  OBSERVED: 'Observed: read directly from the page',
   ESTIMATED: 'Estimated: not reported by the site',
   UNKNOWN: 'Not measurable from the page',
   UNVERIFIED: 'Window from our limits table, not confirmed for this plan'
@@ -5757,7 +5936,7 @@ function RowList(parent) {
         const row = h('div', 'row', el);
         h('span', 'k', row, r.label);
         const v = h('span', 'v', row, r.value);
-        if (r.tip) approx(v, r.tip);
+        if (r.tip) approx(v, r.tip, r.mark);
       }
     }
   };
@@ -5874,15 +6053,36 @@ function CapsulePanel(parent, ctx) {
   titleIn.placeholder = isSkill ? 'Skill name, e.g. Code reviewer' : 'Title';
   titleIn.maxLength = 80;
   titleIn.setAttribute('aria-label', `${noun} title`);
+  const metaRow = h('div', 'two', draft);
+  const projectIn = h('input', 'field', metaRow);
+  projectIn.placeholder = '📁 Project';
+  projectIn.maxLength = 40;
+  projectIn.setAttribute('aria-label', `${noun} project`);
+  const projectList = h('datalist', null, draft); // Suggests the projects already in use
+  projectList.id = `${ctx.kind || 'capsule'}-projects`;
+  projectIn.setAttribute('list', projectList.id);
+  const tagsIn = h('input', 'field', metaRow);
+  tagsIn.placeholder = '🏷️ Tags: work, auth';
+  tagsIn.setAttribute('aria-label', `${noun} tags, separated by commas`);
   const bodyIn = h('textarea', 'field', draft);
   bodyIn.spellcheck = false;
   bodyIn.setAttribute('aria-label', `${noun} text`);
   if (isSkill) bodyIn.placeholder = 'How the AI should answer, e.g. "Review my code like a senior developer. Bugs first, be short."';
   const draftBtns = h('div', 'btns', draft);
 
+  // Library: search (every word must match; #tag = tags only) and a project filter
+  const searchRow = h('div', 'two hide', view);
+  const searchIn = h('input', 'field', searchRow);
+  searchIn.type = 'search';
+  searchIn.placeholder = `🔍 Search ${noun}s… (#tag)`;
+  searchIn.setAttribute('aria-label', `Search ${noun}s`);
+  const projectSel = h('select', 'field', searchRow);
+  projectSel.setAttribute('aria-label', 'Show one project');
+
   const listHead = h('div', 'caps-h hide', view);
   const list = h('div', 'caps', view);
   list.style.padding = '0';
+  const noMatch = h('div', 'fine hide', view, 'No matches. Try fewer words, or "All projects".');
   const empty = h('div', 'fine', view, isSkill
     ? 'No Skills yet. A Skill is an instruction you reuse, like "Explain simply". Add one, then insert it into any AI.'
     : 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
@@ -5895,6 +6095,16 @@ function CapsulePanel(parent, ctx) {
   fileIn.type = 'file';
   fileIn.accept = '.json,application/json';
   fileIn.setAttribute('aria-label', `${noun}s file to import`);
+
+  // Ticked items: one insert for all of them, with what it costs here
+  const pick = h('div', 'card pick hide', view);
+  pick.setAttribute('role', 'status');
+  const pickText = h('div', 't', pick);
+  const pickCost = h('div', 'm', pick);
+  const pickBtns = h('div', 'btns', pick);
+  let query = '';
+  let projectFilter = '';
+  const selected = new Set(); // Ticked ids; kept while the list re-renders
 
   let items = []; // Saved Capsules (or Skills), newest first
   let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
@@ -5948,6 +6158,13 @@ function CapsulePanel(parent, ctx) {
     editing = { id: capsule.id || null, source: capsule.source || ctx.provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
+    // An Update's new text has no tags or project: the saved item's win. A new one starts in the
+    // project being shown.
+    const stored = capsule.id ? items.find(c => c.id === capsule.id) : null;
+    tagsIn.value = ((stored || capsule).tags || []).join(', ');
+    projectIn.value = stored ? (stored.project || '') : (capsule.project || projectFilter);
+    projectList.textContent = '';
+    for (const p of projectsOf(items)) h('option', null, projectList).value = p;
     mode('draft');
     bodyIn.scrollTop = 0;
     titleIn.focus({ preventScroll: true });
@@ -6037,7 +6254,7 @@ function CapsulePanel(parent, ctx) {
   textButton(draftBtns, 'Save', async () => {
     if (!store) return ctx.toast('Storage unavailable');
     try {
-      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value });
+      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value, tags: tagsIn.value, project: projectIn.value });
       if (editing?.fromHandoff) await clearHandoff(ctx.storage);
     } catch (e) {
       return ctx.toast(e?.message === `${noun} is empty` ? e.message : 'Save failed');
@@ -6049,8 +6266,10 @@ function CapsulePanel(parent, ctx) {
   });
   textButton(draftBtns, 'Discard', () => { editing = null; mode('idle'); });
 
-  // Keys typed in the editor stay in it: the sites move focus to their chat box on stray keystrokes
-  for (const type of ['keydown', 'keypress', 'keyup']) draft.addEventListener(type, (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
+  // Keys typed in the editor or search stay there: the sites move focus to their chat box on stray keystrokes
+  for (const type of ['keydown', 'keypress', 'keyup']) {
+    view.addEventListener(type, (e) => { if (e.key !== 'Escape' && e.target.matches?.('input, textarea, select')) e.stopPropagation(); });
+  }
 
   /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version). */
   function tokensOf(capsule) {
@@ -6064,10 +6283,35 @@ function CapsulePanel(parent, ctx) {
   }
 
   function renderItem(capsule) {
-    const card = h('div', 'card', list);
-    h('div', 't', card, capsule.title);
+    const card = h('div', `card${selected.has(capsule.id) ? ' on' : ''}`, list);
+    const th = h('div', 'th', card);
+    const box = h('input', null, th);
+    box.type = 'checkbox';
+    box.checked = selected.has(capsule.id);
+    box.setAttribute('aria-label', `Pick "${capsule.title}" to insert together with others`);
+    box.addEventListener('change', () => {
+      if (box.checked) selected.add(capsule.id); else selected.delete(capsule.id);
+      card.classList.toggle('on', box.checked);
+      updatePick();
+    });
+    h('div', 't', th, capsule.title);
+    const pinLabel = capsule.pinned ? 'Unpin' : 'Pin to the top';
+    const pin = textButton(th, '📌', async () => {
+      try { await store.setPinned(capsule.id, !capsule.pinned); } catch (_) { return ctx.toast('Pin failed'); }
+      refresh();
+    }, `pin${capsule.pinned ? ' on' : ''}`);
+    pin.setAttribute('aria-pressed', String(Boolean(capsule.pinned)));
+    pin.setAttribute('aria-label', pinLabel);
+    pin.dataset.tip = pinLabel;
     const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    h('div', 'm', card, `${capsule.source} · ${date}`);
+    h('div', 'm', card, `${capsule.source} · ${date}${capsule.project ? ` · 📁 ${capsule.project}` : ''}`);
+    if (capsule.tags?.length) {
+      const tagRow = h('div', 'tags', card);
+      for (const t of capsule.tags) {
+        const chip = textButton(tagRow, `#${t}`, () => { searchIn.value = query = `#${t}`; renderList(); }, 'chip');
+        chip.setAttribute('aria-label', `Show only #${t}`);
+      }
+    }
     const tokens = tokensOf(capsule);
     if (tokens !== null) {
       const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
@@ -6138,13 +6382,62 @@ function CapsulePanel(parent, ctx) {
   }
 
   function renderList() {
+    // Project filter: options follow the projects in use; a project that no longer exists resets it
+    const projects = projectsOf(items);
+    if (projectSel.dataset.sig !== projects.join('\n')) {
+      projectSel.dataset.sig = projects.join('\n');
+      projectSel.textContent = '';
+      h('option', null, projectSel, 'All projects').value = '';
+      for (const p of projects) h('option', null, projectSel, `📁 ${p}`).value = p;
+      if (!projects.includes(projectFilter)) projectFilter = '';
+      projectSel.value = projectFilter;
+    }
+    show(projectSel, projects.length > 0);
+
+    const shown = searchItems(items, query, { project: projectFilter || null });
     list.textContent = '';
-    setText(listHead, `Saved (${items.length})`);
+    setText(listHead, query.trim() || projectFilter ? `Found ${shown.length} of ${items.length}` : `Saved (${items.length})`);
     show(listHead, items.length > 0);
+    show(searchRow, items.length > 0);
     show(empty, items.length === 0);
+    show(noMatch, items.length > 0 && shown.length === 0);
     show(exportBtn, items.length > 0);
-    for (const c of items) renderItem(c);
+    for (const c of shown) renderItem(c);
+    updatePick();
   }
+
+  searchIn.addEventListener('input', () => { query = searchIn.value; renderList(); });
+  projectSel.addEventListener('change', () => { projectFilter = projectSel.value; renderList(); });
+
+  /** Footer for the ticked items: count, cost of inserting them together, room left. */
+  function updatePick() {
+    for (const id of [...selected]) if (!items.some(c => c.id === id)) selected.delete(id); // Deleted elsewhere
+    const picked = items.filter(c => selected.has(c.id));
+    show(pick, picked.length > 0);
+    if (!picked.length) return;
+    setText(pickText, `☑️ ${picked.length} ${noun}${picked.length === 1 ? '' : 's'} picked`);
+    let tokens = null;
+    try { tokens = ctx.countTokens ? ctx.countTokens(formatManyForInsert(picked, ctx.kind)) : null; } catch (_) {}
+    const cost = tokens === null ? null : formatCost(tokens, view_.contextLimit, view_.remaining);
+    setText(pickCost, !cost ? '' : cost.tooBig ? `${cost.text} · too big for this chat`
+      : `${cost.text}${view_.remaining !== null ? ` · ${fmtK(view_.remaining)} left` : ''}`);
+    pickCost.classList.toggle('bad', Boolean(cost?.tooBig));
+  }
+
+  const pickedText = () => formatManyForInsert(items.filter(c => selected.has(c.id)), ctx.kind);
+  textButton(pickBtns, 'Insert all', () => {
+    const input = ctx.findInput();
+    const text = pickedText();
+    if (input && insertText(input, text)) {
+      ctx.toast(`Inserted ${selected.size}: add your question and send`);
+      selected.clear();
+      renderList();
+    } else {
+      navigator.clipboard.writeText(text).then(() => ctx.toast('Chat box not found: copied instead'), () => ctx.toast('Copy failed'));
+    }
+  });
+  textButton(pickBtns, 'Copy', () => navigator.clipboard.writeText(pickedText()).then(() => ctx.toast('Copied'), () => ctx.toast('Copy failed')));
+  textButton(pickBtns, 'Clear', () => { selected.clear(); renderList(); });
 
   // Export: one JSON file with every Capsule (a download; no permission needed)
   exportBtn.addEventListener('click', () => {
@@ -6173,7 +6466,11 @@ function CapsulePanel(parent, ctx) {
     }
   });
 
-  return { view, refresh, setView, stop: stopWaiting };
+  // Capture this chat from outside the tab (Context tab "Save as Capsule"): the AI writes it, or
+  // Quick (no AI) when the site's limit is reached
+  const capture = () => (limit ? quickBtn : create).click();
+
+  return { view, refresh, setView, capture, stop: stopWaiting };
 }
 
 class ContextWidget {
@@ -6199,6 +6496,7 @@ class ContextWidget {
     this.theme = 'auto';
     this.pos = { ...DEFAULT_POS };
     this.latestState = null;
+    this._alerted = new Map();
     this.parts = null;
     this._shownTokens = null;
     this._countRaf = null;
@@ -6308,6 +6606,14 @@ class ContextWidget {
     const limitLine = h('div', 'line', hero);
     const warnLine = h('div', 'line warn', hero);
     warnLine.setAttribute('role', 'status');
+    // At 80% full: save the chat as a Capsule now, and continue in a new chat with it
+    const saveCard = h('div', 'card warn hide', hero);
+    const saveText = h('div', 't', saveCard);
+    h('div', 'm', saveCard, 'Save it as a Capsule, then insert it in a new chat to keep going.');
+    textButton(h('div', 'btns', saveCard), '📦 Save as Capsule', () => {
+      this._setTab('capsules');
+      this.parts.caps.capture();
+    });
 
     const stats = h('div', 'stats', body);
     const stat = (label) => {
@@ -6323,6 +6629,27 @@ class ContextWidget {
     const brkRows = RowList(brk.body);
     h('div', 'divider', brk.body);
     const totals = RowList(brk.body);
+
+    const bigSec = Section(body, 'Biggest messages');
+    const bigRows = RowList(bigSec.body);
+    h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
+    const exportBtns = h('div', 'btns', bigSec.body);
+    const exportChat = (format) => {
+      const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
+      if (!msgs.length) return this._toast('Open a conversation first');
+      const type = format === 'json' ? 'application/json' : 'text/plain';
+      const url = URL.createObjectURL(new Blob([formatChatExport(msgs, format, { provider })], { type }));
+      const a = h('a', null, bigSec.body);
+      a.href = url;
+      a.download = `chat-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
+    };
+    for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
+      textButton(exportBtns, label).addEventListener('click', () => exportChat(format));
+    }
 
     const hid = Section(body, 'Hidden context');
     const hidStack = HiddenStack(hid.body);
@@ -6419,8 +6746,8 @@ class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
-      sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
+      pill, pillDot, pillNum, pillLvl, panel, bigRows, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      saveCard, saveText, sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
 
@@ -6428,6 +6755,7 @@ class ContextWidget {
   update(viewState) {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
+    this._maybeAlert(viewState);
     this.parts?.caps.setView(viewState);
     this.parts?.skills.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
@@ -6477,7 +6805,7 @@ class ContextWidget {
     const width = known ? `${Math.min(100, vm.percentage)}%` : '';
     if (p.fill.style.width !== width) p.fill.style.width = width;
     if (known) setAttr(p.bar, 'aria-valuenow', String(vm.percentage)); else p.bar.removeAttribute('aria-valuenow');
-    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window` : 'window unknown');
+    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
     show(p.windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
     p.windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
     const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
@@ -6486,6 +6814,9 @@ class ContextWidget {
     const head = headlineLimit(vm.limits);
     setText(p.limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
     setText(p.warnLine, vm.warning || '');
+    const full = ready && vm.percentage !== null && alertLevel(vm.percentage) >= 80;
+    show(p.saveCard, full);
+    if (full) setText(p.saveText, `💡 This chat is ${vm.percentage}% full`);
 
     const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
     setText(p.sUser.v, ready ? fmtK(st.user) : '—');
@@ -6493,7 +6824,8 @@ class ContextWidget {
     setText(p.sHidden.v, ready ? fmtK(st.hidden) : '—');
 
     const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? TAG_TIPS[b.tag] || b.tag : null })));
+    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
+    p.bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
     p.totals.update([
       { label: 'Used', value: tokens(vm.usedTokens) },
       { label: 'Remaining', value: tokens(vm.remainingTokens) },
@@ -6566,12 +6898,24 @@ class ContextWidget {
     this._savePrefs();
   }
 
-  _toast(text) {
+  _toast(text, ms = 1500) {
     const t = this.parts.toast;
     t.textContent = text;
     t.classList.add('show');
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+    this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+  }
+
+  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
+  _maybeAlert(vm) {
+    if (!vm.ready || vm.percentage === null) return;
+    const lvl = alertLevel(vm.percentage);
+    const key = vm.conversationId || '';
+    if (lvl <= (this._alerted.get(key) || 0)) return;
+    this._alerted.set(key, lvl);
+    this._toast(lvl === 95
+      ? `Context ${vm.percentage}% full: start a new chat soon`
+      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
   }
 
   _showTip(target) {
@@ -8833,7 +9177,7 @@ class ProviderCoordinator {
       const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
-        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
+        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming), preview: String(m.text || '').slice(0, 80) };
       });
       const attachments = saved?.attachments || p.pageAttachments?.(document) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.

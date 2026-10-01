@@ -97,6 +97,15 @@ When the site's limit is reached (ChatGPT model with no messages left, Claude us
 - **⚡ Quick (no AI)** builds the Capsule from the page: the goal (first message), the last 6 turns and the latest code blocks, or just the selected text.
 - **🔀 Make in another AI** stores the Capsule prompt plus this conversation (up to 60K characters: the first message and the newest that fit) in `chrome.storage.local`, and copies it. On another AI, the Capsules tab shows **Paste & create**; that AI writes the Capsule, which keeps its original site. A hand-off expires after a day.
 
+**Skills** (widget → **Skills** tab): reusable instructions for how the AI should answer ("Code reviewer", "Explain simply"). **＋ New Skill** opens the editor; three starter Skills appear the first time (deleting them is remembered). Insert adds `Follow these instructions for the rest of this chat (Skill: …)` plus the text. Insert always appends to the chat box, so a Capsule then a Skill go in one message. Same list, cost line and Export / Import (`skills-YYYY-MM-DD.json`) as Capsules, stored under `skills`.
+
+**Library** (Capsules and Skills tabs):
+- 🔍 **Search**: every word must match the title, tags, project or text; `#tag` matches tags only. Pinned first, then best match (title, then tag / project, then text), then newest.
+- 🏷️ **Tags** and 📁 **project** in the editor (projects in use are suggested); a 📁 filter shows one project, a `#tag` chip on a card searches that tag. **Update** and **Edit** keep them.
+- 📌 **Pin** keeps an item on top (not counted as an edit, so Import's newer-wins merge is unaffected).
+- ☑️ **Tick several** items: a footer shows `2 Capsules picked · ~2.1K tokens · 1.1% of window · 150K left` (red when it does not fit) with **Insert all** / Copy / Clear. They go in as one message: a header line, then `### title` + text for each.
+- 💡 At **80% full**, the Context tab offers **📦 Save as Capsule** (the AI writes it, or Quick when the site's limit is reached), to continue in a new chat.
+
 ---
 
 ## 4. Known Limitations
