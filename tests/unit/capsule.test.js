@@ -6,7 +6,8 @@
 import {
   CAPSULE_START, CAPSULE_END, CAPSULE_MAX_SELECTION, CAPSULES_KEY, CAPSULE_HANDOFF_KEY,
   buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
-  chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff
+  chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
+  formatCost, exportCapsules, normalizeCapsule
 } from '../../content/capsule.js';
 
 /** chrome.storage.local stand-in */
@@ -183,6 +184,45 @@ export async function runCapsuleTests() {
   assert('Hand-off cleared', (await readHandoff(harea)) === null && !(CAPSULE_HANDOFF_KEY in harea.data));
   harea.data[CAPSULE_HANDOFF_KEY] = { prompt: 42 };
   assert('Corrupt hand-off ignored', (await readHandoff(harea)) === null);
+
+  // Milestone 2: cost
+  assert('Cost: small count, no window', formatCost(850).text === '~850 tokens' && formatCost(850).tooBig === false);
+  assert('Cost: K format and % of window', formatCost(1234, 200000).text === '~1.2K tokens · 0.6% of window');
+  assert('Cost: tiny share and round K', formatCost(1000, 2000000).text === '~1K tokens · <0.1% of window');
+  assert('Cost: big share rounded', formatCost(16000, 32000).text === '~16K tokens · 50% of window');
+  assert('Cost: too big for the room left', formatCost(5000, 32000, 4000).tooBig && !formatCost(5000, 32000, 6000).tooBig && !formatCost(5000, null, null).tooBig);
+
+  // Milestone 2: update prompt
+  const up = buildCapsulePrompt('', '', { title: 'Auth plan', body: '## Goal\nJWT' });
+  assert('Update prompt: asks to update, carries the old Capsule after the format',
+    up.startsWith('Update the Capsule') && up.indexOf(CAPSULE_END) < up.indexOf('<previous-capsule>\nTitle: Auth plan\n## Goal\nJWT\n</previous-capsule>') && !up.includes('<conversation>'));
+
+  // Milestone 2: export / import
+  const xarea = fakeArea();
+  const xs = new CapsuleStore(xarea);
+  const one = await xs.save({ title: 'One', body: 'b1', source: 'Claude' });
+  const file = exportCapsules(await xs.list());
+  const parsed = JSON.parse(file);
+  assert('Export: versioned file with every Capsule', parsed.version === 1 && parsed.capsules.length === 1 && parsed.capsules[0].id === one.id);
+  assert('Import of the same file: nothing changes', JSON.stringify(await xs.importMany(file)) === '{"added":0,"updated":0,"skipped":1}');
+  const incoming = JSON.stringify({ capsules: [
+    { ...one, title: 'One v2', updatedAt: one.updatedAt + 10 },
+    { id: 'new-1', title: 'Two', body: 'b2', source: 'Gemini', createdAt: 5, updatedAt: 6 },
+    { id: '../evil', title: 'x'.repeat(500), body: '  b3  ', source: 7 },
+    { title: 'no body' }, null, 'text', { body: '   ' }
+  ] });
+  const res = await xs.importMany(incoming, 1000);
+  const after = await xs.list();
+  assert('Import: newer copy replaces, new ids added, invalid skipped', res.added === 2 && res.updated === 1 && res.skipped === 4 && after.length === 3);
+  const evil = after.find(c => c.body === 'b3');
+  assert('Import: unsafe id replaced, long title capped, bad source -> Import, missing dates -> now',
+    evil && evil.id !== '../evil' && evil.title.length === 80 && evil.source === 'Import' && evil.createdAt === 1000 && evil.updatedAt === 1000);
+  assert('Import: kept fields of a valid Capsule', after.find(c => c.id === 'new-1')?.source === 'Gemini' && after.find(c => c.id === one.id)?.title === 'One v2');
+  let bad = 0;
+  for (const t of ['not json', '{"nope":1}', '42']) { try { await xs.importMany(t); } catch (e) { if (e.message === 'Not a Capsules file') bad++; } }
+  assert('Import: non-Capsule files rejected', bad === 3);
+  assert('Import: a bare array also works', (await new CapsuleStore(fakeArea()).importMany('[{"body":"x"}]')).added === 1);
+  assert('normalizeCapsule: huge body cut to 100K', normalizeCapsule({ body: 'z'.repeat(150000) }).body.length === 100000);
 
   return { passed, failed };
 }

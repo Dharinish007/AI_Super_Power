@@ -5031,7 +5031,8 @@ function toWidgetState(s, opts = {}) {
  *   parseCapsule        Capsule between the START / END markers of a reply (or a whole reply, loose)
  *   readLatestCapsule   newest Capsule among the latest assistant replies on the page
  *   formatForInsert     what Insert puts in the chat box
- *   CapsuleStore        list / save / remove in chrome.storage.local (one list shared by all sites)
+ *   CapsuleStore        list / save / remove / importMany in chrome.storage.local (one list shared by all sites)
+ *   exportCapsules      export file text; normalizeCapsule checks each imported Capsule
  *   insertText          puts text in a site's chat box (rich editor or textarea)
  */
 
@@ -5050,6 +5051,7 @@ const QUICK_TURN_CHARS = 800;
 const QUICK_SNIPPETS = 5;
 const QUICK_SNIPPET_CHARS = 1500;
 const CAPSULE_TITLE_MAX = 80;
+const CAPSULE_MAX_BODY = 100000; // Imported Capsules are cut to this
 // Only the newest replies can hold the Capsule just asked for
 const CAPSULE_REPLIES_SCANNED = 3;
 
@@ -5058,14 +5060,17 @@ const CAPSULE_REPLIES_SCANNED = 3;
  * ``` code, and text inside a code block keeps its headings and line breaks on every site.
  * @param {string} [selection] Chat text the user selected: the Capsule then focuses on it
  * @param {string} [transcript] Hand-off: a conversation from another chat (formatTranscript) to summarize
+ * @param {{ title: string, body: string }|null} [previous] Update: an earlier Capsule to bring up to date
  * @returns {string}
  */
-function buildCapsulePrompt(selection = '', transcript = '') {
+function buildCapsulePrompt(selection = '', transcript = '', previous = null) {
   let focus = String(selection || '').trim();
   if (focus.length > CAPSULE_MAX_SELECTION) focus = `${focus.slice(0, CAPSULE_MAX_SELECTION)} […]`;
-  const intro = transcript
-    ? 'Create a Capsule of the conversation between the <conversation> tags below (it comes from another chat): a compact, self-contained brief that lets a different AI continue that work without seeing the chat.'
-    : 'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.';
+  const intro = previous
+    ? 'Update the Capsule between the <previous-capsule> tags below with what happened in this conversation since it was written. Keep what is still true, change what changed, drop what is obsolete, and add new decisions and progress. It must stay a compact, self-contained brief that lets a different AI continue this work.'
+    : transcript
+      ? 'Create a Capsule of the conversation between the <conversation> tags below (it comes from another chat): a compact, self-contained brief that lets a different AI continue that work without seeing the chat.'
+      : 'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.';
   return [
     intro,
     ...(focus ? ['', 'Focus only on this part of the conversation (use the rest only to understand it):', '"""', focus, '"""'] : []),
@@ -5087,7 +5092,8 @@ function buildCapsulePrompt(selection = '', transcript = '') {
     '## Key snippets',
     CAPSULE_END,
     '````',
-    ...(transcript ? ['', '<conversation>', transcript, '</conversation>', '', 'Now write the Capsule in the format above.'] : [])
+    ...(transcript ? ['', '<conversation>', transcript, '</conversation>', '', 'Now write the Capsule in the format above.'] : []),
+    ...(previous ? ['', '<previous-capsule>', `Title: ${previous.title}`, previous.body, '</previous-capsule>', '', 'Now write the updated Capsule in the format above (same title unless the goal changed).'] : [])
   ].join('\n');
 }
 
@@ -5247,6 +5253,23 @@ function readLatestCapsule(doc, replySelector, ignoreBody = null) {
   return null;
 }
 
+/**
+ * What inserting a Capsule costs here: "~1.2K tokens · 0.8% of window". Tokens are an estimate
+ * (local tokenizer), so always "~". tooBig: more than the room left in this chat.
+ * @param {number} tokens
+ * @param {number|null} [contextLimit] This chat's context window
+ * @param {number|null} [remaining] Tokens left in this chat
+ */
+function formatCost(tokens, contextLimit = null, remaining = null) {
+  const n = Math.max(0, Math.round(tokens || 0));
+  let text = `~${n < 1000 ? n : `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`} tokens`;
+  if (contextLimit > 0) {
+    const p = (n / contextLimit) * 100;
+    text += ` · ${p < 0.1 ? '<0.1' : p < 10 ? p.toFixed(1) : Math.round(p)}% of window`;
+  }
+  return { text, tooBig: Number.isFinite(remaining) && n > remaining };
+}
+
 /** @param {{ title: string, body: string }} capsule */
 function formatForInsert(capsule) {
   return `Context from an earlier AI conversation (Capsule: ${capsule.title}). Use it as background for what I ask next.\n\n${capsule.body}`;
@@ -5295,6 +5318,56 @@ class CapsuleStore {
     const list = await this.list();
     await this.area.set({ [CAPSULES_KEY]: list.filter(c => c.id !== id) });
   }
+
+  /**
+   * Merges an export file: unknown ids are added, a known id is replaced only by a newer copy
+   * (updatedAt). Invalid entries are skipped, never partially saved. One write for the whole file.
+   * @param {string} json Text of a file from exportCapsules (or a bare array of Capsules)
+   * @returns {Promise<{ added: number, updated: number, skipped: number }>}
+   * @throws {Error} 'Not a Capsules file' when the text is not JSON or holds no Capsule list
+   */
+  async importMany(json, now = Date.now()) {
+    let data;
+    try { data = JSON.parse(json); } catch (e) { throw new Error('Not a Capsules file', { cause: e }); }
+    const items = Array.isArray(data) ? data : data?.capsules;
+    if (!Array.isArray(items)) throw new Error('Not a Capsules file');
+    const list = await this.list();
+    const byId = new Map(list.map((c, i) => [c.id, i]));
+    const counts = { added: 0, updated: 0, skipped: 0 };
+    for (const raw of items) {
+      const c = normalizeCapsule(raw, now);
+      const i = c ? byId.get(c.id) : undefined;
+      if (!c || (i !== undefined && !(c.updatedAt > list[i].updatedAt))) { counts.skipped++; continue; }
+      if (i !== undefined) { list[i] = c; counts.updated++; } else { byId.set(c.id, list.length); list.push(c); counts.added++; }
+    }
+    list.sort((a, b) => b.createdAt - a.createdAt);
+    if (counts.added || counts.updated) await this.area.set({ [CAPSULES_KEY]: list });
+    return counts;
+  }
+}
+
+/** Export file text: every Capsule, newest first. */
+function exportCapsules(list) {
+  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), capsules: list }, null, 2);
+}
+
+/**
+ * A Capsule from an untrusted source (an import file), or null when unusable. Strings are capped,
+ * a missing or odd id gets a new one, missing dates become `now`.
+ */
+function normalizeCapsule(raw, now = Date.now()) {
+  if (!raw || typeof raw !== 'object' || typeof raw.body !== 'string' || !raw.body.trim()) return null;
+  const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const time = (v) => (Number.isFinite(v) && v > 0 ? v : now);
+  const createdAt = time(raw.createdAt);
+  return {
+    id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newCapsuleId(),
+    title: str(raw.title, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+    body: raw.body.trim().slice(0, CAPSULE_MAX_BODY),
+    source: str(raw.source, 20) || 'Import',
+    createdAt,
+    updatedAt: Math.max(createdAt, time(raw.updatedAt))
+  };
 }
 
 /**
@@ -5503,6 +5576,7 @@ const STYLES = `
   .card.wait { border-style: dashed; border-color: var(--accent); }
   .card.warn { border-color: var(--warn); }
   .card.warn .t { color: var(--warn-text); }
+  .card .m.bad { color: var(--danger); }
   .card .t { font-weight: 600; overflow-wrap: anywhere; }
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
@@ -5757,6 +5831,19 @@ function CapsulePanel(parent, ctx) {
   const list = h('div', 'caps', view);
   list.style.padding = '0';
   const empty = h('div', 'fine', view, 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
+  const io = h('div', 'btns', view);
+  const exportBtn = textButton(io, '📤 Export');
+  exportBtn.dataset.tip = 'Download all Capsules as a JSON file (backup, or move to another PC)';
+  const importBtn = textButton(io, '📥 Import');
+  importBtn.dataset.tip = 'Add Capsules from an exported file; newer copies replace older ones';
+  const fileIn = h('input', 'hide', view);
+  fileIn.type = 'file';
+  fileIn.accept = '.json,application/json';
+  fileIn.setAttribute('aria-label', 'Capsules file to import');
+
+  let items = []; // Saved Capsules, newest first
+  let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
+  const tokenCache = new Map(); // `${id}:${updatedAt}` -> estimated tokens
 
   let pendingSelection = '';
   let editing = null; // { id, source, fromHandoff } of the Capsule in the editor
@@ -5793,6 +5880,9 @@ function CapsulePanel(parent, ctx) {
     mode('idle');
   }
 
+  /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */
+  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || ctx.provider }, Boolean(from?.handoff));
+
   /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
   function openDraft(capsule, fromHandoff = false) {
     stopWaiting();
@@ -5806,7 +5896,8 @@ function CapsulePanel(parent, ctx) {
 
   /**
    * @param {string|null} ignoreBody Capsule already on the page before this one was asked for
-   * @param {{ source: string }|null} [from] Hand-off being written: the Capsule keeps its original site
+   * @param {{ source: string, id?: string, handoff?: boolean }|null} [from] Hand-off (keeps its original site)
+   *   or Update (replaces Capsule `id`) being written
    */
   function startWaiting(ignoreBody, from = null) {
     stopWaiting();
@@ -5815,7 +5906,7 @@ function CapsulePanel(parent, ctx) {
       watcher.timer = null;
       const capsule = readLatestCapsule(document, ctx.replySelector, ignoreBody);
       if (!capsule) return;
-      openDraft({ ...capsule, source: from?.source || ctx.provider }, Boolean(from));
+      draftFrom(capsule, from);
       ctx.reveal();
       ctx.toast('Capsule ready: review and save');
     };
@@ -5869,7 +5960,7 @@ function CapsulePanel(parent, ctx) {
   });
 
   textButton(handoffBtns, 'Paste & create', () => {
-    if (handoff) promptAndWait(handoff.prompt, { source: handoff.source });
+    if (handoff) promptAndWait(handoff.prompt, { source: handoff.source, handoff: true });
   });
   textButton(handoffBtns, 'Dismiss', async () => {
     try { await clearHandoff(ctx.storage); } catch (_) {}
@@ -5880,7 +5971,7 @@ function CapsulePanel(parent, ctx) {
     const capsule = parseCapsule(latestReplyText(document, ctx.replySelector), { loose: true });
     if (!capsule) return ctx.toast('No reply yet');
     const from = watcher?.from;
-    openDraft({ ...capsule, source: from?.source || ctx.provider }, Boolean(from));
+    draftFrom(capsule, from);
   });
   textButton(waitBtns, 'Cancel', stopWaiting);
 
@@ -5902,11 +5993,28 @@ function CapsulePanel(parent, ctx) {
   // Keys typed in the editor stay in it: the sites move focus to their chat box on stray keystrokes
   for (const type of ['keydown', 'keypress', 'keyup']) draft.addEventListener(type, (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
 
+  /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version). */
+  function tokensOf(capsule) {
+    const key = `${capsule.id}:${capsule.updatedAt}`;
+    if (!tokenCache.has(key)) {
+      let n = null;
+      try { n = ctx.countTokens ? ctx.countTokens(formatForInsert(capsule)) : null; } catch (_) {}
+      tokenCache.set(key, n);
+    }
+    return tokenCache.get(key);
+  }
+
   function renderItem(capsule) {
     const card = h('div', 'card', list);
     h('div', 't', card, capsule.title);
     const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     h('div', 'm', card, `${capsule.source} · ${date}`);
+    const tokens = tokensOf(capsule);
+    if (tokens !== null) {
+      const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
+      const line = h('div', `m${cost.tooBig ? ' bad' : ''}`, card, cost.tooBig ? `${cost.text} · too big for this chat` : cost.text);
+      line.dataset.tip = 'Estimated with a local tokenizer; the site may count a little differently';
+    }
     const btns = h('div', 'btns', card);
     textButton(btns, 'Insert', () => {
       const input = ctx.findInput();
@@ -5914,6 +6022,13 @@ function CapsulePanel(parent, ctx) {
       else copy(capsule, 'Chat box not found: copied instead');
     });
     textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
+    // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
+    const upd = textButton(btns, 'Update', () => {
+      if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
+      if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
+      promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
+    });
+    upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
       if (!del.dataset.armed) {
@@ -5928,9 +6043,17 @@ function CapsulePanel(parent, ctx) {
     }, 'btn danger');
   }
 
-  /** @param {Array} limits Widget view-state limits */
-  function setLimits(limits) {
-    limit = chatLimitReached(limits);
+  /** @param {Object} vm Widget view state: limits, and this chat's window for the cost lines */
+  function setView(vm) {
+    limit = chatLimitReached(vm?.limits);
+    const contextLimit = vm?.contextLimit || null;
+    const remaining = Number.isFinite(vm?.remainingTokens) ? vm.remainingTokens : null;
+    // Cost lines change with the window or the room left (to the nearest 1K): re-render only then
+    const sig = `${contextLimit}|${remaining === null ? '' : Math.round(remaining / 1000)}`;
+    if (sig !== view_.sig) {
+      view_ = { sig, contextLimit, remaining };
+      renderList();
+    }
     // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
     const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.provider);
     if (limit) setText(limitText, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
@@ -5945,16 +6068,47 @@ function CapsulePanel(parent, ctx) {
     const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
     if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
     mode(current);
-    let items;
     try { items = await store.list(); } catch (_) { return; }
+    renderList();
+  }
+
+  function renderList() {
     list.textContent = '';
     setText(listHead, `Saved (${items.length})`);
     show(listHead, items.length > 0);
     show(empty, items.length === 0);
+    show(exportBtn, items.length > 0);
     for (const c of items) renderItem(c);
   }
 
-  return { view, refresh, setLimits, stop: stopWaiting };
+  // Export: one JSON file with every Capsule (a download; no permission needed)
+  exportBtn.addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([exportCapsules(items)], { type: 'application/json' }));
+    const a = h('a', null, view);
+    a.href = url;
+    a.download = `capsules-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    ctx.toast(`Exported ${items.length} Capsule${items.length === 1 ? '' : 's'}`);
+  });
+
+  // Import: merge a file from Export (newer copies win; invalid entries skipped)
+  importBtn.addEventListener('click', () => fileIn.click());
+  fileIn.addEventListener('change', async () => {
+    const file = fileIn.files?.[0];
+    fileIn.value = '';
+    if (!file || !store) return;
+    try {
+      const r = await store.importMany(await file.text());
+      ctx.toast(`${r.added} added, ${r.updated} updated, ${r.skipped} skipped`);
+      refresh();
+    } catch (e) {
+      ctx.toast(e?.message === 'Not a Capsules file' ? 'Not a Capsules file' : 'Import failed');
+    }
+  });
+
+  return { view, refresh, setView, stop: stopWaiting };
 }
 
 class ContextWidget {
@@ -5968,6 +6122,7 @@ class ContextWidget {
       findInput: adapter.findInput || (() => null),
       replySelector: adapter.replySelector || null,
       userSelector: adapter.userSelector || null,
+      countTokens: adapter.countTokens || null,
       onRefresh: adapter.onRefresh || (() => {}),
       getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
     };
@@ -6118,6 +6273,7 @@ class ContextWidget {
       findInput: () => this.adapter.findInput(),
       replySelector: this.adapter.replySelector,
       userSelector: this.adapter.userSelector,
+      countTokens: this.adapter.countTokens,
       storage: this._storage(),
       toast: (text) => this._toast(text),
       reveal: () => {
@@ -6201,7 +6357,7 @@ class ContextWidget {
   update(viewState) {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
-    this.parts?.caps.setLimits(viewState?.limits);
+    this.parts?.caps.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
     if (!this.hostElement.isConnected) (document.body || document.documentElement).appendChild(this.hostElement);
     this.render();
@@ -6909,6 +7065,7 @@ class ContentScriptCoordinator {
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
       userSelector: "[data-message-author-role='user']",
+      countTokens: (text) => this.tokenizer.countTokens(text),
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });
@@ -8307,6 +8464,8 @@ class ProviderCoordinator {
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
       userSelector: provider.userSelector,
+      // Same estimate as the context count: o200k scaled to the site's tokenizer (Claude counts more)
+      countTokens: (text) => Math.round(this.tokenizer.countTokens(text) * (provider.tokenScale || 1)),
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

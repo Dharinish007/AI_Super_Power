@@ -32,6 +32,8 @@ export class ProviderCoordinator {
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
       userSelector: provider.userSelector,
+      // Same estimate as the context count: o200k scaled to the site's tokenizer (Claude counts more)
+      countTokens: (text) => Math.round(this.tokenizer.countTokens(text) * (provider.tokenScale || 1)),
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

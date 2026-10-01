@@ -21,7 +21,7 @@
  * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js).
  */
 
-import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff } from './capsule.js';
+import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules } from './capsule.js';
 import { formatModelName } from './widget-state.js';
 
 const STYLES = `
@@ -164,6 +164,7 @@ const STYLES = `
   .card.wait { border-style: dashed; border-color: var(--accent); }
   .card.warn { border-color: var(--warn); }
   .card.warn .t { color: var(--warn-text); }
+  .card .m.bad { color: var(--danger); }
   .card .t { font-weight: 600; overflow-wrap: anywhere; }
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
@@ -418,6 +419,19 @@ function CapsulePanel(parent, ctx) {
   const list = h('div', 'caps', view);
   list.style.padding = '0';
   const empty = h('div', 'fine', view, 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
+  const io = h('div', 'btns', view);
+  const exportBtn = textButton(io, '📤 Export');
+  exportBtn.dataset.tip = 'Download all Capsules as a JSON file (backup, or move to another PC)';
+  const importBtn = textButton(io, '📥 Import');
+  importBtn.dataset.tip = 'Add Capsules from an exported file; newer copies replace older ones';
+  const fileIn = h('input', 'hide', view);
+  fileIn.type = 'file';
+  fileIn.accept = '.json,application/json';
+  fileIn.setAttribute('aria-label', 'Capsules file to import');
+
+  let items = []; // Saved Capsules, newest first
+  let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
+  const tokenCache = new Map(); // `${id}:${updatedAt}` -> estimated tokens
 
   let pendingSelection = '';
   let editing = null; // { id, source, fromHandoff } of the Capsule in the editor
@@ -454,6 +468,9 @@ function CapsulePanel(parent, ctx) {
     mode('idle');
   }
 
+  /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */
+  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || ctx.provider }, Boolean(from?.handoff));
+
   /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
   function openDraft(capsule, fromHandoff = false) {
     stopWaiting();
@@ -467,7 +484,8 @@ function CapsulePanel(parent, ctx) {
 
   /**
    * @param {string|null} ignoreBody Capsule already on the page before this one was asked for
-   * @param {{ source: string }|null} [from] Hand-off being written: the Capsule keeps its original site
+   * @param {{ source: string, id?: string, handoff?: boolean }|null} [from] Hand-off (keeps its original site)
+   *   or Update (replaces Capsule `id`) being written
    */
   function startWaiting(ignoreBody, from = null) {
     stopWaiting();
@@ -476,7 +494,7 @@ function CapsulePanel(parent, ctx) {
       watcher.timer = null;
       const capsule = readLatestCapsule(document, ctx.replySelector, ignoreBody);
       if (!capsule) return;
-      openDraft({ ...capsule, source: from?.source || ctx.provider }, Boolean(from));
+      draftFrom(capsule, from);
       ctx.reveal();
       ctx.toast('Capsule ready: review and save');
     };
@@ -530,7 +548,7 @@ function CapsulePanel(parent, ctx) {
   });
 
   textButton(handoffBtns, 'Paste & create', () => {
-    if (handoff) promptAndWait(handoff.prompt, { source: handoff.source });
+    if (handoff) promptAndWait(handoff.prompt, { source: handoff.source, handoff: true });
   });
   textButton(handoffBtns, 'Dismiss', async () => {
     try { await clearHandoff(ctx.storage); } catch (_) {}
@@ -541,7 +559,7 @@ function CapsulePanel(parent, ctx) {
     const capsule = parseCapsule(latestReplyText(document, ctx.replySelector), { loose: true });
     if (!capsule) return ctx.toast('No reply yet');
     const from = watcher?.from;
-    openDraft({ ...capsule, source: from?.source || ctx.provider }, Boolean(from));
+    draftFrom(capsule, from);
   });
   textButton(waitBtns, 'Cancel', stopWaiting);
 
@@ -563,11 +581,28 @@ function CapsulePanel(parent, ctx) {
   // Keys typed in the editor stay in it: the sites move focus to their chat box on stray keystrokes
   for (const type of ['keydown', 'keypress', 'keyup']) draft.addEventListener(type, (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
 
+  /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version). */
+  function tokensOf(capsule) {
+    const key = `${capsule.id}:${capsule.updatedAt}`;
+    if (!tokenCache.has(key)) {
+      let n = null;
+      try { n = ctx.countTokens ? ctx.countTokens(formatForInsert(capsule)) : null; } catch (_) {}
+      tokenCache.set(key, n);
+    }
+    return tokenCache.get(key);
+  }
+
   function renderItem(capsule) {
     const card = h('div', 'card', list);
     h('div', 't', card, capsule.title);
     const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     h('div', 'm', card, `${capsule.source} · ${date}`);
+    const tokens = tokensOf(capsule);
+    if (tokens !== null) {
+      const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
+      const line = h('div', `m${cost.tooBig ? ' bad' : ''}`, card, cost.tooBig ? `${cost.text} · too big for this chat` : cost.text);
+      line.dataset.tip = 'Estimated with a local tokenizer; the site may count a little differently';
+    }
     const btns = h('div', 'btns', card);
     textButton(btns, 'Insert', () => {
       const input = ctx.findInput();
@@ -575,6 +610,13 @@ function CapsulePanel(parent, ctx) {
       else copy(capsule, 'Chat box not found: copied instead');
     });
     textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
+    // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
+    const upd = textButton(btns, 'Update', () => {
+      if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
+      if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
+      promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
+    });
+    upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
       if (!del.dataset.armed) {
@@ -589,9 +631,17 @@ function CapsulePanel(parent, ctx) {
     }, 'btn danger');
   }
 
-  /** @param {Array} limits Widget view-state limits */
-  function setLimits(limits) {
-    limit = chatLimitReached(limits);
+  /** @param {Object} vm Widget view state: limits, and this chat's window for the cost lines */
+  function setView(vm) {
+    limit = chatLimitReached(vm?.limits);
+    const contextLimit = vm?.contextLimit || null;
+    const remaining = Number.isFinite(vm?.remainingTokens) ? vm.remainingTokens : null;
+    // Cost lines change with the window or the room left (to the nearest 1K): re-render only then
+    const sig = `${contextLimit}|${remaining === null ? '' : Math.round(remaining / 1000)}`;
+    if (sig !== view_.sig) {
+      view_ = { sig, contextLimit, remaining };
+      renderList();
+    }
     // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
     const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.provider);
     if (limit) setText(limitText, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
@@ -606,16 +656,47 @@ function CapsulePanel(parent, ctx) {
     const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
     if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
     mode(current);
-    let items;
     try { items = await store.list(); } catch (_) { return; }
+    renderList();
+  }
+
+  function renderList() {
     list.textContent = '';
     setText(listHead, `Saved (${items.length})`);
     show(listHead, items.length > 0);
     show(empty, items.length === 0);
+    show(exportBtn, items.length > 0);
     for (const c of items) renderItem(c);
   }
 
-  return { view, refresh, setLimits, stop: stopWaiting };
+  // Export: one JSON file with every Capsule (a download; no permission needed)
+  exportBtn.addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([exportCapsules(items)], { type: 'application/json' }));
+    const a = h('a', null, view);
+    a.href = url;
+    a.download = `capsules-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    ctx.toast(`Exported ${items.length} Capsule${items.length === 1 ? '' : 's'}`);
+  });
+
+  // Import: merge a file from Export (newer copies win; invalid entries skipped)
+  importBtn.addEventListener('click', () => fileIn.click());
+  fileIn.addEventListener('change', async () => {
+    const file = fileIn.files?.[0];
+    fileIn.value = '';
+    if (!file || !store) return;
+    try {
+      const r = await store.importMany(await file.text());
+      ctx.toast(`${r.added} added, ${r.updated} updated, ${r.skipped} skipped`);
+      refresh();
+    } catch (e) {
+      ctx.toast(e?.message === 'Not a Capsules file' ? 'Not a Capsules file' : 'Import failed');
+    }
+  });
+
+  return { view, refresh, setView, stop: stopWaiting };
 }
 
 export class ContextWidget {
@@ -629,6 +710,7 @@ export class ContextWidget {
       findInput: adapter.findInput || (() => null),
       replySelector: adapter.replySelector || null,
       userSelector: adapter.userSelector || null,
+      countTokens: adapter.countTokens || null,
       onRefresh: adapter.onRefresh || (() => {}),
       getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
     };
@@ -779,6 +861,7 @@ export class ContextWidget {
       findInput: () => this.adapter.findInput(),
       replySelector: this.adapter.replySelector,
       userSelector: this.adapter.userSelector,
+      countTokens: this.adapter.countTokens,
       storage: this._storage(),
       toast: (text) => this._toast(text),
       reveal: () => {
@@ -862,7 +945,7 @@ export class ContextWidget {
   update(viewState) {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
-    this.parts?.caps.setLimits(viewState?.limits);
+    this.parts?.caps.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
     if (!this.hostElement.isConnected) (document.body || document.documentElement).appendChild(this.hostElement);
     this.render();

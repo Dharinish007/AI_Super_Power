@@ -89,6 +89,9 @@ ChatGPT Web Page
 2. When the reply's `=== CAPSULE END ===` marker appears, the Capsule opens in an editor. A MutationObserver runs only while waiting. **Use last reply** saves the newest reply as-is if the markers are missing.
 3. **Save** stores it in `chrome.storage.local`, one list shared by ChatGPT, Claude and Gemini.
 4. **Insert** puts it in the chat box of any of the three sites (copied to the clipboard if the box is not found); **Copy**, **Edit** and **Delete** (click twice) manage it.
+5. Each card shows what inserting it costs here (`~1.2K tokens · 0.6% of window`, estimated with the bundled tokenizer, scaled for Claude), in red when it is bigger than the room left in this chat.
+6. **Update** asks the current AI to rewrite the Capsule with the chat's new progress; saving replaces it (same id, original site kept).
+7. **📤 Export** downloads every Capsule as `capsules-YYYY-MM-DD.json`; **📥 Import** merges such a file (unknown ids added, newer copies replace older ones, invalid entries skipped; ids, lengths and dates are checked).
 
 When the site's limit is reached (ChatGPT model with no messages left, Claude usage at 100%, Gemini's limit notice), the tab says so and offers two ways that need no messages on this site:
 - **⚡ Quick (no AI)** builds the Capsule from the page: the goal (first message), the last 6 turns and the latest code blocks, or just the selected text.

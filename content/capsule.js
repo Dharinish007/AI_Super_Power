@@ -11,7 +11,8 @@
  *   parseCapsule        Capsule between the START / END markers of a reply (or a whole reply, loose)
  *   readLatestCapsule   newest Capsule among the latest assistant replies on the page
  *   formatForInsert     what Insert puts in the chat box
- *   CapsuleStore        list / save / remove in chrome.storage.local (one list shared by all sites)
+ *   CapsuleStore        list / save / remove / importMany in chrome.storage.local (one list shared by all sites)
+ *   exportCapsules      export file text; normalizeCapsule checks each imported Capsule
  *   insertText          puts text in a site's chat box (rich editor or textarea)
  */
 
@@ -30,6 +31,7 @@ const QUICK_TURN_CHARS = 800;
 const QUICK_SNIPPETS = 5;
 const QUICK_SNIPPET_CHARS = 1500;
 const CAPSULE_TITLE_MAX = 80;
+const CAPSULE_MAX_BODY = 100000; // Imported Capsules are cut to this
 // Only the newest replies can hold the Capsule just asked for
 const CAPSULE_REPLIES_SCANNED = 3;
 
@@ -38,14 +40,17 @@ const CAPSULE_REPLIES_SCANNED = 3;
  * ``` code, and text inside a code block keeps its headings and line breaks on every site.
  * @param {string} [selection] Chat text the user selected: the Capsule then focuses on it
  * @param {string} [transcript] Hand-off: a conversation from another chat (formatTranscript) to summarize
+ * @param {{ title: string, body: string }|null} [previous] Update: an earlier Capsule to bring up to date
  * @returns {string}
  */
-export function buildCapsulePrompt(selection = '', transcript = '') {
+export function buildCapsulePrompt(selection = '', transcript = '', previous = null) {
   let focus = String(selection || '').trim();
   if (focus.length > CAPSULE_MAX_SELECTION) focus = `${focus.slice(0, CAPSULE_MAX_SELECTION)} […]`;
-  const intro = transcript
-    ? 'Create a Capsule of the conversation between the <conversation> tags below (it comes from another chat): a compact, self-contained brief that lets a different AI continue that work without seeing the chat.'
-    : 'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.';
+  const intro = previous
+    ? 'Update the Capsule between the <previous-capsule> tags below with what happened in this conversation since it was written. Keep what is still true, change what changed, drop what is obsolete, and add new decisions and progress. It must stay a compact, self-contained brief that lets a different AI continue this work.'
+    : transcript
+      ? 'Create a Capsule of the conversation between the <conversation> tags below (it comes from another chat): a compact, self-contained brief that lets a different AI continue that work without seeing the chat.'
+      : 'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.';
   return [
     intro,
     ...(focus ? ['', 'Focus only on this part of the conversation (use the rest only to understand it):', '"""', focus, '"""'] : []),
@@ -67,7 +72,8 @@ export function buildCapsulePrompt(selection = '', transcript = '') {
     '## Key snippets',
     CAPSULE_END,
     '````',
-    ...(transcript ? ['', '<conversation>', transcript, '</conversation>', '', 'Now write the Capsule in the format above.'] : [])
+    ...(transcript ? ['', '<conversation>', transcript, '</conversation>', '', 'Now write the Capsule in the format above.'] : []),
+    ...(previous ? ['', '<previous-capsule>', `Title: ${previous.title}`, previous.body, '</previous-capsule>', '', 'Now write the updated Capsule in the format above (same title unless the goal changed).'] : [])
   ].join('\n');
 }
 
@@ -227,6 +233,23 @@ export function readLatestCapsule(doc, replySelector, ignoreBody = null) {
   return null;
 }
 
+/**
+ * What inserting a Capsule costs here: "~1.2K tokens · 0.8% of window". Tokens are an estimate
+ * (local tokenizer), so always "~". tooBig: more than the room left in this chat.
+ * @param {number} tokens
+ * @param {number|null} [contextLimit] This chat's context window
+ * @param {number|null} [remaining] Tokens left in this chat
+ */
+export function formatCost(tokens, contextLimit = null, remaining = null) {
+  const n = Math.max(0, Math.round(tokens || 0));
+  let text = `~${n < 1000 ? n : `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`} tokens`;
+  if (contextLimit > 0) {
+    const p = (n / contextLimit) * 100;
+    text += ` · ${p < 0.1 ? '<0.1' : p < 10 ? p.toFixed(1) : Math.round(p)}% of window`;
+  }
+  return { text, tooBig: Number.isFinite(remaining) && n > remaining };
+}
+
 /** @param {{ title: string, body: string }} capsule */
 export function formatForInsert(capsule) {
   return `Context from an earlier AI conversation (Capsule: ${capsule.title}). Use it as background for what I ask next.\n\n${capsule.body}`;
@@ -275,6 +298,56 @@ export class CapsuleStore {
     const list = await this.list();
     await this.area.set({ [CAPSULES_KEY]: list.filter(c => c.id !== id) });
   }
+
+  /**
+   * Merges an export file: unknown ids are added, a known id is replaced only by a newer copy
+   * (updatedAt). Invalid entries are skipped, never partially saved. One write for the whole file.
+   * @param {string} json Text of a file from exportCapsules (or a bare array of Capsules)
+   * @returns {Promise<{ added: number, updated: number, skipped: number }>}
+   * @throws {Error} 'Not a Capsules file' when the text is not JSON or holds no Capsule list
+   */
+  async importMany(json, now = Date.now()) {
+    let data;
+    try { data = JSON.parse(json); } catch (e) { throw new Error('Not a Capsules file', { cause: e }); }
+    const items = Array.isArray(data) ? data : data?.capsules;
+    if (!Array.isArray(items)) throw new Error('Not a Capsules file');
+    const list = await this.list();
+    const byId = new Map(list.map((c, i) => [c.id, i]));
+    const counts = { added: 0, updated: 0, skipped: 0 };
+    for (const raw of items) {
+      const c = normalizeCapsule(raw, now);
+      const i = c ? byId.get(c.id) : undefined;
+      if (!c || (i !== undefined && !(c.updatedAt > list[i].updatedAt))) { counts.skipped++; continue; }
+      if (i !== undefined) { list[i] = c; counts.updated++; } else { byId.set(c.id, list.length); list.push(c); counts.added++; }
+    }
+    list.sort((a, b) => b.createdAt - a.createdAt);
+    if (counts.added || counts.updated) await this.area.set({ [CAPSULES_KEY]: list });
+    return counts;
+  }
+}
+
+/** Export file text: every Capsule, newest first. */
+export function exportCapsules(list) {
+  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), capsules: list }, null, 2);
+}
+
+/**
+ * A Capsule from an untrusted source (an import file), or null when unusable. Strings are capped,
+ * a missing or odd id gets a new one, missing dates become `now`.
+ */
+export function normalizeCapsule(raw, now = Date.now()) {
+  if (!raw || typeof raw !== 'object' || typeof raw.body !== 'string' || !raw.body.trim()) return null;
+  const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  const time = (v) => (Number.isFinite(v) && v > 0 ? v : now);
+  const createdAt = time(raw.createdAt);
+  return {
+    id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newCapsuleId(),
+    title: str(raw.title, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+    body: raw.body.trim().slice(0, CAPSULE_MAX_BODY),
+    source: str(raw.source, 20) || 'Import',
+    createdAt,
+    updatedAt: Math.max(createdAt, time(raw.updatedAt))
+  };
 }
 
 /**
