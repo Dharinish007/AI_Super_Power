@@ -4817,6 +4817,58 @@ function insertText(el, text) {
 }
 
 
+  // --- content/page-actions.js ---
+  /**
+ * Context Monitor - Page actions
+ *
+ * The one place the UI touches the AI site's page: read the chat, fill the chat box, wait for a
+ * Capsule. CapsulePanel and the widgets call these through the Page interface (all async), so the
+ * side panel can make the same calls over the panel channel.
+ */
+
+
+
+/**
+ * @param {{ provider: string, findInput: () => Element|null, replySelector: string|null, userSelector?: string|null,
+ *   countTokens?: ((t: string) => number)|null, getLimits?: () => Array<Object> }} adapter
+ *   `getLimits` returns the latest view-state limits (for limitReached)
+ * @param {Document} [doc]
+ */
+function createPage(adapter, doc = globalThis.document) {
+  const { replySelector, userSelector } = adapter;
+  return {
+    provider: adapter.provider,
+    async hasConversation() { return Boolean(replySelector && doc.querySelector(replySelector)); },
+    async takeSelection() { return String(doc.getSelection?.() || '').trim(); },
+    async fill(text) { const input = adapter.findInput(); return Boolean(input && insertText(input, text)); },
+    async latestReply() { return latestReplyText(doc, replySelector); },
+    async transcript() { return readTranscript(doc, userSelector, replySelector); },
+    async countTokens(texts) {
+      return texts.map((t) => { try { return adapter.countTokens ? adapter.countTokens(t) : null; } catch (_) { return null; } });
+    },
+    async limitReached() { return Boolean(chatLimitReached(adapter.getLimits?.() || [])); },
+    /** Waits for a Capsule in a new reply (at most one read per 500 ms while it streams); reports it once. */
+    async watchCapsule(onFound) {
+      const ignoreBody = readLatestCapsule(doc, replySelector)?.body ?? null;
+      let timer = null;
+      const observer = new MutationObserver(() => {
+        if (timer) return;
+        timer = setTimeout(() => {
+          timer = null;
+          const capsule = readLatestCapsule(doc, replySelector, ignoreBody);
+          if (!capsule) return;
+          stop();
+          onFound(capsule);
+        }, 500);
+      });
+      const stop = () => { clearTimeout(timer); observer.disconnect(); };
+      observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
+      return stop;
+    }
+  };
+}
+
+
   // --- ui/dom.js ---
   /**
  * Context Monitor - shared DOM helpers and components (h, icons, Section, RowList, HiddenStack, formatters).
@@ -5200,55 +5252,31 @@ const STYLES = `
 `;
 
 
-  // --- content/overlay-ui.js ---
+  // --- ui/capsule-panel.js ---
   /**
- * Context Monitor - Context Widget (provider-neutral UI)
+ * Context Monitor - Capsules / Skills panel
  *
- * Renders the view state from widget-state.js (toWidgetState). It knows nothing about any AI site:
- * the adapter supplies a name, `onRefresh()` and `getDiagnostics()`. Everything lives in a shadow
- * root, so the host page's CSS cannot reach it and ours never leaks out.
- *
- *   Collapsed (default)  pill "39.3K • Medium" — click expands, drag moves
- *   Expanded             header (drag handle: theme / collapse / close)
- *                        hero: token count, usage bar, window, model, limit line, warning
- *                        stats: You / <Site> + tools / Hidden
- *                        sections (closed by default): Breakdown, Hidden context, Usage limits, Diagnostics
- *                        footer: confidence, Copy diagnostics, Refresh
- *
- * Position: free drag (pointer events, translate3d), clamped to the viewport, snapped to the nearest
- * side on release (hold Alt to skip), anchored to that side so expanding never pushes it off screen.
- * Position, expanded state and theme persist per site in chrome.storage.local.
- * Components build their DOM once; updates write only what changed, and page-derived strings are
- * only ever assigned as text, never HTML.
- *
- * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js)
- * | Skills (the same panel with kind 'skill': reusable instructions).
+ * Moved out of content/overlay-ui.js. It touches the AI site only through `ctx.page` (the Page
+ * interface, content/page-actions.js), so it runs the same in the page or in the side panel.
  */
 
 
 
 
 
-
-const MARGIN = 8; // Viewport clamp
-const TOP_SAFE = 72; // Default/snap top: below the sites' top bars (Share, account buttons)
-const SNAP_Y = 48; // Snap to a top/bottom corner when released this close
-const DRAG_THRESHOLD = 4; // Pointer movement that turns a press into a drag
-const DEFAULT_POS = { side: 'right', dx: 16, y: TOP_SAFE };
-const THEMES = ['auto', 'dark', 'light'];
-
 /**
  * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
- * a MutationObserver watches for the reply's END marker and opens it in the editor; Save stores it.
+ * page.watchCapsule watches for the reply's END marker and opens it in the editor; Save stores it.
  * The saved list (one for all sites) has Insert / Copy / Edit / Delete.
  * With `kind: 'skill'` the same panel is the Skills tab: reusable instructions written by the user
  * (＋ New Skill, starter Skills on first open), no AI capture, no Update.
  * @param {HTMLElement} parent
- * @param {{ kind?: 'capsule'|'skill', provider: string, findInput: () => Element|null, replySelector: string|null,
- *   storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
+ * @param {{ kind?: 'capsule'|'skill', page: Object, storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
+ *   `page`: the Page interface (content/page-actions.js); every call is async
  */
 function CapsulePanel(parent, ctx) {
   const isSkill = ctx.kind === 'skill';
+  const provider = ctx.page.provider;
   const noun = isSkill ? 'Skill' : 'Capsule';
   const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
   const view = h('div', 'body caps hide', parent);
@@ -5257,13 +5285,13 @@ function CapsulePanel(parent, ctx) {
   // The site's limit is reached: the AI here cannot write the Capsule
   const limitCard = h('div', 'card warn hide', view);
   limitCard.setAttribute('role', 'status');
-  const limitText = h('div', 't', limitCard);
-  h('div', 'm', limitCard, `${ctx.provider} can't write a Capsule right now. Use ⚡ Quick (no AI), or 🔀 make it in another AI.`);
+  const limitTextEl = h('div', 't', limitCard);
+  h('div', 'm', limitCard, `${provider} can't write a Capsule right now. Use ⚡ Quick (no AI), or 🔀 make it in another AI.`);
 
   // A hand-off made on another chat or site, waiting to be pasted here
   const handoffCard = h('div', 'card hide', view);
   const handoffText = h('div', 't', handoffCard);
-  h('div', 'm', handoffCard, `Paste it here, press Enter, and ${ctx.provider} writes the Capsule.`);
+  h('div', 'm', handoffCard, `Paste it here, press Enter, and ${provider} writes the Capsule.`);
   const handoffBtns = h('div', 'btns', handoffCard);
 
   const create = textButton(view, '📦 Create Capsule', null, 'btn primary');
@@ -5281,7 +5309,7 @@ function CapsulePanel(parent, ctx) {
   const wait = h('div', 'card wait hide', view);
   wait.setAttribute('role', 'status');
   h('div', 't', wait, 'Waiting for the Capsule…');
-  h('div', 'm', wait, `Press Enter in the chat to send the prompt. The Capsule opens here when ${ctx.provider} has written it.`);
+  h('div', 'm', wait, `Press Enter in the chat to send the prompt. The Capsule opens here when ${provider} has written it.`);
   const waitBtns = h('div', 'btns', wait);
 
   const draft = h('div', 'card hide', view);
@@ -5345,11 +5373,11 @@ function CapsulePanel(parent, ctx) {
   let items = []; // Saved Capsules (or Skills), newest first
   let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
   let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
-  const tokenCache = new Map(); // `${id}:${updatedAt}` -> estimated tokens
+  const tokenCache = new Map(); // `${id}:${updatedAt}` -> Promise of the estimated tokens
 
-  let pendingSelection = '';
+  let pendingSelection = null; // Promise of the selection read on press
   let editing = null; // { id, source, fromHandoff } of the Capsule in the editor
-  let watcher = null; // { observer, timer } while waiting for the reply
+  let watcher = null; // { from, stop } while waiting for the reply
   let current = 'idle';
   let limit = null; // Limit that blocks chatting here (chatLimitReached)
   let handoff = null; // Waiting hand-off (readHandoff)
@@ -5369,29 +5397,31 @@ function CapsulePanel(parent, ctx) {
     show(draft, m === 'draft');
   };
 
+  /** A click handler that calls the page: a failed call (page gone) shows a toast instead of throwing. */
+  const onPage = (fn) => (...args) => fn(...args).catch(() => ctx.toast('Page not reachable'));
+
   /** Selection is read on press: the click itself may move focus away from the chat. */
-  const takeSelection = () => {
-    const s = (pendingSelection || String(window.getSelection?.() || '')).trim();
-    pendingSelection = '';
-    return s;
+  const takeSelection = async () => {
+    const pending = pendingSelection;
+    pendingSelection = null;
+    return (await pending) || ctx.page.takeSelection();
   };
-  for (const b of [create, quickBtn, handoffBtn]) b.addEventListener('pointerdown', () => { pendingSelection = String(window.getSelection?.() || ''); });
+  for (const b of [create, quickBtn, handoffBtn]) b.addEventListener('pointerdown', () => { pendingSelection = ctx.page.takeSelection().catch(() => ''); });
 
   function stopWaiting() {
     if (!watcher) return;
-    watcher.observer.disconnect();
-    clearTimeout(watcher.timer);
+    watcher.stop();
     watcher = null;
     mode('idle');
   }
 
   /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */
-  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || ctx.provider }, Boolean(from?.handoff));
+  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || provider }, Boolean(from?.handoff));
 
   /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
   function openDraft(capsule, fromHandoff = false) {
     stopWaiting();
-    editing = { id: capsule.id || null, source: capsule.source || ctx.provider, fromHandoff };
+    editing = { id: capsule.id || null, source: capsule.source || provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
     // An Update's new text has no tags or project: the saved item's win. A new one starts in the
@@ -5407,84 +5437,74 @@ function CapsulePanel(parent, ctx) {
   }
 
   /**
-   * @param {string|null} ignoreBody Capsule already on the page before this one was asked for
+   * Waits for the Capsule in the reply (the one already on the page is ignored).
    * @param {{ source: string, id?: string, handoff?: boolean }|null} [from] Hand-off (keeps its original site)
    *   or Update (replaces Capsule `id`) being written
    */
-  function startWaiting(ignoreBody, from = null) {
+  async function startWaiting(from = null) {
     stopWaiting();
-    const check = () => {
-      if (!watcher) return;
-      watcher.timer = null;
-      const capsule = readLatestCapsule(document, ctx.replySelector, ignoreBody);
-      if (!capsule) return;
+    const w = watcher = { from, stop: () => {} };
+    mode('waiting');
+    const stop = await ctx.page.watchCapsule((capsule) => {
+      if (watcher !== w) return;
       draftFrom(capsule, from);
       ctx.reveal();
       ctx.toast('Capsule ready: review and save');
-    };
-    // At most one read per 500 ms while the reply streams; nothing runs when not waiting
-    const observer = new MutationObserver(() => { if (watcher && !watcher.timer) watcher.timer = setTimeout(check, 500); });
-    watcher = { observer, timer: null };
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    watcher.from = from;
-    mode('waiting');
+    });
+    if (watcher === w) w.stop = stop; else stop(); // Cancelled (or found) while the watch started
   }
 
   /** Fills the chat box with a prompt and waits for the Capsule in the reply. */
-  function promptAndWait(prompt, from = null) {
-    const input = ctx.findInput();
-    if (!input) return ctx.toast('Chat box not found');
-    const ignoreBody = readLatestCapsule(document, ctx.replySelector)?.body ?? null;
-    if (!insertText(input, prompt)) return ctx.toast('Could not fill the chat box');
-    startWaiting(ignoreBody, from);
+  async function promptAndWait(prompt, from = null) {
+    if (!(await ctx.page.fill(prompt))) return ctx.toast('Chat box not found');
+    await startWaiting(from);
     ctx.toast('Prompt ready: press Enter to send');
   }
 
-  const chat = () => readTranscript(document, ctx.userSelector, ctx.replySelector);
   const copy = (capsule, done) => navigator.clipboard.writeText(fmt(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
 
-  create.addEventListener('click', () => {
-    const selection = takeSelection();
-    if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open a conversation first');
-    promptAndWait(buildCapsulePrompt(selection));
-  });
+  create.addEventListener('click', onPage(async () => {
+    const selection = await takeSelection();
+    if (!(await ctx.page.hasConversation())) return ctx.toast('Open a conversation first');
+    await promptAndWait(buildCapsulePrompt(selection));
+  }));
 
   // Step 2: no AI. A selection is used as-is; otherwise goal + latest turns + code from the page
-  quickBtn.addEventListener('click', () => {
-    const selection = takeSelection();
+  quickBtn.addEventListener('click', onPage(async () => {
+    const selection = await takeSelection();
     const capsule = selection
       ? { title: selection.split('\n').find(l => l.trim()).trim().slice(0, 60), body: selection }
-      : buildQuickCapsule(chat());
+      : buildQuickCapsule(await ctx.page.transcript());
     if (!capsule) return ctx.toast('Open a conversation first');
-    openDraft({ ...capsule, source: ctx.provider });
-  });
+    openDraft({ ...capsule, source: provider });
+  }));
 
   // Step 3: the prompt plus this conversation wait in storage (and the clipboard) for another AI
-  handoffBtn.addEventListener('click', async () => {
-    const selection = takeSelection();
-    const messages = chat();
+  handoffBtn.addEventListener('click', onPage(async () => {
+    const selection = await takeSelection();
+    const messages = await ctx.page.transcript();
     if (!messages.length) return ctx.toast('Open a conversation first');
     if (!ctx.storage) return ctx.toast('Storage unavailable');
     const prompt = buildCapsulePrompt(selection, formatTranscript(messages));
-    try { await saveHandoff(ctx.storage, { prompt, source: ctx.provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
+    try { await saveHandoff(ctx.storage, { prompt, source: provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
     navigator.clipboard?.writeText(prompt).catch(() => {});
     ctx.toast('Ready: open another AI → Capsules → Paste & create');
-  });
+  }));
 
-  textButton(handoffBtns, 'Paste & create', () => {
-    if (handoff) promptAndWait(handoff.prompt, { source: handoff.source, handoff: true });
-  });
+  textButton(handoffBtns, 'Paste & create', onPage(async () => {
+    if (handoff) await promptAndWait(handoff.prompt, { source: handoff.source, handoff: true });
+  }));
   textButton(handoffBtns, 'Dismiss', async () => {
     try { await clearHandoff(ctx.storage); } catch (_) {}
     refresh();
   });
 
-  textButton(waitBtns, 'Use last reply', () => {
-    const capsule = parseCapsule(latestReplyText(document, ctx.replySelector), { loose: true });
-    if (!capsule) return ctx.toast('No reply yet');
+  textButton(waitBtns, 'Use last reply', onPage(async () => {
     const from = watcher?.from;
+    const capsule = parseCapsule(await ctx.page.latestReply(), { loose: true });
+    if (!capsule) return ctx.toast('No reply yet');
     draftFrom(capsule, from);
-  });
+  }));
   textButton(waitBtns, 'Cancel', stopWaiting);
 
   textButton(draftBtns, 'Save', async () => {
@@ -5507,13 +5527,11 @@ function CapsulePanel(parent, ctx) {
     view.addEventListener(type, (e) => { if (e.key !== 'Escape' && e.target.matches?.('input, textarea, select')) e.stopPropagation(); });
   }
 
-  /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version). */
+  /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version; a failed count is retried). */
   function tokensOf(capsule) {
     const key = `${capsule.id}:${capsule.updatedAt}`;
     if (!tokenCache.has(key)) {
-      let n = null;
-      try { n = ctx.countTokens ? ctx.countTokens(fmt(capsule)) : null; } catch (_) {}
-      tokenCache.set(key, n);
+      tokenCache.set(key, ctx.page.countTokens([fmt(capsule)]).then(r => r[0] ?? null, () => { tokenCache.delete(key); return null; }));
     }
     return tokenCache.get(key);
   }
@@ -5548,27 +5566,29 @@ function CapsulePanel(parent, ctx) {
         chip.setAttribute('aria-label', `Show only #${t}`);
       }
     }
-    const tokens = tokensOf(capsule);
-    if (tokens !== null) {
+    // Cost line: filled in when the count arrives
+    const line = h('div', 'm hide', card);
+    line.dataset.tip = 'Estimated with a local tokenizer; the site may count a little differently';
+    tokensOf(capsule).then((tokens) => {
+      if (tokens === null) return;
       const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
-      const line = h('div', `m${cost.tooBig ? ' bad' : ''}`, card, cost.tooBig ? `${cost.text} · too big for this chat` : cost.text);
-      line.dataset.tip = 'Estimated with a local tokenizer; the site may count a little differently';
-    }
-    const btns = h('div', 'btns', card);
-    textButton(btns, 'Insert', () => {
-      const input = ctx.findInput();
-      if (input && insertText(input, fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : 'Inserted: add your question and send');
-      else copy(capsule, 'Chat box not found: copied instead');
+      line.className = `m${cost.tooBig ? ' bad' : ''}`;
+      line.textContent = cost.tooBig ? `${cost.text} · too big for this chat` : cost.text;
     });
+    const btns = h('div', 'btns', card);
+    textButton(btns, 'Insert', onPage(async () => {
+      if (await ctx.page.fill(fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : 'Inserted: add your question and send');
+      else copy(capsule, 'Chat box not found: copied instead');
+    }));
     textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
     // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
     if (!isSkill) {
-      const upd = textButton(btns, 'Update', () => {
-        if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
-        if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
-        promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
-      });
-      upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
+      const upd = textButton(btns, 'Update', onPage(async () => {
+        if (limit) return ctx.toast(`${provider}'s limit is reached: update it later, or edit by hand`);
+        if (!(await ctx.page.hasConversation())) return ctx.toast('Open the chat with the new progress first');
+        await promptAndWait(buildCapsulePrompt(await takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
+      }));
+      upd.dataset.tip = `${provider} rewrites it with this chat's new progress`;
     }
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
@@ -5596,8 +5616,8 @@ function CapsulePanel(parent, ctx) {
       renderList();
     }
     // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
-    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.provider);
-    if (limit) setText(limitText, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
+    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || provider);
+    if (limit) setText(limitTextEl, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
     mode(current);
   }
 
@@ -5646,14 +5666,13 @@ function CapsulePanel(parent, ctx) {
   projectSel.addEventListener('change', () => { projectFilter = projectSel.value; renderList(); });
 
   /** Footer for the ticked items: count, cost of inserting them together, room left. */
-  function updatePick() {
+  async function updatePick() {
     for (const id of [...selected]) if (!items.some(c => c.id === id)) selected.delete(id); // Deleted elsewhere
     const picked = items.filter(c => selected.has(c.id));
     show(pick, picked.length > 0);
     if (!picked.length) return;
     setText(pickText, `☑️ ${picked.length} ${noun}${picked.length === 1 ? '' : 's'} picked`);
-    let tokens = null;
-    try { tokens = ctx.countTokens ? ctx.countTokens(formatManyForInsert(picked, ctx.kind)) : null; } catch (_) {}
+    const [tokens] = await ctx.page.countTokens([formatManyForInsert(picked, ctx.kind)]).catch(() => [null]);
     const cost = tokens === null ? null : formatCost(tokens, view_.contextLimit, view_.remaining);
     setText(pickCost, !cost ? '' : cost.tooBig ? `${cost.text} · too big for this chat`
       : `${cost.text}${view_.remaining !== null ? ` · ${fmtK(view_.remaining)} left` : ''}`);
@@ -5661,17 +5680,16 @@ function CapsulePanel(parent, ctx) {
   }
 
   const pickedText = () => formatManyForInsert(items.filter(c => selected.has(c.id)), ctx.kind);
-  textButton(pickBtns, 'Insert all', () => {
-    const input = ctx.findInput();
+  textButton(pickBtns, 'Insert all', onPage(async () => {
     const text = pickedText();
-    if (input && insertText(input, text)) {
+    if (await ctx.page.fill(text)) {
       ctx.toast(`Inserted ${selected.size}: add your question and send`);
       selected.clear();
       renderList();
     } else {
       navigator.clipboard.writeText(text).then(() => ctx.toast('Chat box not found: copied instead'), () => ctx.toast('Copy failed'));
     }
-  });
+  }));
   textButton(pickBtns, 'Copy', () => navigator.clipboard.writeText(pickedText()).then(() => ctx.toast('Copied'), () => ctx.toast('Copy failed')));
   textButton(pickBtns, 'Clear', () => { selected.clear(); renderList(); });
 
@@ -5703,6 +5721,46 @@ function CapsulePanel(parent, ctx) {
   return { view, refresh, setView, capture, stop: stopWaiting };
 }
 
+
+  // --- content/overlay-ui.js ---
+  /**
+ * Context Monitor - Context Widget (provider-neutral UI)
+ *
+ * Renders the view state from widget-state.js (toWidgetState). It knows nothing about any AI site:
+ * the adapter supplies a name, `onRefresh()` and `getDiagnostics()`. Everything lives in a shadow
+ * root, so the host page's CSS cannot reach it and ours never leaks out.
+ *
+ *   Collapsed (default)  pill "39.3K • Medium" — click expands, drag moves
+ *   Expanded             header (drag handle: theme / collapse / close)
+ *                        hero: token count, usage bar, window, model, limit line, warning
+ *                        stats: You / <Site> + tools / Hidden
+ *                        sections (closed by default): Breakdown, Hidden context, Usage limits, Diagnostics
+ *                        footer: confidence, Copy diagnostics, Refresh
+ *
+ * Position: free drag (pointer events, translate3d), clamped to the viewport, snapped to the nearest
+ * side on release (hold Alt to skip), anchored to that side so expanding never pushes it off screen.
+ * Position, expanded state and theme persist per site in chrome.storage.local.
+ * Components build their DOM once; updates write only what changed, and page-derived strings are
+ * only ever assigned as text, never HTML.
+ *
+ * Header tabs: Context (above) | Capsules (CapsulePanel in ui/capsule-panel.js: create, edit, save, insert)
+ * | Skills (the same panel with kind 'skill': reusable instructions).
+ */
+
+
+
+
+
+
+
+
+const MARGIN = 8; // Viewport clamp
+const TOP_SAFE = 72; // Default/snap top: below the sites' top bars (Share, account buttons)
+const SNAP_Y = 48; // Snap to a top/bottom corner when released this close
+const DRAG_THRESHOLD = 4; // Pointer movement that turns a press into a drag
+const DEFAULT_POS = { side: 'right', dx: 16, y: TOP_SAFE };
+const THEMES = ['auto', 'dark', 'light'];
+
 class ContextWidget {
   /**
    * @param {{ provider?: string, findInput?: () => Element|null, replySelector?: string, onRefresh?: () => any, getDiagnostics?: () => Object }} [adapter]
@@ -5718,6 +5776,8 @@ class ContextWidget {
       onRefresh: adapter.onRefresh || (() => {}),
       getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
     };
+    // What the Capsules / Skills tabs use to read and fill the page
+    this.page = createPage({ ...this.adapter, getLimits: () => this.latestState?.limits || [] });
     this.hostElement = null;
     this.shadowRoot = null;
     this.isExpanded = false;
@@ -5913,11 +5973,7 @@ class ContextWidget {
     const badgesBtn = textButton(displayBtns, '', () => { this.badges = !this.badges; this._savePrefs(); this._paintBadges(); this.render(); });
 
     const panelCtx = {
-      provider,
-      findInput: () => this.adapter.findInput(),
-      replySelector: this.adapter.replySelector,
-      userSelector: this.adapter.userSelector,
-      countTokens: this.adapter.countTokens,
+      page: this.page,
       storage: this._storage(),
       toast: (text) => this._toast(text),
       reveal: () => {

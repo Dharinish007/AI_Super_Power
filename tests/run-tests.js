@@ -23,6 +23,7 @@ import { runPerformanceTests } from './unit/performance.test.js';
 import { runCapsuleTests } from './unit/capsule.test.js';
 import { runGemmaTokenizerTests } from './unit/gemma-tokenizer.test.js';
 import { runSettingsTests } from './unit/settings.test.js';
+import { runPageActionsTests } from './unit/page-actions.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -45,7 +46,8 @@ const SUITES = [
   runPerformanceTests, // Fast paths are exactly equivalent to the slow ones
   runCapsuleTests, // Prompt, reply parsing, local store, chat-box insertion
   runGemmaTokenizerTests, // Gemma 4 tokenizer (Gemini) == reference implementation
-  runSettingsTests // Settings defaults, normalize, read/write with repair
+  runSettingsTests, // Settings defaults, normalize, read/write with repair
+  runPageActionsTests // The in-page Page: read the chat, fill the box, wait for a Capsule
 ];
 
 console.log('========================================================');
