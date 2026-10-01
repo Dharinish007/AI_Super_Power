@@ -4950,33 +4950,42 @@ function servePanel({ runtime, page, getState, actions }) {
   let port = null;
   let pending = null;
   let timer = null;
-  const watchers = new Map(); // call id -> stop
-  const post = (m) => { try { port?.postMessage(m); } catch (_) { port = null; } };
+  const watchers = new Map(); // call id -> stop (the current port's only)
+  // Everything below talks to one port at a time: the newest. Replies for an older port are dropped.
+  const drop = (p) => {
+    if (port !== p) return;
+    port = null; pending = null; clearTimeout(timer); timer = null;
+    for (const stop of watchers.values()) stop();
+    watchers.clear();
+  };
+  const send = (p, m) => { if (port !== p) return; try { p.postMessage(m); } catch (_) { drop(p); } };
   const flush = () => {
     timer = null;
-    if (!pending) return;
-    post({ type: 'STATE', state: pending, provider: page.provider });
+    if (!pending || !port) return;
+    send(port, { type: 'STATE', state: pending, provider: page.provider });
     pending = null;
     timer = setTimeout(flush, 250);
   };
   runtime.onConnect.addListener((p) => {
     if (p.name !== PANEL_PORT) return;
+    if (port) { const old = port; drop(old); try { old.disconnect(); } catch (_) {} } // one panel per tab
     port = p;
-    p.onDisconnect.addListener(() => { if (port === p) port = null; for (const stop of watchers.values()) stop(); watchers.clear(); });
+    p.onDisconnect.addListener(() => drop(p));
     p.onMessage.addListener(async (m) => {
       if (m?.type === 'STOP_WATCH') { watchers.get(m.id)?.(); watchers.delete(m.id); return; }
       if (m?.type !== 'CALL') return;
       try {
         let value;
         if (m.name === 'watchCapsule') {
-          watchers.set(m.id, await page.watchCapsule((capsule) => { post({ type: 'CAPSULE', id: m.id, capsule }); }));
+          const stop = await page.watchCapsule((capsule) => send(p, { type: 'CAPSULE', id: m.id, capsule }));
+          if (port === p) watchers.set(m.id, stop); else stop(); // the panel left while it started
         } else if (PAGE_CALLS.includes(m.name)) value = await page[m.name](...(m.args || []));
         else if (ACTION_CALLS.includes(m.name)) value = await actions[m.name](...(m.args || []));
         else throw new Error(`Unknown call: ${m.name}`);
-        post({ type: 'REPLY', id: m.id, ok: true, value });
-      } catch (e) { post({ type: 'REPLY', id: m.id, ok: false, error: String(e?.message || e) }); }
+        send(p, { type: 'REPLY', id: m.id, ok: true, value });
+      } catch (e) { send(p, { type: 'REPLY', id: m.id, ok: false, error: String(e?.message || e) }); }
     });
-    post({ type: 'STATE', state: getState(), provider: page.provider });
+    send(p, { type: 'STATE', state: getState(), provider: page.provider });
   });
   return {
     push(state) {
@@ -4999,7 +5008,8 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
     else if (m?.type === 'REPLY') { const p = pending.get(m.id); pending.delete(m.id); if (p) (m.ok ? p.resolve(m.value) : p.reject(new Error(m.error))); }
     else if (m?.type === 'CAPSULE') { capsuleCbs.get(m.id)?.(m.capsule); capsuleCbs.delete(m.id); }
   });
-  port.onDisconnect.addListener(() => { for (const p of pending.values()) p.reject(new Error('Disconnected')); pending.clear(); onDisconnect(); });
+  const closed = () => { for (const p of pending.values()) p.reject(new Error('Disconnected')); pending.clear(); capsuleCbs.clear(); };
+  port.onDisconnect.addListener(() => { closed(); onDisconnect(); });
   const call = (name, args = []) => new Promise((resolve, reject) => {
     const id = ++seq;
     pending.set(id, { resolve, reject });
@@ -5011,11 +5021,11 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
     async watchCapsule(onFound) {
       const id = seq + 1; // call() takes this id
       capsuleCbs.set(id, onFound);
-      await call('watchCapsule');
+      try { await call('watchCapsule'); } catch (e) { capsuleCbs.delete(id); throw e; }
       return () => { capsuleCbs.delete(id); try { port.postMessage({ type: 'STOP_WATCH', id }); } catch (_) {} };
     }
   };
-  return { page, call, disconnect: () => port.disconnect() };
+  return { page, call, disconnect: () => { closed(); port.disconnect(); } }; // Chrome fires onDisconnect on the other end only
 }
 
 

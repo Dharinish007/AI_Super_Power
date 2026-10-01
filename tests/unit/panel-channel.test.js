@@ -73,5 +73,56 @@ export async function runPanelChannelTests() {
   server.push({ ready: true, usedTokens: 1 }); await tick();
   assert('No push after the panel disconnects', states.filter(s => s?.usedTokens === 1).length === 0);
 
+  // One panel per tab: a second connect replaces the first; replies and watchers stay with their own port
+  {
+    const stops = [];
+    let conn = null;
+    const pg2 = { provider: 'Claude', fill: (t) => new Promise(r => setTimeout(() => r(t), t === 'one' ? 30 : 60)),
+      watchCapsule: async () => { const s = { stopped: false }; stops.push(s); return () => { s.stopped = true; }; } };
+    servePanel({ runtime: { onConnect: { addListener(f) { conn = f; } } }, page: pg2, getState: () => ({ ready: true }), actions: {} });
+    const open = () => {
+      const [tabEnd, panelEnd] = portPair();
+      const c = connectPanel({ tabs: { connect: () => panelEnd }, tabId: 1, onState() {}, onDisconnect: () => { c.gone = true; } });
+      conn(tabEnd);
+      return c;
+    };
+    const c1 = open();
+    await c1.page.watchCapsule(() => {});
+    const slow = c1.page.fill('one').then(() => 'resolved', (e) => e.message);
+    await tick();
+    const c2 = open();
+    await tick();
+    await c2.page.watchCapsule(() => {});
+    assert('Second connect: the old panel is disconnected and its watcher stopped', c1.gone === true && stops[0].stopped === true);
+    assert('Second connect: the new panel watcher is kept', stops[1].stopped === false);
+    assert('Second connect: replies go to the right port', (await c2.page.fill('two')) === 'two');
+    assert('Second connect: the old panel call never resolves with a reply', (await slow) === 'Disconnected');
+  }
+
+  // Panel-side disconnect rejects what is waiting (Chrome doesn't fire onDisconnect on the caller's own end)
+  {
+    const [, panelEnd] = portPair();
+    const c = connectPanel({ tabs: { connect: () => panelEnd }, tabId: 1, onState() {} });
+    const waiting = c.call('diagnostics').then(() => 'resolved', (e) => e.message);
+    c.disconnect();
+    assert('disconnect() rejects pending calls', (await waiting) === 'Disconnected');
+  }
+
+  // Throttle: first push at once, then one trailing send with the latest state
+  {
+    let conn = null;
+    const srv = servePanel({ runtime: { onConnect: { addListener(f) { conn = f; } } }, page: { provider: 'Claude' }, getState: () => ({ n: 0 }), actions: {} });
+    const [tabEnd, panelEnd] = portPair();
+    const seen = [];
+    connectPanel({ tabs: { connect: () => panelEnd }, tabId: 1, onState: (s) => seen.push(s.n) });
+    conn(tabEnd);
+    await tick();
+    srv.push({ n: 1 }); srv.push({ n: 2 }); srv.push({ n: 3 });
+    await tick();
+    assert('Throttle: the first push goes out at once', seen.join() === '0,1');
+    await new Promise(r => setTimeout(r, 320));
+    assert('Throttle: the trailing send carries the latest state', seen.join() === '0,1,3');
+  }
+
   return { passed, failed };
 }
