@@ -22,6 +22,7 @@ import { runProvidersTests } from './unit/providers.test.js';
 import { runPerformanceTests } from './unit/performance.test.js';
 import { runCapsuleTests } from './unit/capsule.test.js';
 import { runGemmaTokenizerTests } from './unit/gemma-tokenizer.test.js';
+import { runSettingsTests } from './unit/settings.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -43,7 +44,8 @@ const SUITES = [
   runProvidersTests, // Claude + Gemini adapters
   runPerformanceTests, // Fast paths are exactly equivalent to the slow ones
   runCapsuleTests, // Prompt, reply parsing, local store, chat-box insertion
-  runGemmaTokenizerTests // Gemma 4 tokenizer (Gemini) == reference implementation
+  runGemmaTokenizerTests, // Gemma 4 tokenizer (Gemini) == reference implementation
+  runSettingsTests // Settings defaults, normalize, read/write with repair
 ];
 
 console.log('========================================================');
