@@ -130,9 +130,14 @@ export class ProviderCoordinator {
         const at = result.messages.length ? Date.now() : Date.now() - API_TTL_MS + EMPTY_RETRY_MS;
         this._api = { conversationId, result, at };
         this._apiFailure = null;
+        if (!result.messages.length) this._retryLater(conversationId, EMPTY_RETRY_MS);
         return { result, error: null };
       } catch (err) {
-        this._apiFailure = { conversationId, error: err.message || 'Conversation API failed', at: Date.now() };
+        const tries = this._apiFailure?.conversationId === conversationId ? this._apiFailure.tries + 1 : 1;
+        this._apiFailure = { conversationId, error: err.message || 'Conversation API failed', at: Date.now(), tries };
+        // Re-read without waiting for a page change (a quiet page would otherwise keep the failure):
+        // 15 s, 30 s, 60 s … up to 2 minutes
+        this._retryLater(conversationId, Math.min(API_BACKOFF_MS * 2 ** (tries - 1), 120000));
         return { result: this._keptCopy(conversationId), error: this._apiFailure.error };
       } finally {
         if (this._apiInFlight?.promise === promise) this._apiInFlight = null;
@@ -140,6 +145,15 @@ export class ProviderCoordinator {
     })();
     this._apiInFlight = { conversationId, promise };
     return promise;
+  }
+
+  /** One pending re-read per tab, dropped if the user has moved to another conversation. */
+  _retryLater(conversationId, ms) {
+    clearTimeout(this._retryTimer);
+    this._retryTimer = setTimeout(() => {
+      if (this.provider.conversationId(location.href) === conversationId) this.handleDOMChange();
+    }, ms);
+    this._retryTimer?.unref?.(); // Node (tests) only: a pending retry never keeps the process alive
   }
 
   /** Last good copy of this conversation (used when a later read fails). */

@@ -330,7 +330,13 @@ export async function runProvidersTests() {
       assert('Gemini hidden context names the leak it is sized from', JSON.stringify(sp).includes('3.1 Pro'));
 
       const failing = { ...env, api: null, apiError: 'HTTP error 500' };
-      const sf = await harness(GeminiProvider, failing).run();
+      const hf = harness(GeminiProvider, failing);
+      let retryMs = null;
+      hf.c._retryLater = (id, ms) => { retryMs = ms; };
+      const sf = await hf.run();
+      assert('Gemini: a failed read schedules its own retry (a quiet page no longer keeps the failure)', retryMs === 15000);
+      await hf.run({ forceApi: true });
+      assert('Gemini: repeated failures back off (15 s -> 30 s)', retryMs === 30000);
       assert('Gemini: read failure falls back to the page, flagged as a lower bound', sf.observables.dataSource === 'dom_fallback' && sf.completeness.isLowerBound === true);
 
       env.domPlan = null;
@@ -372,6 +378,25 @@ export async function runProvidersTests() {
       const tiers = [2, 3, 4, 6].map(t => GeminiProvider.parseUsage([t, [[10, 0.42, 1, [[1, 0]]], [5, 0.9, 3, []]]]));
       assert('Gemini usage: tiers 2 Pro, 3/6 Ultra, 4 Plus; used fraction -> percent; AI-credit window skipped',
         tiers.map(u => u.plan.value).join() === 'pro,ultra,plus,ultra' && tiers[0].limits.length === 1 && tiers[0].limits[0].percent === 42);
+      // The reported tier is applied on each page pass, so a "Work" label that renders later still wins
+      const noLabel = { querySelector: () => null, querySelectorAll: () => [] };
+      const label = { querySelector: (sel) => (sel.includes('tier-enterprise') ? {} : null), querySelectorAll: () => [] };
+      let tierReply = '[1,[]]';
+      const fetchWith = async (doc) => {
+        const saved = globalThis.document;
+        globalThis.document = doc;
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = async (url) => ({ ok: true, text: async () => ")]}'\n" + JSON.stringify([['wrb.fr', String(url).includes('jSf9Qc') ? 'jSf9Qc' : 'hNvQHb',
+          String(url).includes('jSf9Qc') ? tierReply : '[[],null]', null, null, null, 'generic']]) });
+        try { return await GeminiProvider.fetchConversation('abc'); } finally { globalThis.fetch = realFetch; globalThis.document = saved; }
+      };
+      const sessionDoc = (extra) => ({ ...extra, querySelectorAll: (sel) => (sel === 'script' ? [{ textContent: '{"SNlM0e":"tok","FdrFJe":"1","cfb2h":"bl"}' }] : []) });
+      const read = await fetchWith(sessionDoc(noLabel));
+      assert('Gemini: reported tier kept for the page passes, not baked into the saved copy', read.plan === null && GeminiProvider.detectPlan(noLabel).value === 'free' && GeminiProvider.detectPlan(noLabel).source === 'account_api');
+      assert('Gemini: "Work" label rendering after the read still makes it workspace (1M), not Free 32K', GeminiProvider.detectPlan(label).value === 'workspace');
+      tierReply = '[99,[]]';
+      await fetchWith(sessionDoc(noLabel)); // Unknown tier clears it: later tests see no reported plan
+
       assert('Gemini usage: unknown tier or bad shape -> no plan, no limits',
         GeminiProvider.parseUsage([99, []]).plan === null && GeminiProvider.parseUsage(null).limits.length === 0);
 

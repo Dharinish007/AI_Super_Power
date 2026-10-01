@@ -409,6 +409,8 @@ const GEMINI_RPC_READ = 'hNvQHb';
 // (client.py _fetch_usage_info, 2026-08): 1 free, 2 Pro, 3 / 6 Ultra, 4 Plus
 const GEMINI_RPC_USAGE = 'jSf9Qc';
 const GEMINI_TIERS = { 1: 'free', 2: 'pro', 3: 'ultra', 4: 'plus', 6: 'ultra' };
+// Last tier the usage RPC reported: { plan: { value, evidenceType } | null }
+const geminiTier = { plan: null };
 const GEMINI_PAGE_SIZE = 10;
 const GEMINI_MAX_PAGES = 100; // 1,000 turns
 
@@ -479,7 +481,12 @@ export const GeminiProvider = {
    * view). Pages until there is no continuation token; one retry on a failed page.
    */
   async fetchConversation(conversationId) {
-    const session = geminiSession(document);
+    // The session values are in an inline script that may not be parsed yet when the first read runs
+    let session = geminiSession(document);
+    for (let i = 0; !session && i < 20; i++) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      session = geminiSession(document);
+    }
     if (!session) return null;
     // Plan and usage limits come with every read; best effort, never blocks the conversation
     const usage = geminiRpc(session, GEMINI_RPC_USAGE, [], '/usage').catch(() => null);
@@ -496,8 +503,9 @@ export const GeminiProvider = {
     }
     const { plan, limits } = this.parseUsage(await usage);
     // A work account's window follows its Workspace edition, not this tier (the page's "Work" label decides)
-    const workAccount = Boolean(document.querySelector('[class*="tier-enterprise"]'));
-    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: workAccount ? null : plan, hidden: null, attachments: null, limits };
+    // The tier is applied by detectPlan on every pass, so a "Work" label that renders later still wins
+    geminiTier.plan = plan;
+    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits };
   },
 
   /**
@@ -656,6 +664,8 @@ export const GeminiProvider = {
   detectPlan(doc) {
     // Work / school accounts carry a "Work" tier label by the avatar (checked live 2026-10-01)
     if (doc.querySelector('[class*="tier-enterprise"]')) return { value: 'workspace', source: 'dom', evidenceType: 'OBSERVED' };
+    // Tier Gemini reported on the last read (personal accounts)
+    if (geminiTier.plan) return { ...geminiTier.plan, source: 'account_api' };
     let seenHeader = false;
     for (const el of doc.querySelectorAll('header, top-bar-actions, [data-test-id*="pillbox"], .gds-pillbox, [role="banner"]')) {
       const text = el.textContent || '';

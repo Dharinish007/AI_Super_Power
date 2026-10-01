@@ -8793,6 +8793,8 @@ const GEMINI_RPC_READ = 'hNvQHb';
 // (client.py _fetch_usage_info, 2026-08): 1 free, 2 Pro, 3 / 6 Ultra, 4 Plus
 const GEMINI_RPC_USAGE = 'jSf9Qc';
 const GEMINI_TIERS = { 1: 'free', 2: 'pro', 3: 'ultra', 4: 'plus', 6: 'ultra' };
+// Last tier the usage RPC reported: { plan: { value, evidenceType } | null }
+const geminiTier = { plan: null };
 const GEMINI_PAGE_SIZE = 10;
 const GEMINI_MAX_PAGES = 100; // 1,000 turns
 
@@ -8863,7 +8865,12 @@ const GeminiProvider = {
    * view). Pages until there is no continuation token; one retry on a failed page.
    */
   async fetchConversation(conversationId) {
-    const session = geminiSession(document);
+    // The session values are in an inline script that may not be parsed yet when the first read runs
+    let session = geminiSession(document);
+    for (let i = 0; !session && i < 20; i++) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      session = geminiSession(document);
+    }
     if (!session) return null;
     // Plan and usage limits come with every read; best effort, never blocks the conversation
     const usage = geminiRpc(session, GEMINI_RPC_USAGE, [], '/usage').catch(() => null);
@@ -8880,8 +8887,9 @@ const GeminiProvider = {
     }
     const { plan, limits } = this.parseUsage(await usage);
     // A work account's window follows its Workspace edition, not this tier (the page's "Work" label decides)
-    const workAccount = Boolean(document.querySelector('[class*="tier-enterprise"]'));
-    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: workAccount ? null : plan, hidden: null, attachments: null, limits };
+    // The tier is applied by detectPlan on every pass, so a "Work" label that renders later still wins
+    geminiTier.plan = plan;
+    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits };
   },
 
   /**
@@ -9040,6 +9048,8 @@ const GeminiProvider = {
   detectPlan(doc) {
     // Work / school accounts carry a "Work" tier label by the avatar (checked live 2026-10-01)
     if (doc.querySelector('[class*="tier-enterprise"]')) return { value: 'workspace', source: 'dom', evidenceType: 'OBSERVED' };
+    // Tier Gemini reported on the last read (personal accounts)
+    if (geminiTier.plan) return { ...geminiTier.plan, source: 'account_api' };
     let seenHeader = false;
     for (const el of doc.querySelectorAll('header, top-bar-actions, [data-test-id*="pillbox"], .gds-pillbox, [role="banner"]')) {
       const text = el.textContent || '';
@@ -9215,9 +9225,14 @@ class ProviderCoordinator {
         const at = result.messages.length ? Date.now() : Date.now() - API_TTL_MS + EMPTY_RETRY_MS;
         this._api = { conversationId, result, at };
         this._apiFailure = null;
+        if (!result.messages.length) this._retryLater(conversationId, EMPTY_RETRY_MS);
         return { result, error: null };
       } catch (err) {
-        this._apiFailure = { conversationId, error: err.message || 'Conversation API failed', at: Date.now() };
+        const tries = this._apiFailure?.conversationId === conversationId ? this._apiFailure.tries + 1 : 1;
+        this._apiFailure = { conversationId, error: err.message || 'Conversation API failed', at: Date.now(), tries };
+        // Re-read without waiting for a page change (a quiet page would otherwise keep the failure):
+        // 15 s, 30 s, 60 s … up to 2 minutes
+        this._retryLater(conversationId, Math.min(API_BACKOFF_MS * 2 ** (tries - 1), 120000));
         return { result: this._keptCopy(conversationId), error: this._apiFailure.error };
       } finally {
         if (this._apiInFlight?.promise === promise) this._apiInFlight = null;
@@ -9225,6 +9240,15 @@ class ProviderCoordinator {
     })();
     this._apiInFlight = { conversationId, promise };
     return promise;
+  }
+
+  /** One pending re-read per tab, dropped if the user has moved to another conversation. */
+  _retryLater(conversationId, ms) {
+    clearTimeout(this._retryTimer);
+    this._retryTimer = setTimeout(() => {
+      if (this.provider.conversationId(location.href) === conversationId) this.handleDOMChange();
+    }, ms);
+    this._retryTimer?.unref?.(); // Node (tests) only: a pending retry never keeps the process alive
   }
 
   /** Last good copy of this conversation (used when a later read fails). */
