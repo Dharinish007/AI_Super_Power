@@ -3,7 +3,7 @@
  * The UI must display engine values unchanged: only formatting, never recalculation.
  */
 
-import { toWidgetState, formatModelName, alertLevel, exchangesLeft } from '../../content/widget-state.js';
+import { toWidgetState, formatModelName, alertLevel, exchangesLeft, biggestMessages, formatChatExport } from '../../content/widget-state.js';
 
 export function runWidgetStateTests() {
   console.log('--- Running Widget View-State Tests ---');
@@ -51,6 +51,29 @@ export function runWidgetStateTests() {
   assert('Approximate tokenizer downgrades conversation rows to ESTIMATED', tagOf(vmApprox, 'You') === 'ESTIMATED');
   assert('Every tagged row explains itself', vmExact.breakdown.filter(b => b.tag).every(b => b.why && b.why.length > 10));
   assert('Without engine classes, rows stay untagged (nothing invented)', tagOf(vm, 'You') === undefined);
+
+  // Set 3: biggest messages and chat export
+  const ctxMsgs = [
+    { id: 'a', role: 'user', tokens: 40, preview: 'hello' },
+    { id: 'b', role: 'assistant', tokens: 900, preview: 'long answer' },
+    { id: 'c', role: 'user', tokens: 300, preview: 'big paste' },
+    { id: 'd', role: 'assistant', tokens: 0, preview: '' }
+  ];
+  const big = biggestMessages(ctxMsgs, 2);
+  assert('biggestMessages: largest first, capped, numbered by turn', big.length === 2 && big[0].tokens === 900 && big[0].turn === 2 && big[1].turn === 3);
+  assert('biggestMessages: empty-token turns are left out', biggestMessages(ctxMsgs, 9).length === 3);
+  assert('biggestMessages: nothing in, nothing out', biggestMessages(undefined).length === 0);
+  const vmBig = toWidgetState({ ...engine, tokens: { ...engine.tokens, contextMessages: ctxMsgs } }, { provider: 'ChatGPT' });
+  assert('View state carries the biggest messages with a preview', vmBig.biggest[0].preview === 'long answer' && vmBig.biggest[0].role === 'assistant');
+
+  const chat = [{ role: 'user', text: 'Hi' }, { role: 'assistant', text: 'Hello!\n\n```js\nx\n```' }];
+  const md = formatChatExport(chat, 'md', { provider: 'ChatGPT', title: 'My chat' });
+  assert('export md: title, roles, text kept', md.startsWith('# My chat') && md.includes('**You**') && md.includes('**ChatGPT**') && md.includes('```js'));
+  const txt = formatChatExport(chat, 'txt', { provider: 'ChatGPT' });
+  assert('export txt: role-prefixed turns', txt.startsWith('You: Hi') && txt.includes('ChatGPT: Hello!'));
+  const js = JSON.parse(formatChatExport(chat, 'json', { provider: 'ChatGPT' }));
+  assert('export json: provider and ordered messages', js.provider === 'ChatGPT' && js.messages.length === 2 && js.messages[1].role === 'assistant');
+  assert('export: unknown format is refused', (() => { try { formatChatExport(chat, 'pdf'); return false; } catch (_) { return true; } })());
 
   assert('alertLevel: below 80% is quiet', alertLevel(79.9) === 0 && alertLevel(null) === 0);
   assert('alertLevel: 80 and 95 are the steps', alertLevel(80) === 80 && alertLevel(94.9) === 80 && alertLevel(95) === 95 && alertLevel(120) === 95);

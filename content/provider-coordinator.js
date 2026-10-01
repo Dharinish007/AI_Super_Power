@@ -247,7 +247,7 @@ export class ProviderCoordinator {
       const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
-        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
+        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming), preview: String(m.text || '').slice(0, 80) };
       });
       const attachments = saved?.attachments || p.pageAttachments?.(document) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.

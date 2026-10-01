@@ -23,7 +23,7 @@
  */
 
 import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert } from './capsule.js';
-import { formatModelName, alertLevel } from './widget-state.js';
+import { formatModelName, alertLevel, formatChatExport } from './widget-state.js';
 
 const STYLES = `
   :host { all: initial; }
@@ -110,7 +110,7 @@ const STYLES = `
   .sec-b { padding: 0 16px 12px; }
   .sec-b[hidden] { display: none; }
 
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
+  .row .k { color: var(--muted); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .row .k { color: var(--muted); white-space: nowrap; }
   .row .v { text-align: right; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
   .divider { border-top: 1px dashed var(--border); margin: 6px 0; }
@@ -874,6 +874,27 @@ export class ContextWidget {
     h('div', 'divider', brk.body);
     const totals = RowList(brk.body);
 
+    const bigSec = Section(body, 'Biggest messages');
+    const bigRows = RowList(bigSec.body);
+    h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
+    const exportBtns = h('div', 'btns', bigSec.body);
+    const exportChat = (format) => {
+      const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
+      if (!msgs.length) return this._toast('Open a conversation first');
+      const type = format === 'json' ? 'application/json' : 'text/plain';
+      const url = URL.createObjectURL(new Blob([formatChatExport(msgs, format, { provider })], { type }));
+      const a = h('a', null, bigSec.body);
+      a.href = url;
+      a.download = `chat-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
+    };
+    for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
+      textButton(exportBtns, label).addEventListener('click', () => exportChat(format));
+    }
+
     const hid = Section(body, 'Hidden context');
     const hidStack = HiddenStack(hid.body);
     h('div', 'fine', hid.body, `Read from ${provider}'s own data. ≈ marks estimates; anything else ${provider} adds on its servers is not visible.`);
@@ -969,7 +990,7 @@ export class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      pill, pillDot, pillNum, pillLvl, panel, bigRows, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
       sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
@@ -1045,6 +1066,7 @@ export class ContextWidget {
 
     const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
     p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
+    p.bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
     p.totals.update([
       { label: 'Used', value: tokens(vm.usedTokens) },
       { label: 'Remaining', value: tokens(vm.remainingTokens) },

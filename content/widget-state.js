@@ -48,6 +48,29 @@ export function exchangesLeft(vm) {
   return perExchange > 0 ? Math.floor(vm.remainingTokens / perExchange) : null;
 }
 
+/** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
+export function biggestMessages(messages, n = 5) {
+  return (messages || [])
+    .map((m, i) => ({ turn: i + 1, role: m.role, tokens: m.tokens || 0, preview: m.preview || '' }))
+    .filter(m => m.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, n);
+}
+
+/**
+ * The chat as a file body.
+ * @param {Array<{ role: string, text: string }>} messages
+ * @param {'md'|'txt'|'json'} format
+ * @param {{ provider?: string, title?: string }} [meta]
+ */
+export function formatChatExport(messages, format, { provider = 'AI', title = 'Chat export' } = {}) {
+  const who = (m) => (m.role === 'user' ? 'You' : provider);
+  if (format === 'json') return JSON.stringify({ provider, messages: messages.map(m => ({ role: m.role, text: m.text })) }, null, 2);
+  if (format === 'txt') return messages.map(m => who(m) + ': ' + m.text).join('\n\n');
+  if (format === 'md') return '# ' + title + '\n\n' + messages.map(m => '**' + who(m) + '**\n\n' + m.text).join('\n\n---\n\n') + '\n';
+  throw new Error(`Unknown export format: ${format}`);
+}
+
 /**
  * @param {Object} s Context state produced by ContextCalculator + coordinator
  * @param {{ provider?: string }} [opts]
@@ -144,6 +167,7 @@ export function toWidgetState(s, opts = {}) {
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
+    biggest: biggestMessages(s.tokens?.contextMessages),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
     // What the page never shows: label, token count and the text itself, for the viewer
     hiddenItems: hiddenItems.map(i => ({
