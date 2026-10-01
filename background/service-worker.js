@@ -3,7 +3,7 @@
  *
  * Ephemeral Manifest V3 Service Worker, stateless.
  * - Manages the toolbar badge (utilization percentage and alert color) per tab.
- * - The toolbar icon toggles the in-page widget (there is no popup).
+ * - The toolbar icon opens the side panel.
  * Content scripts send only the badge numbers; nothing is stored here.
  */
 

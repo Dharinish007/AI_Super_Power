@@ -42,10 +42,9 @@ assert(manifest.background?.service_worker, 'MV3 background.service_worker decla
 const swPath = path.join(rootDir, manifest.background.service_worker);
 assert(fs.existsSync(swPath), `Service worker file exists: ${manifest.background.service_worker}`);
 
-// The in-page widget is the only context UI; the toolbar icon toggles it instead of opening a popup
+// The toolbar icon opens the side panel
 assert(manifest.action && !manifest.action.default_popup, 'No duplicate popup UI (action has no default_popup)');
 
-// Check side panel
 if (manifest.side_panel?.default_path) {
   const panelPath = path.join(rootDir, manifest.side_panel.default_path);
   assert(fs.existsSync(panelPath), `Side panel HTML file exists: ${manifest.side_panel.default_path}`);
