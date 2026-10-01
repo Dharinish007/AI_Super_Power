@@ -137,7 +137,7 @@ export async function runInterceptorTests() {
   }
 
   // 6. A response that no longer parses (API change) is reported for diagnostics, never thrown at the page
-  for (const url of ['https://chatgpt.com/backend-api/models', 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27', 'https://chatgpt.com/backend-api/conversation/abc12345-0000']) {
+  for (const url of ['https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27', 'https://chatgpt.com/backend-api/conversation/abc12345-0000', 'https://chatgpt.com/backend-api/conversation/init']) {
     const { window, posted } = loadInterceptor(() => new Response('<html>not json</html>', { status: 200 }), '/c/abc12345-0000');
     const res = await window.fetch(url, { method: 'GET' });
     const pageText = await res.text();

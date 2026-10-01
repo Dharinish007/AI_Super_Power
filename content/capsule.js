@@ -14,6 +14,7 @@
  *   CapsuleStore        list / save / remove / importMany in chrome.storage.local (one list shared by all sites)
  *   exportCapsules      export file text; normalizeCapsule checks each imported Capsule
  *   Skills              the same store under SKILLS_KEY: reusable instructions (formatSkillForInsert, STARTER_SKILLS)
+ *   Library             tags, project and pin on every item; searchItems, formatManyForInsert (tick several)
  *   insertText          puts text in a site's chat box (rich editor or textarea)
  */
 
@@ -92,6 +93,14 @@ export function chatLimitReached(limits = []) {
   )) || null;
 }
 
+/** Live page text without the button labels of the sites' code blocks and message toolbars. */
+export function cleanPageText(s) {
+  return String(s || '').split('\n')
+    .filter(l => !/^\s*(Copy|Copy code|Copied!|Edit|Retry|Share)\s*$/i.test(l))
+    .map(l => l.replace(/\s*\b(Copy code|Copied!)\s*$/i, '')) // "bash Copy code" header -> "bash"
+    .join('\n').trim();
+}
+
 /**
  * The visible conversation, read live (line breaks kept), in page order. Code blocks are also kept
  * apart for the Quick Capsule's snippets.
@@ -105,16 +114,11 @@ export function readTranscript(doc, userSelector, replySelector) {
   const nodes = [...doc.querySelectorAll(`${userSelector}, ${replySelector}`)];
   const matched = new Set(nodes);
   const inner = (el) => String(el?.innerText || el?.textContent || '').trim();
-  // Live text includes button labels of the sites' code blocks and message toolbars
-  const clean = (s) => s.split('\n')
-    .filter(l => !/^\s*(Copy|Copy code|Copied!|Edit|Retry|Share)\s*$/i.test(l))
-    .map(l => l.replace(/\s*\b(Copy code|Copied!)\s*$/i, '')) // "bash Copy code" header -> "bash"
-    .join('\n').trim();
   return nodes
     .filter(n => { for (let p = n.parentElement; p; p = p.parentElement) if (matched.has(p)) return false; return true; })
     .map(n => ({
       role: n.matches(replySelector) ? 'assistant' : 'user',
-      text: clean(inner(n)),
+      text: cleanPageText(inner(n)),
       code: [...n.querySelectorAll('pre')].map(pre => inner(pre.querySelector('code') || pre)).filter(Boolean)
     }))
     .filter(m => m.text);
@@ -199,11 +203,13 @@ export function parseCapsule(text, { loose = false } = {}) {
   const fence = body.match(/^(`{3,})[\w-]*\n/);
   if (fence && body.endsWith(`\n${fence[1]}`)) body = body.slice(fence[0].length, -fence[1].length - 1).trim();
 
+  // Title line: only the first line ("Title: x", "**Title:** x"); a "title:" further down (YAML in a
+  // snippet) is content and stays
   let title = '';
-  const m = body.match(/^[ \t]*\**title\**:\**[ \t]*(.+)$/im); // "Title: x", "**Title:** x"
+  const m = body.match(/^\**title\**:\**[ \t]*(.+)/i);
   if (m) {
     title = m[1];
-    body = (body.slice(0, m.index) + body.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+    body = body.slice(m[0].length).trim();
   }
   if (!body) return null;
   title = (title || body.split('\n').find(l => l.trim()) || '').replace(/^[#\s*"'`]+|[*"'`\s]+$/g, '');
@@ -215,7 +221,7 @@ export function latestReplyText(doc, replySelector) {
   if (!doc || !replySelector) return '';
   const replies = doc.querySelectorAll(replySelector);
   const last = replies[replies.length - 1];
-  return last ? String(last.innerText || last.textContent || '').trim() : '';
+  return last ? cleanPageText(last.innerText || last.textContent) : '';
 }
 
 /**
@@ -321,17 +327,31 @@ export class CapsuleStore {
     const list = await this.list();
     const now = Date.now();
     const i = capsule.id ? list.findIndex(c => c.id === capsule.id) : -1;
+    const old = i >= 0 ? list[i] : null;
     const item = {
-      id: i >= 0 ? list[i].id : newCapsuleId(),
+      id: old ? old.id : newCapsuleId(),
       title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || `Untitled ${this.noun}`,
       body,
-      source: capsule.source || (i >= 0 ? list[i].source : null) || 'AI',
-      createdAt: i >= 0 ? list[i].createdAt : now,
+      source: capsule.source || old?.source || 'AI',
+      // Library fields: given ones replace, missing ones are kept (Update and Edit keep tags and pin)
+      tags: normalizeTags(capsule.tags ?? old?.tags),
+      project: normalizeProject(capsule.project !== undefined ? capsule.project : old?.project),
+      pinned: Boolean(capsule.pinned ?? old?.pinned),
+      createdAt: old ? old.createdAt : now,
       updatedAt: now
     };
     if (i >= 0) list[i] = item; else list.unshift(item);
     await this.area.set({ [this.key]: list });
     return item;
+  }
+
+  /** Pin or unpin; not an edit, so updatedAt (which import merges by) is unchanged. */
+  async setPinned(id, pinned) {
+    const list = await this.list();
+    const item = list.find(c => c.id === id);
+    if (!item) return;
+    item.pinned = Boolean(pinned);
+    await this.area.set({ [this.key]: list });
   }
 
   async remove(id) {
@@ -386,9 +406,94 @@ export function normalizeCapsule(raw, now = Date.now(), noun = 'Capsule') {
     title: str(raw.title, CAPSULE_TITLE_MAX) || `Untitled ${noun}`,
     body: raw.body.trim().slice(0, CAPSULE_MAX_BODY),
     source: str(raw.source, 20) || 'Import',
+    tags: normalizeTags(raw.tags),
+    project: normalizeProject(raw.project),
+    pinned: raw.pinned === true,
     createdAt,
     updatedAt: Math.max(createdAt, time(raw.updatedAt))
   };
+}
+
+const TAGS_MAX = 10;
+const TAG_CHARS = 30;
+const PROJECT_CHARS = 40;
+
+/**
+ * Tags from the editor ("work, #Auth") or a stored / imported array: lowercase, no '#' or ',',
+ * at most 30 characters each, at most 10, no duplicates. Anything else gives [].
+ * @param {string|string[]|undefined} input
+ * @returns {string[]}
+ */
+export function normalizeTags(input) {
+  const raw = typeof input === 'string' ? input.split(',') : Array.isArray(input) ? input : [];
+  const out = [];
+  for (const t of raw) {
+    if (typeof t !== 'string') continue;
+    const tag = t.replace(/[#,]/g, '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, TAG_CHARS);
+    if (tag && !out.includes(tag)) out.push(tag);
+    if (out.length === TAGS_MAX) break;
+  }
+  return out;
+}
+
+/** Project name (≤ 40 characters), or null for none. */
+export function normalizeProject(input) {
+  return typeof input === 'string' && input.trim() ? input.trim().slice(0, PROJECT_CHARS) : null;
+}
+
+/** Projects in use, A-Z (for the filter and the editor's suggestions). */
+export function projectsOf(items) {
+  return [...new Set((items || []).map(c => c.project).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Library search. Every term must match (title, tags, project or text); `#tag` matches tags only.
+ * Order: pinned first, then best match (title 3, tag or project 2, text 1 per term), then newest.
+ * An empty query lists everything, pinned first, newest first.
+ * @param {Array} items Saved Capsules or Skills
+ * @param {string} [query]
+ * @param {{ project?: string|null }} [opts] Only this project
+ */
+export function searchItems(items, query = '', { project = null } = {}) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const scored = [];
+  for (const c of items || []) {
+    if (project && c.project !== project) continue;
+    const tags = c.tags || [];
+    let score = 0;
+    let all = true;
+    for (const term of terms) {
+      if (term.startsWith('#') && term.length > 1) {
+        const t = term.slice(1);
+        if (tags.some(tag => tag.startsWith(t))) score += 2; else { all = false; break; }
+        continue;
+      }
+      const s = (String(c.title || '').toLowerCase().includes(term) ? 3 : 0) +
+        (tags.some(tag => tag.includes(term)) || String(c.project || '').toLowerCase().includes(term) ? 2 : 0) +
+        (String(c.body || '').toLowerCase().includes(term) ? 1 : 0);
+      if (!s) { all = false; break; }
+      score += s;
+    }
+    if (all) scored.push({ c, score });
+  }
+  return scored
+    .sort((a, b) => (b.c.pinned ? 1 : 0) - (a.c.pinned ? 1 : 0) || b.score - a.score || (b.c.updatedAt || 0) - (a.c.updatedAt || 0))
+    .map(x => x.c);
+}
+
+/**
+ * One insert for several ticked items: a header line, then each as "### title" + text. A single item
+ * keeps its usual wording.
+ * @param {Array<{ title: string, body: string }>} items
+ * @param {'capsule'|'skill'} [kind]
+ */
+export function formatManyForInsert(items, kind = 'capsule') {
+  const list = items || [];
+  if (list.length === 1) return kind === 'skill' ? formatSkillForInsert(list[0]) : formatForInsert(list[0]);
+  const parts = list.map(c => `### ${c.title}\n${c.body}`).join('\n\n');
+  return kind === 'skill'
+    ? `Follow these instructions for the rest of this chat (Skills: ${list.map(c => c.title).join(', ')}):\n\n${parts}`
+    : `Context from earlier AI conversations (${list.length} Capsules). Use it as background for what I ask next.\n\n${parts}`;
 }
 
 /**

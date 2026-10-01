@@ -7,7 +7,8 @@ import {
   CAPSULE_START, CAPSULE_END, CAPSULE_MAX_SELECTION, CAPSULES_KEY, CAPSULE_HANDOFF_KEY,
   buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
   chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
-  formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert
+  formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert,
+  normalizeTags, normalizeProject, projectsOf, searchItems, formatManyForInsert
 } from '../../content/capsule.js';
 
 /** chrome.storage.local stand-in */
@@ -61,6 +62,9 @@ export async function runCapsuleTests() {
   assert('Empty Capsule -> null', parseCapsule(`${CAPSULE_START}\nTitle: x\n${CAPSULE_END}`) === null);
   const fenced = parseCapsule(`${CAPSULE_START}\n\`\`\`\`markdown\n**Title:** "Landing copy"\n## Goal\nShip it\n\`\`\`\`\n${CAPSULE_END}`);
   assert('Fence inside the markers and **Title:** handled', fenced?.title === 'Landing copy' && fenced.body === '## Goal\nShip it');
+  const yaml = parseCapsule(`${CAPSULE_START}\n## Goal\nBlog post\n## Key snippets\n\`\`\`yaml\ntitle: My post\n\`\`\`\n${CAPSULE_END}`);
+  assert('No Title line: a "title:" inside a snippet stays in the body', yaml?.title === 'Goal' && yaml.body.includes('```yaml\ntitle: My post\n```'));
+  assert('Use last reply: button labels removed', latestReplyText(fakeDoc(['Here:\nbash Copy code\nnpm i\nCopy']), 'x') === 'Here:\nbash\nnpm i');
   const untitled = parseCapsule(`${CAPSULE_START}\n## Goal\nShip it\n${CAPSULE_END}`);
   assert('No Title line -> first line becomes the title', untitled?.title === 'Goal');
   assert('CRLF line endings handled', parseCapsule(`${CAPSULE_START}\r\nTitle: A\r\nbody\r\n${CAPSULE_END}`)?.body === 'body');
@@ -248,6 +252,55 @@ export async function runCapsuleTests() {
   assert('Skills: insert text names the Skill and applies to the chat',
     formatSkillForInsert({ title: 'Tamil', body: 'Answer in Tamil' }) === 'Follow these instructions for the rest of this chat (Skill: Tamil):\n\nAnswer in Tamil');
   assert('Skills: starter ids are fixed (two tabs seeding write the same list)', STARTER_SKILLS.every(s => s.id.startsWith('starter-')));
+
+  // Milestone 5: Library
+  assert('Tags: comma text -> lowercase, no #, spaces to -, unique', JSON.stringify(normalizeTags(' Work, #Auth ,auth,, Big Idea ')) === '["work","auth","big-idea"]');
+  assert('Tags: arrays, junk, caps (10 tags, 30 chars)', JSON.stringify(normalizeTags(['a', 5, null, 'b'])) === '["a","b"]' &&
+    normalizeTags(Array.from({ length: 15 }, (_, i) => `t${i}`)).length === 10 && normalizeTags(['x'.repeat(50)])[0].length === 30 &&
+    normalizeTags(undefined).length === 0 && normalizeTags({}).length === 0);
+  assert('Project: trimmed and capped, empty -> null', normalizeProject('  api  ') === 'api' && normalizeProject('   ') === null &&
+    normalizeProject(42) === null && normalizeProject('p'.repeat(60)).length === 40);
+
+  const larea = fakeArea();
+  const lib = new CapsuleStore(larea);
+  const L1 = await lib.save({ title: 'Auth plan', body: 'JWT and refresh tokens', tags: 'backend, auth', project: 'api' });
+  await lib.save({ title: 'Landing copy', body: 'Hero text for the auth page', tags: ['marketing'], project: 'site' });
+  const L3 = await lib.save({ title: 'Old notes', body: 'misc', project: 'api' });
+  assert('Store: tags, project and pin saved', JSON.stringify(L1.tags) === '["backend","auth"]' && L1.project === 'api' && L1.pinned === false);
+  const L1b = await lib.save({ id: L1.id, title: 'Auth plan v2', body: 'JWT, refresh tokens, rotation' });
+  assert('Store: an edit without library fields keeps tags and project', JSON.stringify(L1b.tags) === '["backend","auth"]' && L1b.project === 'api');
+  const L1c = await lib.save({ id: L1.id, title: 'Auth plan v2', body: 'x', tags: '', project: '' });
+  assert('Store: empty tags / project from the editor clear them', L1c.tags.length === 0 && L1c.project === null);
+  await new Promise(r => setTimeout(r, 2)); // Saves in the same millisecond tie on updatedAt: this one must be newest
+  await lib.save({ id: L1.id, title: 'Auth plan', body: 'JWT and refresh tokens', tags: 'backend, auth', project: 'api' });
+  const beforePin = (await lib.list()).find(c => c.id === L3.id).updatedAt;
+  await lib.setPinned(L3.id, true);
+  const pinnedA3 = (await lib.list()).find(c => c.id === L3.id);
+  assert('Pin: saved, and not counted as an edit (updatedAt kept)', pinnedA3.pinned === true && pinnedA3.updatedAt === beforePin);
+  await lib.setPinned('missing', true);
+  assert('Pin: unknown id is a no-op', (await lib.list()).length === 3);
+
+  const all = await lib.list();
+  const titles = (q, o) => searchItems(all, q, o).map(c => c.title).join('|');
+  assert('Search: empty query = pinned first, then newest', titles('') === 'Old notes|Auth plan|Landing copy');
+  assert('Search: title beats text', titles('auth') === 'Auth plan|Landing copy');
+  assert('Search: every term must match', titles('auth hero') === 'Landing copy' && titles('auth nothing') === '');
+  assert('Search: #tag matches tags only (prefix)', titles('#back') === 'Auth plan' && titles('#hero') === '');
+  assert('Search: project filter', titles('', { project: 'api' }) === 'Old notes|Auth plan' && titles('auth', { project: 'site' }) === 'Landing copy');
+  assert('Search: case-insensitive, older items without tags work', titles('LANDING') === 'Landing copy' && searchItems([{ title: 'T', body: 'b' }], 'b').length === 1);
+  assert('Projects in use, A-Z', JSON.stringify(projectsOf(all)) === '["api","site"]' && projectsOf([]).length === 0);
+
+  const two = [{ title: 'A', body: 'a' }, { title: 'B', body: 'b' }];
+  assert('Insert many: one item keeps its usual wording', formatManyForInsert([two[0]]) === formatForInsert(two[0]) && formatManyForInsert([two[0]], 'skill') === formatSkillForInsert(two[0]));
+  assert('Insert many: Capsules under one header, each with its title',
+    formatManyForInsert(two) === 'Context from earlier AI conversations (2 Capsules). Use it as background for what I ask next.\n\n### A\na\n\n### B\nb');
+  assert('Insert many: Skills named in the header', formatManyForInsert(two, 'skill').startsWith('Follow these instructions for the rest of this chat (Skills: A, B):\n\n### A\na'));
+
+  const imp = new CapsuleStore(fakeArea());
+  await imp.importMany(JSON.stringify([{ body: 'x', tags: 'not-an-array-but-text', project: '  p  ', pinned: 'yes' }, { body: 'y', tags: [1, 'ok'], pinned: true }]));
+  const impd = await imp.list();
+  assert('Import: tags / project / pin validated', impd.some(c => c.body === 'x' && JSON.stringify(c.tags) === '["not-an-array-but-text"]' && c.project === 'p' && c.pinned === false) &&
+    impd.some(c => c.body === 'y' && JSON.stringify(c.tags) === '["ok"]' && c.pinned === true));
 
   return { passed, failed };
 }

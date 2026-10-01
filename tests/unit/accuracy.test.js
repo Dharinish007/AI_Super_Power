@@ -67,7 +67,6 @@ function harness({ url = CONV_A, api = null, apiError = null, session = { ok: tr
   c.messageExtractor.extractMessages = () => env.dom;
   const realRaw = c.modelDetector.detectRawModelString.bind(c.modelDetector);
   c.modelDetector.detectRawModelString = () => env.domModel;
-  c.modelDetector.detect = () => c.modelDetector.resolveModel(env.domModel);
   c.planDetector.detect = () => env.domPlan || { value: 'unknown', source: 'unknown', evidenceType: 'UNKNOWN' };
   const run = async () => { await c.handleDOMChange(); return c.latestState; };
   const bridge = (eventType, payload) => c.requestObserver.handleMessage({ source: globalThis.window, data: { source: 'CHATGPT_CONTEXT_MONITOR_NET', eventType, payload } });

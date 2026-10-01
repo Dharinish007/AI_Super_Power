@@ -15,82 +15,39 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const rootDir = path.resolve(__dirname, '..');
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = (...parts) => fs.readFileSync(path.join(rootDir, ...parts), 'utf8');
 
-// Read model limits JSON
-const modelLimitsRaw = fs.readFileSync(path.join(rootDir, 'config', 'model-limits.json'), 'utf8');
+const modelLimitsRaw = read('config', 'model-limits.json');
 
-// Read js-tiktoken runtime and ranks
-const base64Code = fs.readFileSync(path.join(rootDir, 'node_modules', 'base64-js', 'index.js'), 'utf8')
-  .replace('exports.byteLength = byteLength', '')
-  .replace('exports.toByteArray = toByteArray', '')
-  .replace('exports.fromByteArray = fromByteArray', '');
+// Only the o200k rank table ships (see BUNDLED_ENCODING in engine/tokenizer.js): counting is done by
+// the bundled BpeCounter, so no js-tiktoken code is needed at runtime; cl100k was ~1 MB for retired models
+const o200kRaw = read('node_modules', 'js-tiktoken', 'dist', 'ranks', 'o200k_base.js').replace('export default ', '');
 
-// The Tiktoken class lives in a hashed chunk whose name changes between js-tiktoken releases: find it
-// through the package's own lite.js re-export instead of hard-coding the name
-const tiktokenDist = path.join(rootDir, 'node_modules', 'js-tiktoken', 'dist');
-const chunkFile = fs.readFileSync(path.join(tiktokenDist, 'lite.js'), 'utf8').match(/from\s+['"]\.\/(chunk-[\w-]+\.js)['"]/)?.[1];
-if (!chunkFile) throw new Error('[Build] Tiktoken chunk not found via js-tiktoken/dist/lite.js: the package layout changed');
-const chunkCode = fs.readFileSync(path.join(tiktokenDist, chunkFile), 'utf8')
-  .replace("import base64 from 'base64-js';", '')
-  .replace(/export\s*\{[^}]+\};?/g, '');
-
-// Only o200k ships (see BUNDLED_ENCODING in engine/tokenizer.js); cl100k was ~1 MB for retired models
-const o200kRaw = fs.readFileSync(path.join(rootDir, 'node_modules', 'js-tiktoken', 'dist', 'ranks', 'o200k_base.js'), 'utf8')
-  .replace('export default ', '');
-
-const tiktokenInlined = `
-  // --- Inlined js-tiktoken core & ranks ---
-  const base64 = (function() {
-    const exports = {};
-    ${base64Code}
-    return { toByteArray, fromByteArray };
-  })();
-
-  ${chunkCode}
-
-  const o200k_base = ${o200kRaw.trim()};
-`;
-
-// Helper to read and clean module syntax for inlining into content script IIFE
-function readCleanModule(filePath) {
-  return fs.readFileSync(filePath, 'utf8')
+/** A module's source without its import/export syntax, for inlining into the content script IIFE. */
+function readCleanModule(file) {
+  return read(file)
     .replace(/^import\s+[^;\n]+from\s+[^;\n]+;/gm, '')
     .replace(/^export\s*\{[^}]+\};?/gm, '')
     .replace(/^export\s+default\s+/gm, '')
     .replace(/^export\s+/gm, '');
 }
 
-// Read modules
-const tokenizerCode = readCleanModule(path.join(rootDir, 'engine', 'tokenizer.js'));
-const gemmaTokenizerCode = readCleanModule(path.join(rootDir, 'engine', 'gemma-tokenizer.js'));
-const classifierCode = readCleanModule(path.join(rootDir, 'engine', 'context-classifier.js'));
-const mergerCode = readCleanModule(path.join(rootDir, 'engine', 'evidence-merger.js'));
-const confidenceCode = readCleanModule(path.join(rootDir, 'engine', 'confidence-engine.js'));
-const calculatorCode = readCleanModule(path.join(rootDir, 'engine', 'context-calculator.js'));
-const advisorCode = readCleanModule(path.join(rootDir, 'engine', 'context-advisor.js'));
-const extractorCode = readCleanModule(path.join(rootDir, 'content', 'message-extractor.js'));
-const planDetectorCode = readCleanModule(path.join(rootDir, 'content', 'plan-detector.js'));
-const detectorCode = readCleanModule(path.join(rootDir, 'content', 'model-detector.js'));
-const conversationClientCode = readCleanModule(path.join(rootDir, 'content', 'conversation-client.js'));
-const attachmentCode = readCleanModule(path.join(rootDir, 'content', 'attachment-detector.js'));
-const toolCode = readCleanModule(path.join(rootDir, 'content', 'tool-detector.js'));
-const widgetStateCode = readCleanModule(path.join(rootDir, 'content', 'widget-state.js'));
-const capsuleCode = readCleanModule(path.join(rootDir, 'content', 'capsule.js'));
-const overlayCode = readCleanModule(path.join(rootDir, 'content', 'overlay-ui.js'));
-const domObserverCode = readCleanModule(path.join(rootDir, 'content', 'chatgpt-dom.js'));
-const requestObserverCode = readCleanModule(path.join(rootDir, 'network', 'request-observer.js'));
-const turnMergerCode = readCleanModule(path.join(rootDir, 'content', 'turn-merger.js'));
-const contentMainCode = readCleanModule(path.join(rootDir, 'content', 'content-main.js'));
-const providersCode = readCleanModule(path.join(rootDir, 'content', 'providers.js'));
-const providerCoordinatorCode = readCleanModule(path.join(rootDir, 'content', 'provider-coordinator.js'));
+// Bundle order: engine, network, content & DOM adapters, then the Claude / Gemini provider adapters
+const MODULES = [
+  'engine/tokenizer.js', 'engine/gemma-tokenizer.js', 'engine/context-classifier.js', 'engine/evidence-merger.js',
+  'engine/confidence-engine.js', 'engine/context-calculator.js', 'engine/context-advisor.js',
+  'network/request-observer.js',
+  'content/conversation-client.js', 'content/message-extractor.js', 'content/plan-detector.js', 'content/model-detector.js',
+  'content/attachment-detector.js', 'content/tool-detector.js', 'content/widget-state.js', 'content/capsule.js',
+  'content/overlay-ui.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
+  'content/providers.js', 'content/provider-coordinator.js'
+];
 
 export const bundledContentScript = `/**
  * ChatGPT Context Monitor - Production Content Script
  * Auto-generated by scripts/build.js. Do not edit directly.
- * 
+ *
  * Complies with Chrome Manifest V3 Content Script standards:
  * - Isolated world execution
  * - Non-blocking main-thread debounced DOM extraction
@@ -103,56 +60,10 @@ export const bundledContentScript = `/**
   // Embedded verified model limits configuration
   const MODEL_LIMITS_DB = ${modelLimitsRaw.trim()};
 
-  // --- Inlined Tiktoken BPE Engine ---
-  ${tiktokenInlined}
+  // --- o200k_base BPE ranks (js-tiktoken) ---
+  const o200k_base = ${o200kRaw.trim()};
 
-  // --- Engine Layer ---
-  ${tokenizerCode}
-
-  ${gemmaTokenizerCode}
-
-  ${classifierCode}
-
-  ${mergerCode}
-
-  ${confidenceCode}
-
-  ${calculatorCode}
-
-  ${advisorCode}
-
-  // --- Network Layer ---
-  ${requestObserverCode}
-
-  // --- Content & DOM Adapters ---
-  ${conversationClientCode}
-
-  ${extractorCode}
-
-  ${planDetectorCode}
-
-  ${detectorCode}
-
-  ${attachmentCode}
-
-  ${toolCode}
-
-  ${widgetStateCode}
-
-  ${capsuleCode}
-
-  ${overlayCode}
-
-  ${domObserverCode}
-
-  ${turnMergerCode}
-
-  ${contentMainCode}
-
-  // --- Provider adapters (Claude, Gemini) ---
-  ${providersCode}
-
-  ${providerCoordinatorCode}
+${MODULES.map(m => `  // --- ${m} ---\n  ${readCleanModule(m)}`).join('\n\n')}
 
   // Auto-initialize. Claude / Gemini use their adapter; everything else is ChatGPT, where the network
   // reads start now (document_start), in parallel with the page's own loading. The widget and DOM

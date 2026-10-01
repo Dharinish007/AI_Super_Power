@@ -21,15 +21,10 @@ export const SourcePriority = Object.freeze({
   conversation_api: 4,
   session_api: 4,
   account_api: 4, // Provider account endpoint (e.g. claude.ai organization capabilities)
-  authoritative_api: 4,
-  authoritative: 4,
   network: 3,
   dom: 2,
-  dom_complete: 2,
-  dom_partial: 2,
   model_db: 1,
   tokenizer: 1,
-  heuristic: 1,
   dom_heuristic: 1,
   unknown: 0
 });
@@ -195,36 +190,6 @@ export class EvidenceMerger {
         evidenceType: EvidenceType.OBSERVED,
         activeStreams: networkHealth.activeStreamsCount || 0,
         errors: networkHealth.interceptionErrors || 0
-      },
-      tokens: input.tokens ? {
-        user: {
-          value: input.tokens.user ?? 0,
-          source: input.isAuthoritative ? 'conversation_api' : 'tokenizer',
-          evidenceType: input.isAuthoritative ? EvidenceType.EXACT : EvidenceType.ESTIMATED
-        },
-        assistant: {
-          value: input.tokens.assistant ?? 0,
-          source: input.isAuthoritative ? 'conversation_api' : 'tokenizer',
-          evidenceType: input.isAuthoritative ? EvidenceType.EXACT : EvidenceType.ESTIMATED
-        },
-        total: {
-          value: input.tokens.totalMeasurable ?? input.tokens.conversation ?? 0,
-          source: input.isAuthoritative ? 'conversation_api' : 'tokenizer',
-          evidenceType: input.isAuthoritative ? EvidenceType.EXACT : EvidenceType.ESTIMATED
-        },
-        contextWindow: {
-          value: input.tokens.contextWindow ?? null,
-          source: 'model_db',
-          // Looked up from a curated table, not reported by the provider, so never EXACT
-          evidenceType: input.tokens.contextWindow ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-        }
-      } : null,
-      limit: {
-        value: input.limit?.contextWindow ?? input.tokens?.contextWindow ?? null,
-        apiLimit: input.limit?.apiContextLimit ?? input.model?.apiContextLimit ?? null,
-        status: input.limit?.status || ((input.limit?.contextWindow ?? input.tokens?.contextWindow) ? 'VERIFIED' : 'UNKNOWN'),
-        source: input.limit?.source || 'model_db',
-        evidenceType: (input.limit?.contextWindow ?? input.tokens?.contextWindow) ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
       },
       serverContext: {
         value: 'UNOBSERVABLE',

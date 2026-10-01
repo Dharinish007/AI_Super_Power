@@ -61,7 +61,6 @@ function harness({ url = CONV_A, api = {}, session = { ok: true, status: 200, pl
   };
   c.messageExtractor.extractMessages = () => env.dom;
   c.modelDetector.detectRawModelString = () => null;
-  c.modelDetector.detect = () => c.modelDetector.resolveModel(null);
   c.planDetector.detect = () => ({ value: 'unknown', source: 'unknown', evidenceType: 'UNKNOWN' });
   const run = async (event) => { await c.handleDOMChange(event); return c.latestState; };
   return { c, env, run };
@@ -210,7 +209,6 @@ export async function runFinalFixesTests() {
       c.syncState = () => {};
       c.messageExtractor.extractMessages = () => [];
       c.modelDetector.detectRawModelString = () => null;
-      c.modelDetector.detect = () => c.modelDetector.resolveModel(null);
       c.planDetector.detect = () => ({ value: 'unknown', source: 'unknown', evidenceType: 'UNKNOWN' });
       c.prefetch();
       assert('prefetch() starts the network listener at document_start', c.requestObserver._isListening === true);

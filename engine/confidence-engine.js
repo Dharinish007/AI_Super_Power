@@ -35,10 +35,10 @@ export class ConfidenceEngine {
   /**
    * Evaluates context measurement confidence based on observable evidence quality.
    * 
+   * No site reports its own token usage, so confidence is always about client-side observation.
+   *
    * @param {Object} params
-   * @param {boolean} [params.isAuthoritative=false] - True if exact API usage tokens provided
    * @param {boolean} [params.isModelKnown=true] - True if model context window is verified
-   * @param {string} [params.modelDisplayName] - Resolved model name
    * @param {number} [params.messageCount=0] - Number of observable turns
    * @param {number} [params.attachmentCount=0] - Number of attachments
    * @param {boolean} [params.hasUnknownAttachments=false] - True if non-text files are present
@@ -51,21 +51,17 @@ export class ConfidenceEngine {
    *   level: string,
    *   score: number,
    *   percentage: number,
-   *   reasons: string[],
    *   factors: Array<{ type: 'positive' | 'negative', text: string }>,
-   *   observableConfidence: Object,
-   *   serverContextCompleteness: Object
+   *   highBlockers: string[]
    * }}
    */
   static evaluate(params = {}) {
     const {
-      isAuthoritative = false,
       isModelKnown = true,
       isLimitVerified = true,
       planTier,
       isPlanKnown,
       contextLimit = null,
-      modelDisplayName = '',
       messageCount = 0,
       attachmentCount = 0,
       hasUnknownAttachments = false,
@@ -79,32 +75,7 @@ export class ConfidenceEngine {
       tokenizerExact = true // false when the provider's own tokenizer is not public (Claude, Gemini)
     } = params;
 
-    // 1. Authoritative exact system metadata (100% confidence)
-    if (isAuthoritative) {
-      return {
-        level: ConfidenceLevel.HIGH,
-        score: 1.0,
-        percentage: 100,
-        reasons: ['Authoritative usage metadata provided directly by system'],
-        highBlockers: [],
-        factors: [
-          { type: 'positive', text: 'Authoritative exact usage metadata provided directly by system' },
-          { type: 'positive', text: `Verified model context limits (${modelDisplayName || 'Verified Model'})` }
-        ],
-        observableConfidence: {
-          level: ConfidenceLevel.HIGH,
-          score: 1.0,
-          percentage: 100
-        },
-        serverContextCompleteness: {
-          status: 'EXACT_USAGE',
-          isLowerBound: false,
-          limitations: []
-        }
-      };
-    }
-
-    // 2. Client-side Observable Evidence Evaluation
+    // Client-side observable evidence evaluation
     let score = 0.83; // Base score for verified client-side observation
     const factors = [];
 
@@ -112,9 +83,6 @@ export class ConfidenceEngine {
     if (completenessSource === 'authoritative_api') {
       score += 0.10;
       factors.push({ type: 'positive', text: 'Full authoritative conversation' });
-    } else if (completenessSource === 'in_flight_stream') {
-      score += 0.08;
-      factors.push({ type: 'positive', text: 'Authoritative base with live streaming turn' });
     } else if (completenessSource === 'dom_complete') {
       score += 0.05;
       factors.push({ type: 'positive', text: 'Complete active session turn tree in DOM' });
@@ -127,7 +95,7 @@ export class ConfidenceEngine {
 
     // --- Ground Truth Source Availability (Fallback Mode) ---
     // A partial page already carries the larger penalty above: no API is the same gap, charged once
-    if (completenessSource !== 'authoritative_api' && completenessSource !== 'in_flight_stream') {
+    if (completenessSource !== 'authoritative_api') {
       if (!isPartialConversation) score -= 0.10;
       factors.push({
         type: 'negative',
@@ -271,30 +239,13 @@ export class ConfidenceEngine {
       level = ConfidenceLevel.LOW;
     }
 
-    // Traditional reasons format for backward compatibility
-    const reasons = factors.map(f => (f.type === 'positive' ? `+ ${f.text}` : `- ${f.text}`));
 
     return {
       level,
       score: finalScore,
       percentage,
-      reasons,
       factors,
-      highBlockers, // Why HIGH was not given (empty when nothing blocks it)
-      observableConfidence: {
-        level,
-        score: finalScore,
-        percentage
-      },
-      serverContextCompleteness: {
-        status: isPartialConversation ? 'LOWER_BOUND' : 'PARTIAL_OBSERVABILITY',
-        isLowerBound: Boolean(isPartialConversation),
-        limitations: [
-          'Server-side system instructions and developer prompts are not exposed in client responses.',
-          'RAG / memory embeddings vector retrieval overhead remains unobservable from the client.',
-          'Exact internal tool schemas injected by OpenAI remain classified as UNKNOWN.'
-        ]
-      }
+      highBlockers // Why HIGH was not given (empty when nothing blocks it)
     };
   }
 }

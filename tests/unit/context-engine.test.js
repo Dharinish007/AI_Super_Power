@@ -55,15 +55,7 @@ export function runContextEngineTests() {
   assert('Hidden system context ALWAYS classified as UNKNOWN', ContextClassifier.classifyHiddenContext() === AccuracyClass.UNKNOWN);
 
   // 3. Confidence Engine Tests
-  const highConf = ConfidenceEngine.evaluate({
-    isAuthoritative: true,
-    isModelKnown: true,
-    messageCount: 10
-  });
-  assert('Authoritative metadata yields HIGH confidence (100%)', highConf.level === ConfidenceLevel.HIGH && highConf.score === 1.0);
-
   const mediumConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 12,
     attachmentCount: 0,
@@ -73,7 +65,6 @@ export function runContextEngineTests() {
   assert('Clean conversation with known model yields HIGH/MEDIUM confidence', mediumConf.level === ConfidenceLevel.HIGH && mediumConf.score >= 0.75);
 
   const lowConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: false, // Unknown model
     messageCount: 5,
     isPartialConversation: true, // Truncated
@@ -81,11 +72,7 @@ export function runContextEngineTests() {
   });
   assert('Unknown model + partial conversation yields LOW confidence', lowConf.level === ConfidenceLevel.LOW && lowConf.score < 0.5);
 
-  // 4. Context Calculator Calculation & Formatting Tests
-  assert('Formats 850 tokens as "850"', ContextCalculator.formatTokenCount(850) === '850');
-  assert('Formats 12,450 tokens as "12.5K"', ContextCalculator.formatTokenCount(12450) === '12.5K');
-  assert('Formats 128,000 tokens as "128K"', ContextCalculator.formatTokenCount(128000) === '128K');
-  assert('Formats null as "Unknown"', ContextCalculator.formatTokenCount(null) === 'Unknown');
+  // 4. Context Calculator Calculation Tests
 
   const calcResult = ContextCalculator.calculate({
     messages: [
@@ -96,7 +83,6 @@ export function runContextEngineTests() {
     model: gpt4o,
     attachments: { count: 1, estimatedTokens: 300, hasUnknown: false },
     tools: { observed: false, list: [] },
-    memory: { observed: false, enabled: true },
     isPartial: false
   });
 

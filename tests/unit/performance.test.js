@@ -1,6 +1,6 @@
 /**
  * Performance optimizations: every fast path must give exactly the same result as the slow one.
- *   - count-only BPE == js-tiktoken encode(text, 'all').length (both encodings, adversarial text)
+ *   - count-only BPE == js-tiktoken encode(text, 'all').length (adversarial text)
  *   - message text reused until the element changes (mutation-driven invalidation)
  *   - strategy pruning picks the same winner as extracting every strategy
  *   - one grouped page query == one query per group
@@ -10,6 +10,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Tiktoken } from 'js-tiktoken/lite';
+import o200k_base from 'js-tiktoken/ranks/o200k_base';
 import { Tokenizer } from '../../engine/tokenizer.js';
 import { MessageExtractor } from '../../content/message-extractor.js';
 import { queryGroups } from '../../content/tool-detector.js';
@@ -28,6 +30,7 @@ export function runPerformanceTests() {
   // ------------------------------------------------------------------ count-only BPE == reference encoder
   {
     const tk = new Tokenizer();
+    const reference = new Tiktoken(o200k_base); // js-tiktoken's own encoder (dev-only: the extension ships the count-only BPE)
     let seed = 42;
     const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
     const pieces = ['a', 'Z', ' ', '  ', '\n', '\n\n', '\r\n', '\t', '0', '12', '345', '6789', '.', ',', '!', '?', '...', '—', '"', "'s", "n't",
@@ -48,12 +51,12 @@ export function runPerformanceTests() {
       }
     }
     for (const enc of ['o200k_base']) {
-      const ref = tk.getEncoder(enc);
+      const ref = reference;
       const mismatches = samples.filter(s => tk.getCounter(enc).count(s) !== ref.encode(s, 'all').length);
       assert(`${enc}: count-only BPE equals js-tiktoken on ${samples.length} texts (unicode, emoji, lone surrogates, special tokens, long runs)`, mismatches.length === 0);
     }
     const long = samples.join('\n');
-    assert('Whole corpus in one text: identical count', tk.countTokens(long, 'o200k_base') === tk.getEncoder('o200k_base').encode(long, 'all').length);
+    assert('Whole corpus in one text: identical count', tk.countTokens(long, 'o200k_base') === reference.encode(long, 'all').length);
 
     const counter = tk.getCounter('o200k_base');
     const before = counter.stats.pieceHits;

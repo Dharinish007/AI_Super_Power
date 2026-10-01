@@ -1,48 +1,27 @@
 /**
  * ChatGPT Context Monitor - Production BPE Tokenizer
- * 
- * Implements exact, model-aware byte-pair encoding (BPE) using js-tiktoken
- * with OpenAI's o200k_base ranks (the only table bundled; see BUNDLED_ENCODING).
+ *
+ * Exact byte-pair encoding (BPE) counts with OpenAI's o200k_base ranks (the only table bundled; see
+ * BUNDLED_ENCODING), plus other providers' tokenizers once loaded (useCounter, e.g. Gemma 4 on Gemini).
  *
  * Features:
  * - 100% offline, local, client-side execution (zero data exfiltration).
  * - Exact BPE for current OpenAI models (o200k_base). Retired cl100k_base models (GPT-4, GPT-3.5) are
  *   counted with o200k_base and reported as approximate (isExact() === false).
- * - Lazy encoder instantiation for minimal startup latency and optimal memory usage.
- * - Robust handling of special tokens (allowedSpecial: 'all') preventing runtime exceptions.
+ * - Every special token is allowed and counted as one token (never throws on raw prompt text).
  * - Message parts[] support: counts exact BPE tokens for text while keeping non-text content classified.
  * - High-speed 32-bit FNV-1a hash caching with LRU eviction for real-time 60fps streaming.
  */
 
-import { Tiktoken as TiktokenModule } from 'js-tiktoken/lite';
 import o200k_base_module from 'js-tiktoken/ranks/o200k_base';
 
-// In bundled browser context (scripts/build.js), Tiktoken and rank tables are defined in outer scope
-/* global Tiktoken, o200k_base */
-const TiktokenClass = typeof Tiktoken !== 'undefined' ? Tiktoken : TiktokenModule;
+// In the bundled content script (scripts/build.js) the rank table is defined in the outer scope
+/* global o200k_base */
 const o200kData = typeof o200k_base !== 'undefined' ? o200k_base : o200k_base_module;
-
-export const SUPPORTED_ENCODINGS = Object.freeze({
-  O200K_BASE: 'o200k_base',
-  CL100K_BASE: 'cl100k_base'
-});
 
 // The one rank table shipped: cl100k_base was ~1 MB of the bundle and served retired models only.
 // ponytail: single table; ship another (or load it on demand) if a current model moves to a new encoding.
-export const BUNDLED_ENCODING = SUPPORTED_ENCODINGS.O200K_BASE;
-
-export const MODEL_TO_ENCODING = Object.freeze({
-  'gpt-4o': SUPPORTED_ENCODINGS.O200K_BASE,
-  'gpt-4o-mini': SUPPORTED_ENCODINGS.O200K_BASE,
-  'gpt-4.5': SUPPORTED_ENCODINGS.O200K_BASE,
-  'o1': SUPPORTED_ENCODINGS.O200K_BASE,
-  'o1-mini': SUPPORTED_ENCODINGS.O200K_BASE,
-  'o1-preview': SUPPORTED_ENCODINGS.O200K_BASE,
-  'o3-mini': SUPPORTED_ENCODINGS.O200K_BASE,
-  'gpt-4-turbo': SUPPORTED_ENCODINGS.CL100K_BASE,
-  'gpt-4': SUPPORTED_ENCODINGS.CL100K_BASE,
-  'gpt-3.5-turbo': SUPPORTED_ENCODINGS.CL100K_BASE
-});
+export const BUNDLED_ENCODING = 'o200k_base';
 
 const clockMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
@@ -186,13 +165,10 @@ export class Tokenizer {
   constructor(options = {}) {
     // Entries are tiny (numbers); room for several long conversations so switching back is instant
     this.maxCacheSize = options.maxCacheSize || 6000;
-    this.defaultEncoding = options.defaultEncoding || SUPPORTED_ENCODINGS.O200K_BASE;
     // Map: messageId -> { hash: number, tokens: number, textLength: number, encoding: string }
     this.cache = new Map();
     // Work counters for performance diagnostics: BPE runs vs cache reuse
     this.stats = { encoded: 0, encodedChars: 0, cacheHits: 0 };
-    // Lazy instance cache: encodingName -> Tiktoken instance
-    this.encoders = new Map();
     // Count-only BPE (what countTokens uses), created by warm() or the first count
     this.counter = null;
     // Other providers' tokenizers, registered once loaded (e.g. 'gemma4' on Gemini): name -> { count(text) }
@@ -237,14 +213,14 @@ export class Tokenizer {
   }
 
   /**
-   * True when the model's own tokenizer is the bundled one, so counts are exact BPE rather than an
-   * approximation (retired cl100k_base models such as GPT-4 and GPT-3.5 are approximate).
-   * @param {string} [encodingOrModel]
+   * True when the model's own tokenizer (its `encoding` in config/model-limits.json) is one counted
+   * here, so counts are exact BPE rather than an approximation (retired cl100k_base models such as
+   * GPT-4 and GPT-3.5 are approximate). No encoding means the bundled default.
+   * @param {string} [encoding]
    * @returns {boolean}
    */
-  isExact(encodingOrModel) {
-    if (this.extraCounters.has(encodingOrModel)) return true;
-    return this.getEncodingForModel(encodingOrModel) === BUNDLED_ENCODING;
+  isExact(encoding) {
+    return !encoding || encoding === BUNDLED_ENCODING || this.extraCounters.has(encoding);
   }
 
   /**
@@ -254,48 +230,6 @@ export class Tokenizer {
    */
   resolveEncoding(encoding) {
     return this.extraCounters.has(encoding) ? encoding : BUNDLED_ENCODING;
-  }
-
-  /**
-   * The tokenizer a model (or encoding name) actually uses, whether or not it is bundled.
-   * @param {string} [encodingOrModel]
-   * @returns {string} 'o200k_base' | 'cl100k_base'
-   */
-  getEncodingForModel(encodingOrModel) {
-    if (!encodingOrModel) return this.defaultEncoding;
-    const lower = String(encodingOrModel).toLowerCase().trim();
-
-    if (lower === SUPPORTED_ENCODINGS.O200K_BASE || lower === 'o200k') {
-      return SUPPORTED_ENCODINGS.O200K_BASE;
-    }
-    if (lower === SUPPORTED_ENCODINGS.CL100K_BASE || lower === 'cl100k') {
-      return SUPPORTED_ENCODINGS.CL100K_BASE;
-    }
-
-    if (MODEL_TO_ENCODING[lower]) {
-      return MODEL_TO_ENCODING[lower];
-    }
-
-    // Substring / fuzzy detection for model family
-    if (lower.includes('4o') || lower.includes('o1') || lower.includes('o3') || lower.includes('4.5') || lower.includes('omni')) {
-      return SUPPORTED_ENCODINGS.O200K_BASE;
-    }
-    if (lower.includes('gpt-4') || lower.includes('3.5') || lower.includes('turbo')) {
-      return SUPPORTED_ENCODINGS.CL100K_BASE;
-    }
-
-    return this.defaultEncoding;
-  }
-
-  /**
-   * Lazily instantiates or retrieves the Tiktoken encoder for the specified encoding.
-   * @param {string} [encoding] 
-   * @returns {Tiktoken}
-   */
-  getEncoder(encoding = this.defaultEncoding) {
-    const encName = this.resolveEncoding(encoding);
-    if (!this.encoders.has(encName)) this.encoders.set(encName, new TiktokenClass(o200kData));
-    return this.encoders.get(encName);
   }
 
   /**
@@ -313,66 +247,33 @@ export class Tokenizer {
   }
 
   /**
-   * Safely encodes text without throwing on special tokens.
-   * @param {Tiktoken} encoder 
-   * @param {string} text 
-   * @returns {Array<number>}
-   */
-  encodeSafely(encoder, text) {
-    try {
-      return encoder.encode(text, 'all');
-    } catch (_) {
-      try {
-        return encoder.encode(text);
-      } catch (err) {
-        // Fallback: character-based estimate if encoder encounters an unexpected syntax failure
-        console.warn('[ChatGPT Context Monitor] Tokenizer encode exception, using fallback:', err);
-        return new Array(Math.max(1, Math.ceil(text.length / 4)));
-      }
-    }
-  }
-
-  /**
-   * Tokenizes raw text and returns the exact BPE token count.
-   * @param {string} text 
-   * @param {string} [encodingOrModel] 
+   * Exact BPE token count of raw text (equal to js-tiktoken's encode(text, 'all').length; see the
+   * performance tests).
+   * @param {string} text
+   * @param {string} [encoding]
    * @returns {number}
    */
-  countTokens(text, encodingOrModel = this.defaultEncoding) {
-    if (!text || typeof text !== 'string' || text.length === 0) {
-      return 0;
-    }
-    try {
-      return this.getCounter(this.resolveEncoding(encodingOrModel)).count(text);
-    } catch (_) {
-      // Unexpected input for the fast path: fall back to the reference encoder
-      const tokens = this.encodeSafely(this.getEncoder(encodingOrModel), text);
-      return tokens ? tokens.length : 0;
-    }
+  countTokens(text, encoding = BUNDLED_ENCODING) {
+    if (!text || typeof text !== 'string') return 0;
+    return this.getCounter(this.resolveEncoding(encoding)).count(text);
   }
 
   /**
    * Tokenizes an array of message parts.
    * Exact BPE token counting is applied to text parts.
    * Non-text parts (e.g. images, files, tools) are preserved and classified without fabricating text tokens.
-   * 
-   * @param {string} messageId 
-   * @param {Array<string|Object>} parts 
-   * @param {string} [encodingOrModel] 
-   * @returns {{ tokens: number, textTokens: number, hasNonTextParts: boolean, nonTextParts: Array<Object>, isExactText: boolean }}
+   *
+   * @param {string} messageId
+   * @param {Array<string|Object>} parts
+   * @param {string} [encoding]
+   * @returns {{ tokens: number, hasNonTextParts: boolean, nonTextParts: Array<Object> }}
    */
-  countMessagePartsTokens(messageId, parts, encodingOrModel = this.defaultEncoding) {
-    if (!parts || !Array.isArray(parts) || parts.length === 0) {
-      return {
-        tokens: 0,
-        textTokens: 0,
-        hasNonTextParts: false,
-        nonTextParts: [],
-        isExactText: true
-      };
+  countMessagePartsTokens(messageId, parts, encoding = BUNDLED_ENCODING) {
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return { tokens: 0, hasNonTextParts: false, nonTextParts: [] };
     }
 
-    const encoding = this.resolveEncoding(encodingOrModel);
+    encoding = this.resolveEncoding(encoding);
     let combinedText = '';
     const nonTextParts = [];
 
@@ -387,26 +288,15 @@ export class Tokenizer {
           }
         } else {
           // Non-text part (image, tool, attachment, vector, etc.)
-          nonTextParts.push({
-            type: part.type || 'unknown',
-            classification: part.classification || 'UNKNOWN',
-            details: part.details || null
-          });
+          nonTextParts.push({ type: part.type || 'unknown', classification: part.classification || 'UNKNOWN' });
         }
       }
     }
 
-    let textTokens = 0;
-    if (combinedText.length > 0) {
-      textTokens = this.countMessageTokens(messageId ? `${messageId}_text` : null, combinedText, encoding);
-    }
-
     return {
-      tokens: textTokens,
-      textTokens,
+      tokens: combinedText ? this.countMessageTokens(messageId ? `${messageId}_text` : null, combinedText, encoding) : 0,
       hasNonTextParts: nonTextParts.length > 0,
-      nonTextParts,
-      isExactText: true
+      nonTextParts
     };
   }
 
@@ -417,22 +307,15 @@ export class Tokenizer {
    * 
    * @param {string} messageId 
    * @param {string|Array<Object>} textOrParts 
-   * @param {string} [encodingOrModel] 
+   * @param {string} [encoding]
    * @returns {number}
    */
-  countMessageTokens(messageId, textOrParts, encodingOrModel = this.defaultEncoding) {
+  countMessageTokens(messageId, textOrParts, encoding = BUNDLED_ENCODING) {
     if (!textOrParts) return 0;
-
-    // Handle parts array delegation
-    if (Array.isArray(textOrParts)) {
-      const result = this.countMessagePartsTokens(messageId, textOrParts, encodingOrModel);
-      return result.tokens;
-    }
-
+    if (Array.isArray(textOrParts)) return this.countMessagePartsTokens(messageId, textOrParts, encoding).tokens;
     if (typeof textOrParts !== 'string') return 0;
-    if (textOrParts.length === 0) return 0;
 
-    const encoding = this.resolveEncoding(encodingOrModel);
+    encoding = this.resolveEncoding(encoding);
     const hash = this.hashString(textOrParts);
     const cacheKey = messageId ? `${messageId}_${encoding}` : null;
 
@@ -461,24 +344,5 @@ export class Tokenizer {
     }
 
     return tokens;
-  }
-
-  /**
-   * Clears the tokenizer cache.
-   */
-  clearCache() {
-    this.cache.clear();
-  }
-
-  /**
-   * Returns current cache and encoder diagnostics.
-   * @returns {{ size: number, maxCacheSize: number, activeEncoders: Array<string> }}
-   */
-  getDiagnostics() {
-    return {
-      size: this.cache.size,
-      maxCacheSize: this.maxCacheSize,
-      activeEncoders: Array.from(this.encoders.keys())
-    };
   }
 }

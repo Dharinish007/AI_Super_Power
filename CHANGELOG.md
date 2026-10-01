@@ -10,12 +10,19 @@ All notable changes to AI Context Monitor. Versions follow `manifest.json`; bump
 - The tokenizer table is built in ~8 ms slices instead of one ~100 ms task on every page load.
 - The toolbar badge receives only `{ percentage, awaitingData }`. Nothing is written to `chrome.storage.session` any more (the per-tab state was left over from the removed popup and never read).
 - The packager reads its file list from `manifest.json`.
-- `js-tiktoken` pinned to `1.0.21`; the build finds its chunk file instead of hard-coding the name.
+- `js-tiktoken` pinned to `1.0.21`; only its `o200k_base` rank table ships (the tests use its encoder as the reference).
+- Cleanup, no behaviour change: the bundle no longer inlines the unused js-tiktoken encoder (counting has used the bundled count-only BPE for a while); the ChatGPT interceptor no longer hooks XMLHttpRequest or parses `/backend-api/models` (nothing read either) and sends one completion event per reply; the ChatGPT and Claude / Gemini coordinators share their badge, toggle, diagnostics and limit-provenance code (`content/coordinator-common.js`); unused engine output fields, config (`config/selectors.json`) and scripts were removed.
+- Gemini: a message just sent and a reply in progress count at once on long chats (the page renders only the turns in view, so they used to wait up to a minute for the next saved-copy read).
+- `unlimitedStorage` permission: saved Capsules and Skills are no longer capped by the 10 MB `chrome.storage.local` quota (no install warning).
+- Privacy policy and store listing: Gemini reads the conversation through Gemini's own same-origin read call with the page's request token (memory only), not "the page only".
+- "~N exchanges left" now uses the context advisor's current-pace estimate (last 5 exchanges) instead of a second, whole-chat average.
 
 ### Fixed
 - The release file list missed `content/claude-limit-watcher.js`, so a packaged build would have failed to load on claude.ai.
 - Store privacy answers now match the code (session token and cookies read in memory on ChatGPT and Claude), with permission reasons for Claude and Gemini.
 - Unparseable ChatGPT API responses are logged in diagnostics (`RESPONSE_PARSE_ERROR`) instead of being dropped silently.
+- A Capsule without a `Title:` line no longer loses a `title:` line from its snippets (YAML front matter) to the title.
+- **Use last reply** drops code-block button labels ("Copy code") like the other chat readers.
 
 ### Added
 - **Capsules** (widget → Capsules tab): the current AI writes a Capsule of the conversation (or the selected part), the extension detects the reply, the user edits and saves it locally, and Insert puts it in the chat box of ChatGPT, Claude or Gemini. `content/capsule.js`, `tests/unit/capsule.test.js`; privacy policy and store listing updated (saved Capsules are stored text).

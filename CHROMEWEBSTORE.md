@@ -41,6 +41,9 @@ Every declared permission serves a single necessary purpose.
 ### `storage`
 - **Justification:** Saves widget preferences (position, expanded state, theme and tab, per site), the last plan-usage percentages, the Capsules and Skills the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
 
+### `unlimitedStorage`
+- **Justification:** Lets the Capsules and Skills the user saves grow past the 10 MB `chrome.storage.local` quota (a Capsule can be up to 100,000 characters). Data stays on the device; the permission shows no install warning.
+
 ### Host Permission: `https://chatgpt.com/*` and `https://chat.openai.com/*`
 - **Justification:** Runs the content script on ChatGPT to read the open conversation, detect the model and plan, and draw the context meter. It reads the conversation through ChatGPT's own same-origin endpoints (`/api/auth/session`, `/backend-api/conversation/{id}`, `/backend-api/memories`). Those are the same requests the page itself makes, sent only to ChatGPT.
 
@@ -48,7 +51,7 @@ Every declared permission serves a single necessary purpose.
 - **Justification:** Runs the content script on Claude to read the open conversation, the active model and plan, and the plan usage limits, and to draw the context meter. It reads them through claude.ai's own same-origin, cookie-authenticated endpoints (`/api/organizations/...`, `/api/account`, `/api/account_profile`, project and usage endpoints) and from usage events in the page's own reply stream. Requests go only to claude.ai.
 
 ### Host Permission: `https://gemini.google.com/*`
-- **Justification:** Runs the content script on Gemini to read the visible conversation and the selected model from the page and draw the context meter. No network requests are made on Gemini.
+- **Justification:** Runs the content script on Gemini to read the open conversation, the selected model and plan, and draw the context meter. The page only renders the turns in view, so the saved conversation is read through Gemini's own same-origin read call (`/_/BardChatUi/data/batchexecute`), the same request the page makes, sent only to gemini.google.com.
 
 ---
 
@@ -58,7 +61,7 @@ Every declared permission serves a single necessary purpose.
 - **Does the extension read authentication cookies or tokens?** **Yes, in memory only, and only to call the site's own API.**
   - ChatGPT: reads the session access token from the same-origin `/api/auth/session` response and the `oai-did` device-id cookie, and attaches them to requests sent only to chatgpt.com (ChatGPT's `/backend-api` rejects cookie-only requests). The token is held in a private in-memory field. It is never stored, logged, sent elsewhere, or included in extension state or diagnostics.
   - Claude: reads the `lastActiveOrg` cookie to know which organization's conversation to load. Requests use the browser's normal cookies and go only to claude.ai.
-  - Gemini: none.
+  - Gemini: reads the request token the page itself uses (`at`, from the page's HTML) to make that same-origin read request. It is held in memory only; never stored, logged, sent elsewhere, or included in diagnostics.
 - **Does the extension read personal communications or user content?** Yes, locally. It reads the open conversation, and on ChatGPT the saved memories and on Claude the profile and project instructions, only to count tokens. The text never leaves the page: only the utilization percentage reaches the background worker (for the toolbar badge).
 - **Does the extension transmit user messages or files to any external server?** No. The only network requests go to the site the user is on.
 - **Does the extension use analytics or tracking beacons?** No.

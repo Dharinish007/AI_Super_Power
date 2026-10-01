@@ -22,7 +22,7 @@
  * | Skills (the same panel with kind 'skill': reusable instructions).
  */
 
-import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert } from './capsule.js';
+import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert, projectsOf, searchItems, formatManyForInsert } from './capsule.js';
 import { formatModelName, alertLevel, formatChatExport, chatIdFromHref, recordUsage } from './widget-state.js';
 
 const STYLES = `
@@ -117,7 +117,7 @@ const STYLES = `
 
   .stack { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--track); gap: 2px; margin: 4px 0 10px; }
   .stack i { display: block; min-width: 3px; }
-  .leg { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 6px; margin: 0 -6px; border-radius: 6px; width: calc(100% + 12px); }
+  .leg { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0 -6px; border-radius: 6px; width: calc(100% + 12px); }
   .leg:hover { background: var(--hover); }
   .leg .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
   .leg .sw.off { background: transparent !important; border: 1px solid var(--muted); }
@@ -169,6 +169,23 @@ const STYLES = `
   .card.warn { border-color: var(--warn); }
   .card.warn .t { color: var(--warn-text); }
   .card .m.bad { color: var(--danger); }
+  .hero .card { margin-top: 10px; }
+
+  /* Library: search, tags, pin, tick several */
+  .two { display: flex; gap: 6px; }
+  .two .field { flex: 1; min-width: 0; }
+  .two select.field { flex: 0 1 auto; max-width: 120px; }
+  .card .th { display: flex; align-items: center; gap: 8px; }
+  .card .th .t { flex: 1; min-width: 0; }
+  .card input[type=checkbox] { width: 14px; height: 14px; flex: none; accent-color: var(--accent); cursor: pointer; }
+  .card.on { border-color: var(--accent); }
+  .pin { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; opacity: .35; filter: grayscale(1); }
+  .pin:hover { opacity: .8; background: var(--hover); }
+  .pin.on { opacity: 1; filter: none; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { font-size: 11px; color: var(--accent); padding: 0 4px; border-radius: 4px; }
+  .chip:hover { background: var(--hover); }
+  .pick { position: sticky; bottom: 0; z-index: 1; background: var(--surface); border-color: var(--accent); box-shadow: 0 -6px 16px rgba(0, 0, 0, .18); }
   .card .t { font-weight: 600; overflow-wrap: anywhere; }
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
@@ -373,6 +390,17 @@ function textButton(parent, label, onClick, cls = 'btn') {
   return b;
 }
 
+/** Saves text as a file named `<base>-YYYY-MM-DD.<ext>` (a plain download: no permission needed). */
+function download(parent, base, ext, text, type = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = h('a', null, parent);
+  a.href = url;
+  a.download = `${base}-${new Date().toISOString().slice(0, 10)}.${ext}`;
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /**
  * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
  * a MutationObserver watches for the reply's END marker and opens it in the editor; Save stores it.
@@ -425,15 +453,36 @@ function CapsulePanel(parent, ctx) {
   titleIn.placeholder = isSkill ? 'Skill name, e.g. Code reviewer' : 'Title';
   titleIn.maxLength = 80;
   titleIn.setAttribute('aria-label', `${noun} title`);
+  const metaRow = h('div', 'two', draft);
+  const projectIn = h('input', 'field', metaRow);
+  projectIn.placeholder = '📁 Project';
+  projectIn.maxLength = 40;
+  projectIn.setAttribute('aria-label', `${noun} project`);
+  const projectList = h('datalist', null, draft); // Suggests the projects already in use
+  projectList.id = `${ctx.kind || 'capsule'}-projects`;
+  projectIn.setAttribute('list', projectList.id);
+  const tagsIn = h('input', 'field', metaRow);
+  tagsIn.placeholder = '🏷️ Tags: work, auth';
+  tagsIn.setAttribute('aria-label', `${noun} tags, separated by commas`);
   const bodyIn = h('textarea', 'field', draft);
   bodyIn.spellcheck = false;
   bodyIn.setAttribute('aria-label', `${noun} text`);
   if (isSkill) bodyIn.placeholder = 'How the AI should answer, e.g. "Review my code like a senior developer. Bugs first, be short."';
   const draftBtns = h('div', 'btns', draft);
 
+  // Library: search (every word must match; #tag = tags only) and a project filter
+  const searchRow = h('div', 'two hide', view);
+  const searchIn = h('input', 'field', searchRow);
+  searchIn.type = 'search';
+  searchIn.placeholder = `🔍 Search ${noun}s… (#tag)`;
+  searchIn.setAttribute('aria-label', `Search ${noun}s`);
+  const projectSel = h('select', 'field', searchRow);
+  projectSel.setAttribute('aria-label', 'Show one project');
+
   const listHead = h('div', 'caps-h hide', view);
   const list = h('div', 'caps', view);
   list.style.padding = '0';
+  const noMatch = h('div', 'fine hide', view, 'No matches. Try fewer words, or "All projects".');
   const empty = h('div', 'fine', view, isSkill
     ? 'No Skills yet. A Skill is an instruction you reuse, like "Explain simply". Add one, then insert it into any AI.'
     : 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
@@ -446,6 +495,16 @@ function CapsulePanel(parent, ctx) {
   fileIn.type = 'file';
   fileIn.accept = '.json,application/json';
   fileIn.setAttribute('aria-label', `${noun}s file to import`);
+
+  // Ticked items: one insert for all of them, with what it costs here
+  const pick = h('div', 'card pick hide', view);
+  pick.setAttribute('role', 'status');
+  const pickText = h('div', 't', pick);
+  const pickCost = h('div', 'm', pick);
+  const pickBtns = h('div', 'btns', pick);
+  let query = '';
+  let projectFilter = '';
+  const selected = new Set(); // Ticked ids; kept while the list re-renders
 
   let items = []; // Saved Capsules (or Skills), newest first
   let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
@@ -499,6 +558,13 @@ function CapsulePanel(parent, ctx) {
     editing = { id: capsule.id || null, source: capsule.source || ctx.provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
+    // An Update's new text has no tags or project: the saved item's win. A new one starts in the
+    // project being shown.
+    const stored = capsule.id ? items.find(c => c.id === capsule.id) : null;
+    tagsIn.value = ((stored || capsule).tags || []).join(', ');
+    projectIn.value = stored ? (stored.project || '') : (capsule.project || projectFilter);
+    projectList.textContent = '';
+    for (const p of projectsOf(items)) h('option', null, projectList).value = p;
     mode('draft');
     bodyIn.scrollTop = 0;
     titleIn.focus({ preventScroll: true });
@@ -588,7 +654,7 @@ function CapsulePanel(parent, ctx) {
   textButton(draftBtns, 'Save', async () => {
     if (!store) return ctx.toast('Storage unavailable');
     try {
-      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value });
+      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value, tags: tagsIn.value, project: projectIn.value });
       if (editing?.fromHandoff) await clearHandoff(ctx.storage);
     } catch (e) {
       return ctx.toast(e?.message === `${noun} is empty` ? e.message : 'Save failed');
@@ -600,8 +666,10 @@ function CapsulePanel(parent, ctx) {
   });
   textButton(draftBtns, 'Discard', () => { editing = null; mode('idle'); });
 
-  // Keys typed in the editor stay in it: the sites move focus to their chat box on stray keystrokes
-  for (const type of ['keydown', 'keypress', 'keyup']) draft.addEventListener(type, (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
+  // Keys typed in the editor or search stay there: the sites move focus to their chat box on stray keystrokes
+  for (const type of ['keydown', 'keypress', 'keyup']) {
+    view.addEventListener(type, (e) => { if (e.key !== 'Escape' && e.target.matches?.('input, textarea, select')) e.stopPropagation(); });
+  }
 
   /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version). */
   function tokensOf(capsule) {
@@ -615,10 +683,35 @@ function CapsulePanel(parent, ctx) {
   }
 
   function renderItem(capsule) {
-    const card = h('div', 'card', list);
-    h('div', 't', card, capsule.title);
+    const card = h('div', `card${selected.has(capsule.id) ? ' on' : ''}`, list);
+    const th = h('div', 'th', card);
+    const box = h('input', null, th);
+    box.type = 'checkbox';
+    box.checked = selected.has(capsule.id);
+    box.setAttribute('aria-label', `Pick "${capsule.title}" to insert together with others`);
+    box.addEventListener('change', () => {
+      if (box.checked) selected.add(capsule.id); else selected.delete(capsule.id);
+      card.classList.toggle('on', box.checked);
+      updatePick();
+    });
+    h('div', 't', th, capsule.title);
+    const pinLabel = capsule.pinned ? 'Unpin' : 'Pin to the top';
+    const pin = textButton(th, '📌', async () => {
+      try { await store.setPinned(capsule.id, !capsule.pinned); } catch (_) { return ctx.toast('Pin failed'); }
+      refresh();
+    }, `pin${capsule.pinned ? ' on' : ''}`);
+    pin.setAttribute('aria-pressed', String(Boolean(capsule.pinned)));
+    pin.setAttribute('aria-label', pinLabel);
+    pin.dataset.tip = pinLabel;
     const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    h('div', 'm', card, `${capsule.source} · ${date}`);
+    h('div', 'm', card, `${capsule.source} · ${date}${capsule.project ? ` · 📁 ${capsule.project}` : ''}`);
+    if (capsule.tags?.length) {
+      const tagRow = h('div', 'tags', card);
+      for (const t of capsule.tags) {
+        const chip = textButton(tagRow, `#${t}`, () => { searchIn.value = query = `#${t}`; renderList(); }, 'chip');
+        chip.setAttribute('aria-label', `Show only #${t}`);
+      }
+    }
     const tokens = tokensOf(capsule);
     if (tokens !== null) {
       const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
@@ -689,23 +782,66 @@ function CapsulePanel(parent, ctx) {
   }
 
   function renderList() {
+    // Project filter: options follow the projects in use; a project that no longer exists resets it
+    const projects = projectsOf(items);
+    if (projectSel.dataset.sig !== projects.join('\n')) {
+      projectSel.dataset.sig = projects.join('\n');
+      projectSel.textContent = '';
+      h('option', null, projectSel, 'All projects').value = '';
+      for (const p of projects) h('option', null, projectSel, `📁 ${p}`).value = p;
+      if (!projects.includes(projectFilter)) projectFilter = '';
+      projectSel.value = projectFilter;
+    }
+    show(projectSel, projects.length > 0);
+
+    const shown = searchItems(items, query, { project: projectFilter || null });
     list.textContent = '';
-    setText(listHead, `Saved (${items.length})`);
+    setText(listHead, query.trim() || projectFilter ? `Found ${shown.length} of ${items.length}` : `Saved (${items.length})`);
     show(listHead, items.length > 0);
+    show(searchRow, items.length > 0);
     show(empty, items.length === 0);
+    show(noMatch, items.length > 0 && shown.length === 0);
     show(exportBtn, items.length > 0);
-    for (const c of items) renderItem(c);
+    for (const c of shown) renderItem(c);
+    updatePick();
   }
 
-  // Export: one JSON file with every Capsule (a download; no permission needed)
+  searchIn.addEventListener('input', () => { query = searchIn.value; renderList(); });
+  projectSel.addEventListener('change', () => { projectFilter = projectSel.value; renderList(); });
+
+  /** Footer for the ticked items: count, cost of inserting them together, room left. */
+  function updatePick() {
+    for (const id of [...selected]) if (!items.some(c => c.id === id)) selected.delete(id); // Deleted elsewhere
+    const picked = items.filter(c => selected.has(c.id));
+    show(pick, picked.length > 0);
+    if (!picked.length) return;
+    setText(pickText, `☑️ ${picked.length} ${noun}${picked.length === 1 ? '' : 's'} picked`);
+    let tokens = null;
+    try { tokens = ctx.countTokens ? ctx.countTokens(formatManyForInsert(picked, ctx.kind)) : null; } catch (_) {}
+    const cost = tokens === null ? null : formatCost(tokens, view_.contextLimit, view_.remaining);
+    setText(pickCost, !cost ? '' : cost.tooBig ? `${cost.text} · too big for this chat`
+      : `${cost.text}${view_.remaining !== null ? ` · ${fmtK(view_.remaining)} left` : ''}`);
+    pickCost.classList.toggle('bad', Boolean(cost?.tooBig));
+  }
+
+  const pickedText = () => formatManyForInsert(items.filter(c => selected.has(c.id)), ctx.kind);
+  textButton(pickBtns, 'Insert all', () => {
+    const input = ctx.findInput();
+    const text = pickedText();
+    if (input && insertText(input, text)) {
+      ctx.toast(`Inserted ${selected.size}: add your question and send`);
+      selected.clear();
+      renderList();
+    } else {
+      navigator.clipboard.writeText(text).then(() => ctx.toast('Chat box not found: copied instead'), () => ctx.toast('Copy failed'));
+    }
+  });
+  textButton(pickBtns, 'Copy', () => navigator.clipboard.writeText(pickedText()).then(() => ctx.toast('Copied'), () => ctx.toast('Copy failed')));
+  textButton(pickBtns, 'Clear', () => { selected.clear(); renderList(); });
+
+  // Export: one JSON file with every Capsule
   exportBtn.addEventListener('click', () => {
-    const url = URL.createObjectURL(new Blob([exportCapsules(items, store.key)], { type: 'application/json' }));
-    const a = h('a', null, view);
-    a.href = url;
-    a.download = `${store.key}-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    download(view, store.key, 'json', exportCapsules(items, store.key), 'application/json');
     ctx.toast(`Exported ${items.length} ${noun}${items.length === 1 ? '' : 's'}`);
   });
 
@@ -724,7 +860,11 @@ function CapsulePanel(parent, ctx) {
     }
   });
 
-  return { view, refresh, setView, stop: stopWaiting };
+  // Capture this chat from outside the tab (Context tab "Save as Capsule"): the AI writes it, or
+  // Quick (no AI) when the site's limit is reached
+  const capture = () => (limit ? quickBtn : create).click();
+
+  return { view, refresh, setView, capture, stop: stopWaiting };
 }
 
 export class ContextWidget {
@@ -865,6 +1005,14 @@ export class ContextWidget {
     const limitLine = h('div', 'line', hero);
     const warnLine = h('div', 'line warn', hero);
     warnLine.setAttribute('role', 'status');
+    // At 80% full: save the chat as a Capsule now, and continue in a new chat with it
+    const saveCard = h('div', 'card warn hide', hero);
+    const saveText = h('div', 't', saveCard);
+    h('div', 'm', saveCard, 'Save it as a Capsule, then insert it in a new chat to keep going.');
+    textButton(h('div', 'btns', saveCard), '📦 Save as Capsule', () => {
+      this._setTab('capsules');
+      this.parts.caps.capture();
+    });
 
     const stats = h('div', 'stats', body);
     const stat = (label) => {
@@ -888,14 +1036,7 @@ export class ContextWidget {
     const exportChat = (format) => {
       const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
       if (!msgs.length) return this._toast('Open a conversation first');
-      const type = format === 'json' ? 'application/json' : 'text/plain';
-      const url = URL.createObjectURL(new Blob([formatChatExport(msgs, format, { provider })], { type }));
-      const a = h('a', null, bigSec.body);
-      a.href = url;
-      a.download = `chat-${new Date().toISOString().slice(0, 10)}.${format}`;
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      download(bigSec.body, 'chat', format, formatChatExport(msgs, format, { provider }), format === 'json' ? 'application/json' : 'text/plain');
       this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
     };
     for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
@@ -1018,7 +1159,7 @@ export class ContextWidget {
 
     return {
       pill, pillDot, pillNum, pillLvl, panel, bigRows, spark, sparkLine, growthText, attRows, att, compactBtn, badgesBtn, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
-      sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
+      saveCard, saveText, sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
 
@@ -1086,6 +1227,9 @@ export class ContextWidget {
     const head = headlineLimit(vm.limits);
     setText(p.limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
     setText(p.warnLine, vm.warning || '');
+    const full = ready && vm.percentage !== null && alertLevel(vm.percentage) >= 80;
+    show(p.saveCard, full);
+    if (full) setText(p.saveText, `💡 This chat is ${vm.percentage}% full`);
 
     const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
     setText(p.sUser.v, ready ? fmtK(st.user) : '—');

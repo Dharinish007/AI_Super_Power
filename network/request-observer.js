@@ -29,7 +29,6 @@ export class RequestObserver {
 
     // Network Health Tracking
     this.networkAvailable = false;
-    this.lastEventTimestamp = null;
     this.interceptionErrors = 0;
     this.errorLog = [];
     this.unsupportedEndpoints = new Set();
@@ -45,7 +44,6 @@ export class RequestObserver {
     // Every network-observed turn of the active conversation, in arrival order (messageId -> turn).
     // Holding all of them (not just the latest) keeps rapid consecutive messages when the API lags.
     this.liveTurns = new Map();
-    this._completedStreams = new Set(); // streamKeys already completed (GENERATION_DONE + STREAM_COMPLETED)
 
     this._messageListener = (event) => this.handleMessage(event);
     this._isListening = false;
@@ -91,18 +89,13 @@ export class RequestObserver {
     if (!data || typeof data !== 'object') return;
     if (data.source !== 'CHATGPT_CONTEXT_MONITOR_NET') return;
 
-    this.networkAvailable = true;
-    this.lastEventTimestamp = data.timestamp || Date.now();
+    this.networkAvailable = true; // Any bridge event, including INTERCEPTOR_READY, proves the bridge works
 
     const eventType = data.eventType;
     const payload = data.payload || {};
 
     try {
       switch (eventType) {
-        case 'INTERCEPTOR_READY':
-          this.networkAvailable = true;
-          break;
-
         case 'CONVERSATION_REQUEST':
           this._handleConversationRequest(payload);
           break;
@@ -113,14 +106,7 @@ export class RequestObserver {
           if (payload.conversationId) {
             this.activeConversationId = payload.conversationId;
           }
-          if (payload.model) {
-            this.observedModel = {
-              value: payload.model,
-              source: 'network',
-              evidenceType: 'OBSERVED',
-              timestamp: Date.now()
-            };
-          }
+          if (payload.model) this._setModel(payload.model);
           break;
 
         case 'STREAM_CHUNK':
@@ -131,17 +117,8 @@ export class RequestObserver {
           this._handleToolInvoked(payload);
           break;
 
-        case 'GENERATION_DONE':
-        case 'STREAM_COMPLETED':
+        case 'GENERATION_DONE': // Sent exactly once per stream by the interceptor
           if (this._isForeign(payload)) break;
-          // Both events arrive for one stream; complete it once so we refresh once
-          if (payload.streamKey) {
-            if (this._completedStreams.has(payload.streamKey)) break;
-            this._completedStreams.add(payload.streamKey);
-            if (this._completedStreams.size > 50) {
-              this._completedStreams.delete(this._completedStreams.values().next().value);
-            }
-          }
           this._handleStreamCompleted(payload);
           break;
 
@@ -157,12 +134,7 @@ export class RequestObserver {
 
         case 'CONVERSATION_LOADED':
           if (payload.modelSlug && payload.conversationId && payload.conversationId === this.activeConversationId) {
-            this.observedModel = {
-              value: payload.modelSlug,
-              source: 'network',
-              evidenceType: 'OBSERVED',
-              timestamp: Date.now()
-            };
+            this._setModel(payload.modelSlug);
           }
           if (typeof this.onConversationLoaded === 'function') {
             this.onConversationLoaded(payload);
@@ -184,10 +156,6 @@ export class RequestObserver {
         case 'LIMITS_OBSERVED':
           // Feature allowances from conversation/init (counts and reset times only)
           this.observedLimits = payload;
-          break;
-
-        case 'MODELS_OBSERVED':
-          // Array of model slugs available on ChatGPT Web
           break;
 
         case 'UNSUPPORTED_ENDPOINT_OBSERVED':
@@ -232,14 +200,7 @@ export class RequestObserver {
       this.setActiveConversationId(payload.conversationId);
     }
 
-    if (payload.model) {
-      this.observedModel = {
-        value: payload.model,
-        source: 'network',
-        evidenceType: 'OBSERVED',
-        timestamp: Date.now()
-      };
-    }
+    if (payload.model) this._setModel(payload.model);
 
     if (payload.userMessage) {
       this.pendingUserTurn = {
@@ -289,14 +250,7 @@ export class RequestObserver {
 
     this._upsertLiveTurn(this.activeStreamingTurn);
 
-    if (payload.modelSlug && (!this.observedModel || this.observedModel.value !== payload.modelSlug)) {
-      this.observedModel = {
-        value: payload.modelSlug,
-        source: 'network',
-        evidenceType: 'OBSERVED',
-        timestamp: Date.now()
-      };
-    }
+    if (payload.modelSlug && this.observedModel?.value !== payload.modelSlug) this._setModel(payload.modelSlug);
 
     if (typeof this.onStreamChunk === 'function') {
       this.onStreamChunk(this.activeStreamingTurn);
@@ -334,16 +288,18 @@ export class RequestObserver {
       this._upsertLiveTurn(this.activeStreamingTurn);
     }
 
-    // Clear pending user turn once generation is done
-    const completedTurn = this.activeStreamingTurn;
-
     if (typeof this.onStreamComplete === 'function') {
       this.onStreamComplete({
         conversationId: payload.conversationId || this.activeConversationId,
-        turn: completedTurn,
-        tools: Array.from(this.observedTools.values())
+        turn: this.activeStreamingTurn,
+        tools: this.getObservedTools()
       });
     }
+  }
+
+  /** @private */
+  _setModel(value) {
+    this.observedModel = { value, source: 'network', evidenceType: 'OBSERVED', timestamp: Date.now() };
   }
 
   /**
@@ -406,11 +362,8 @@ export class RequestObserver {
   getHealth() {
     return {
       networkAvailable: this.networkAvailable,
-      lastEventTimestamp: this.lastEventTimestamp,
       interceptionErrors: this.interceptionErrors,
-      activeStreamsCount: this.activeStreamsCount,
-      unsupportedEndpoints: Array.from(this.unsupportedEndpoints),
-      errorCount: this.interceptionErrors
+      activeStreamsCount: this.activeStreamsCount
     };
   }
 
@@ -433,22 +386,6 @@ export class RequestObserver {
    */
   getObservedPlan() {
     return this.observedPlan;
-  }
-
-  /**
-   * Returns in-flight pending user message, or null.
-   * @returns {Object|null}
-   */
-  getPendingUserTurn() {
-    return this.pendingUserTurn;
-  }
-
-  /**
-   * Returns active streaming assistant message, or null.
-   * @returns {Object|null}
-   */
-  getStreamingTurn() {
-    return this.activeStreamingTurn;
   }
 
   /**

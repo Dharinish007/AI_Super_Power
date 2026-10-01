@@ -10,14 +10,14 @@ AI Context Monitor is a browser extension that shows how much of the AI model's 
 | :--- | :--- | :--- |
 | ChatGPT (chatgpt.com, chat.openai.com) | The open conversation, your saved memories, model and plan, through ChatGPT's own same-origin API. Your session access token (from `/api/auth/session`) and the `oai-did` cookie are read to make those requests. | To count tokens and find the right context window. ChatGPT's API rejects requests without the token. |
 | Claude (claude.ai) | The open conversation, model, plan, profile and project settings, and plan usage limits, through claude.ai's own same-origin API and the page's reply stream. The `lastActiveOrg` cookie is read to know which organization to ask. | To count tokens, find the context window, and show your usage limits. |
-| Gemini (gemini.google.com) | The visible conversation and selected model, from the page only. | To count tokens and find the context window. |
+| Gemini (gemini.google.com) | The open conversation through Gemini's own same-origin read call, and the selected model and plan from the page. The request token the page itself uses (`at`, in the page's HTML) is read to make that request. | To count tokens and find the context window. The page only shows the turns scrolled into view. |
 
 ## What it does with that data
 
 - All text is processed locally to count tokens. It never leaves the page, and it is stored only when you save a Capsule (below).
 - **Capsules:** when you click Create Capsule, the extension puts a prompt in the site's chat box; you choose whether to send it. When you click Save, that Capsule's title and text are stored in your browser. Insert puts a saved Capsule in the chat box of the site you are on, and only you send it. **Make in another AI** stores the Capsule prompt with the visible conversation in your browser (and copies it) until you paste it into another AI, save the result or dismiss it; it is deleted after a day.
 - Network requests go only to the site you are using, the same requests the site makes itself. Nothing is sent to the developer or any third party.
-- The ChatGPT session token is kept only in memory while the page is open. It is never saved, logged, or included in diagnostics.
+- The ChatGPT session token and the Gemini request token are kept only in memory while the page is open. They are never saved, logged, or included in diagnostics.
 
 ## What it stores
 
@@ -37,7 +37,7 @@ Nothing else is stored: no other message text, no memory text, conversation IDs,
 
 ## Removing data
 
-Uninstalling the extension deletes everything it stored.
+Uninstalling the extension deletes everything it stored. The `unlimitedStorage` permission only lifts the browser's size cap on what you save; everything stays on this device.
 
 ## Contact
 

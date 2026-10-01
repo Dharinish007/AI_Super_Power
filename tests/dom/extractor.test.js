@@ -209,7 +209,7 @@ export function runDomExtractorTests() {
 
   // 1. Model Detection Test
   const modelDetector = new ModelDetector(modelLimitsDb);
-  const detectedModel = modelDetector.detect(mockRoot);
+  const detectedModel = modelDetector.resolveModel(modelDetector.detectRawModelString(mockRoot));
   assert('Model detector accurately identifies "GPT-4o" from header button', detectedModel.id === 'gpt-4o' && detectedModel.displayName === 'GPT-4o');
   assert('Model detector attaches verified 128k context window', detectedModel.contextWindow === 128000);
 
