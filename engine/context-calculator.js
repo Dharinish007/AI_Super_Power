@@ -277,6 +277,7 @@ export class ContextCalculator {
         nonTextPartsList
       },
       accuracy,
+      tokenizerExact: input.tokenizerExact !== false,
       confidence,
       evidence: input.evidence || {
         model: {

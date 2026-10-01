@@ -41,6 +41,17 @@ export function runWidgetStateTests() {
   assert('Partial page-text count still warns', /Count may be low/.test(domOnly.warning || ''));
   assert('Not-ready state before first engine pass', toWidgetState(null).ready === false);
 
+  // Set 2: every breakdown row says how it was learned, from the engine's own classification
+  const tagOf = (v, label) => v.breakdown.find(b => b.label === label)?.tag;
+  const classed = { ...engine, tokenizerExact: true, accuracy: { conversation: 'EXACT', attachments: 'OBSERVED' } };
+  const vmExact = toWidgetState(classed, { provider: 'ChatGPT' });
+  assert('Conversation rows carry the engine class', tagOf(vmExact, 'You') === 'EXACT' && tagOf(vmExact, 'ChatGPT + tools') === 'EXACT');
+  assert('Attachments row carries the engine class', tagOf(vmExact, 'Attachments') === 'OBSERVED');
+  const vmApprox = toWidgetState({ ...classed, tokenizerExact: false }, { provider: 'Claude' });
+  assert('Approximate tokenizer downgrades conversation rows to ESTIMATED', tagOf(vmApprox, 'You') === 'ESTIMATED');
+  assert('Every tagged row explains itself', vmExact.breakdown.filter(b => b.tag).every(b => b.why && b.why.length > 10));
+  assert('Without engine classes, rows stay untagged (nothing invented)', tagOf(vm, 'You') === undefined);
+
   assert('alertLevel: below 80% is quiet', alertLevel(79.9) === 0 && alertLevel(null) === 0);
   assert('alertLevel: 80 and 95 are the steps', alertLevel(80) === 80 && alertLevel(94.9) === 80 && alertLevel(95) === 95 && alertLevel(120) === 95);
 

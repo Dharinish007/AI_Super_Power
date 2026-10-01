@@ -246,14 +246,16 @@ function iconButton(parent, d, label) {
 }
 
 /** The single "≈" badge (estimated / unverified / unknown), explained in a tooltip. */
-function approx(parent, tip) {
-  const s = h('span', 'approx', parent, '≈');
+function approx(parent, tip, mark = '≈') {
+  const s = h('span', 'approx', parent, mark);
   s.dataset.tip = tip;
   s.setAttribute('aria-label', tip);
   s.tabIndex = 0;
   return s;
 }
 const TAG_TIPS = {
+  EXACT: 'Exact: counted from the full conversation',
+  OBSERVED: 'Observed: read directly from the page',
   ESTIMATED: 'Estimated: not reported by the site',
   UNKNOWN: 'Not measurable from the page',
   UNVERIFIED: 'Window from our limits table, not confirmed for this plan'
@@ -304,7 +306,7 @@ function RowList(parent) {
         const row = h('div', 'row', el);
         h('span', 'k', row, r.label);
         const v = h('span', 'v', row, r.value);
-        if (r.tip) approx(v, r.tip);
+        if (r.tip) approx(v, r.tip, r.mark);
       }
     }
   };
@@ -1042,7 +1044,7 @@ export class ContextWidget {
     setText(p.sHidden.v, ready ? fmtK(st.hidden) : '—');
 
     const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? TAG_TIPS[b.tag] || b.tag : null })));
+    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
     p.totals.update([
       { label: 'Used', value: tokens(vm.usedTokens) },
       { label: 'Remaining', value: tokens(vm.remainingTokens) },

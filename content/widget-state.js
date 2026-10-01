@@ -95,7 +95,16 @@ export function toWidgetState(s, opts = {}) {
   const dropped = s.tokens?.excluded?.outOfWindow || { count: 0, tokens: 0 };
   const confidence = s.confidence?.percentage ?? Math.round((s.confidence?.score || 0) * 100);
 
-  const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
+  // How the conversation count was learned. An approximate tokenizer (Claude, Gemini) caps it at ESTIMATED.
+  const convoClass = s.accuracy?.conversation && (s.tokenizerExact === false && s.accuracy.conversation === 'EXACT' ? 'ESTIMATED' : s.accuracy.conversation);
+  const convoTag = convoClass ? {
+    tag: convoClass,
+    why: convoClass === 'EXACT' ? 'Counted locally with the model\'s own tokenizer over the full conversation the site returned.'
+      : authoritative ? 'Full conversation from the site, counted locally; this provider\'s own tokenizer is not public, so the count is approximate.'
+        : 'Counted locally from the text visible on the page; the site may count a little differently.'
+  } : {};
+
+  const isLowerBound =s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
 
   const vm = {
     provider,
@@ -112,23 +121,24 @@ export function toWidgetState(s, opts = {}) {
     confidenceLevel: s.confidence?.level || 'LOW',
     evidence: (s.confidence?.factors || []).map(f => ({ ok: f.type === 'positive', text: f.text })),
     breakdown: [
-      { label: 'You', value: (s.tokens?.user ?? 0).toLocaleString() },
-      { label: `${provider} + tools`, value: (s.tokens?.assistant ?? 0).toLocaleString() },
+      { label: 'You', value: (s.tokens?.user ?? 0).toLocaleString(), ...convoTag },
+      { label: `${provider} + tools`, value: (s.tokens?.assistant ?? 0).toLocaleString(), ...convoTag },
       {
         label: 'Attachments',
         value: s.observables?.attachmentsCount
           ? `${s.observables.attachmentsCount} · ${(s.tokens?.attachments ?? 0).toLocaleString()} est.`
-          : 'None'
+          : 'None',
+        ...(s.accuracy?.attachments ? { tag: s.accuracy.attachments, why: 'Files and images are listed from the page; their token cost is not reported by the site.' } : {})
       },
       ...(hiddenItems.length
         ? [
             { label: 'Hidden (read from API)', value: sum(hiddenItems.filter(i => !i.estimated && i.included !== false)).toLocaleString() },
             // One row for every estimate (system prompt, and on Claude the enabled tools); details in the viewer
             ...(hiddenItems.some(i => i.estimated)
-              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED' }]
+              ? [{ label: hiddenItems.filter(i => i.estimated).length > 1 ? 'System prompt + tools' : `${provider} system prompt`, value: `≈${sum(hiddenItems.filter(i => i.estimated)).toLocaleString()}`, tag: 'ESTIMATED', why: 'Fixed cost of the hidden instructions and tools; the size is an estimate, not reported by the site.' }]
               : [])
           ]
-        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN' }]),
+        : [{ label: 'Hidden context', value: 'Not measurable', tag: 'UNKNOWN', why: 'Server-side instructions, memory and tools are not visible to the page, so they cannot be counted.' }]),
       // Saved in the chat but not in the current context: shown, never counted in Used
       ...(stale.count ? [{ label: 'Older tool output', value: `${stale.count} · ${stale.tokens.toLocaleString()} not resent` }] : []),
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
