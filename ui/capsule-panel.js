@@ -143,7 +143,9 @@ export function CapsulePanel(parent, ctx) {
   };
 
   /** A click handler that calls the page: a failed call (page gone) shows a toast instead of throwing. */
-  const onPage = (fn) => (...args) => fn(...args).catch(() => ctx.toast('Page not reachable'));
+  const onPage = (fn) => (...args) => fn(...args).catch((e) => { console.warn('[Context Monitor]', e); ctx.toast('Page not reachable'); });
+  /** Estimated tokens of a text: a number, or null when it can't be counted (never rejects). */
+  const countOne = (text) => Promise.resolve().then(() => ctx.page.countTokens([text()])).then(r => (typeof r?.[0] === 'number' ? r[0] : null));
 
   /** Selection is read on press: the click itself may move focus away from the chat. */
   const takeSelection = async () => {
@@ -190,12 +192,18 @@ export function CapsulePanel(parent, ctx) {
     stopWaiting();
     const w = watcher = { from, stop: () => {} };
     mode('waiting');
-    const stop = await ctx.page.watchCapsule((capsule) => {
-      if (watcher !== w) return;
-      draftFrom(capsule, from);
-      ctx.reveal();
-      ctx.toast('Capsule ready: review and save');
-    });
+    let stop;
+    try {
+      stop = await ctx.page.watchCapsule((capsule) => {
+        if (watcher !== w) return;
+        draftFrom(capsule, from);
+        ctx.reveal();
+        ctx.toast('Capsule ready: review and save');
+      });
+    } catch (e) {
+      if (watcher === w) { watcher = null; mode('idle'); }
+      throw e;
+    }
     if (watcher === w) w.stop = stop; else stop(); // Cancelled (or found) while the watch started
   }
 
@@ -245,10 +253,11 @@ export function CapsulePanel(parent, ctx) {
   });
 
   textButton(waitBtns, 'Use last reply', onPage(async () => {
-    const from = watcher?.from;
+    const w = watcher;
     const capsule = parseCapsule(await ctx.page.latestReply(), { loose: true });
+    if (watcher !== w) return; // Cancelled, or the Capsule arrived, meanwhile
     if (!capsule) return ctx.toast('No reply yet');
-    draftFrom(capsule, from);
+    draftFrom(capsule, w?.from);
   }));
   textButton(waitBtns, 'Cancel', stopWaiting);
 
@@ -276,7 +285,7 @@ export function CapsulePanel(parent, ctx) {
   function tokensOf(capsule) {
     const key = `${capsule.id}:${capsule.updatedAt}`;
     if (!tokenCache.has(key)) {
-      tokenCache.set(key, ctx.page.countTokens([fmt(capsule)]).then(r => r[0] ?? null, () => { tokenCache.delete(key); return null; }));
+      tokenCache.set(key, countOne(() => fmt(capsule)).catch(() => { tokenCache.delete(key); return null; }));
     }
     return tokenCache.get(key);
   }
@@ -417,7 +426,7 @@ export function CapsulePanel(parent, ctx) {
     show(pick, picked.length > 0);
     if (!picked.length) return;
     setText(pickText, `☑️ ${picked.length} ${noun}${picked.length === 1 ? '' : 's'} picked`);
-    const [tokens] = await ctx.page.countTokens([formatManyForInsert(picked, ctx.kind)]).catch(() => [null]);
+    const tokens = await countOne(() => formatManyForInsert(picked, ctx.kind)).catch(() => null);
     const cost = tokens === null ? null : formatCost(tokens, view_.contextLimit, view_.remaining);
     setText(pickCost, !cost ? '' : cost.tooBig ? `${cost.text} · too big for this chat`
       : `${cost.text}${view_.remaining !== null ? ` · ${fmtK(view_.remaining)} left` : ''}`);

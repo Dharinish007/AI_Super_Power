@@ -52,16 +52,22 @@ export async function runPageActionsTests() {
   doc.nodes.R.push(node('R', capsuleText('Old')));
   let observerCb = null;
   const observed = [];
+  // Fake observer and timers: the 500 ms read runs when flush() says so
+  const { MutationObserver: realObserver, setTimeout: realSetTimeout } = globalThis;
+  const timers = [];
+  const flush = () => timers.splice(0).forEach(f => f());
+  globalThis.setTimeout = (f) => timers.push(f);
   globalThis.MutationObserver = class { constructor(cb) { observerCb = cb; } observe() { observed.push(1); } disconnect() { observerCb = null; } };
   const found = [];
   const stop = await page.watchCapsule((c) => found.push(c.title));
-  observerCb?.(); await new Promise(r => setTimeout(r, 600));
+  observerCb?.(); flush();
   assert('Old Capsule ignored', found.length === 0 && observed.length === 1);
   doc.nodes.R.push(node('R', capsuleText('New')));
-  observerCb?.(); await new Promise(r => setTimeout(r, 600));
+  observerCb?.(); flush();
   assert('New Capsule reported once, then watching stops', JSON.stringify(found) === '["New"]' && observerCb === null);
   stop();
-  delete globalThis.MutationObserver;
+  globalThis.MutationObserver = realObserver;
+  globalThis.setTimeout = realSetTimeout;
 
   return { passed, failed };
 }
