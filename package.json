@@ -1,14 +1,15 @@
 {
-  "name": "chatgpt-context-monitor",
+  "name": "ai-context-monitor",
   "version": "1.0.0",
-  "description": "Production-grade Chrome Extension for ChatGPT Web that calculates and displays verified context-window utilization without fabricating hidden server data.",
+  "description": "Chrome extension (Manifest V3) that shows context-window usage for ChatGPT, Claude and Gemini conversations, computed locally without fabricating hidden server data.",
   "main": "background/service-worker.js",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.js && node scripts/generate-icons.js",
     "test": "node tests/run-tests.js",
     "validate": "node scripts/validate-extension.js",
-    "pack": "node scripts/package-extension.js"
+    "pack": "node scripts/package-extension.js",
+    "lint": "eslint ."
   },
   "keywords": [
     "chatgpt",
@@ -18,9 +19,22 @@
     "manifest-v3",
     "ai"
   ],
-  "author": "ChatGPT Context Monitor Team",
+  "author": "Dharinish007 (https://github.com/Dharinish007)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dharinish007/ChatGPT-context-window.git"
+  },
+  "bugs": "https://github.com/Dharinish007/ChatGPT-context-window/issues",
   "license": "MIT",
   "dependencies": {
-    "js-tiktoken": "^1.0.21"
+    "js-tiktoken": "1.0.21"
+  },
+  "engines": {
+    "node": ">=22.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "globals": "^17.13.0"
   }
 }

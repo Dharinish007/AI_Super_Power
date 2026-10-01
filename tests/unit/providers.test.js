@@ -297,7 +297,7 @@ export async function runProvidersTests() {
       const { run } = harness(GeminiProvider, env);
       const s = await run();
       assert('Gemini: read from the page; saved chat marked as possibly incomplete', s.observables.dataSource === 'dom' && s.completeness.isLowerBound === true);
-      assert('Gemini: 1M window on Google AI Pro; tokens estimated', s.model.contextWindow === 1000000 && s.tokens.totalMeasurable === count('Explain tokens') + count('Tokens are pieces of text.'));
+      assert('Gemini: 1M window on Google AI Pro; tokens estimated, plus the system prompt estimate', s.model.contextWindow === 1000000 && s.tokens.totalMeasurable === count('Explain tokens') + count('Tokens are pieces of text.') + 1500);
       assert('Gemini: no conversation API calls; never HIGH', env.apiCalls === undefined && s.confidence.level !== 'HIGH');
       assert('Gemini: widget shows Gemini and the detected mode', toWidgetState(s, { provider: 'Gemini' }).model === 'Gemini · Pro');
 
@@ -313,6 +313,29 @@ export async function runProvidersTests() {
       assert('Gemini: long chat (>=50% of the window) gets the note', s3.limits.some(l => l.key === 'long_chat' && /new chat is lighter/.test(l.note)));
       env.dom = gMsgs;
       assert('Gemini: short chat, no note', !(await run()).limits.some(l => l.key === 'long_chat'));
+    }
+
+    // ------------------------------------------------------------------ Gemini: completeness + page attachments
+    {
+      const turn = { parentElement: null };
+      const page = (scrollTop, spinner) => ({
+        querySelector: (s) => (s.includes('progress') ? (spinner ? {} : null) : s.startsWith('user-query') ? turn : null)
+      });
+      globalThis.getComputedStyle = () => ({ overflowY: 'auto' });
+      turn.parentElement = { scrollHeight: 2000, clientHeight: 500, scrollTop: 300, parentElement: null };
+      assert('Gemini: history scrolled down -> partial', GeminiProvider.pageMayBePartial(page(), 'c1', 6) === true);
+      turn.parentElement.scrollTop = 0;
+      assert('Gemini: at the top but still loading -> partial', GeminiProvider.pageMayBePartial(page(0, true), 'c1', 6) === true);
+      assert('Gemini: at the top, nothing loading -> complete', GeminiProvider.pageMayBePartial(page(), 'c1', 6) === false);
+      turn.parentElement.scrollTop = 900;
+      assert('Gemini: once seen complete, scrolling back down / new turns stay complete', GeminiProvider.pageMayBePartial(page(), 'c1', 8) === false);
+      assert('Gemini: another chat is judged on its own', GeminiProvider.pageMayBePartial(page(), 'c2', 8) === true);
+      delete globalThis.getComputedStyle;
+
+      const q = { querySelectorAll: (s) => (s.startsWith('img') ? [{}, {}] : [{}]) };
+      const a = GeminiProvider.pageAttachments({ querySelectorAll: () => [q] });
+      assert('Gemini attachments: images 258 tokens each, other files counted with unknown size',
+        a.count === 3 && a.estimatedTokens === 516 && a.hasUnknown === true);
     }
 
     // ------------------------------------------------------------------ Gemini: layout, free plan, limit notice

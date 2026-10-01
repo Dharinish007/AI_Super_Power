@@ -2,11 +2,12 @@
  * ChatGPT Context Monitor - Production BPE Tokenizer
  * 
  * Implements exact, model-aware byte-pair encoding (BPE) using js-tiktoken
- * with support for OpenAI's official o200k_base and cl100k_base tokenizers.
- * 
+ * with OpenAI's o200k_base ranks (the only table bundled; see BUNDLED_ENCODING).
+ *
  * Features:
  * - 100% offline, local, client-side execution (zero data exfiltration).
- * - Exact model-aware BPE encoding (o200k_base for GPT-4o/o1/o3-mini; cl100k_base for GPT-4/GPT-3.5).
+ * - Exact BPE for current OpenAI models (o200k_base). Retired cl100k_base models (GPT-4, GPT-3.5) are
+ *   counted with o200k_base and reported as approximate (isExact() === false).
  * - Lazy encoder instantiation for minimal startup latency and optimal memory usage.
  * - Robust handling of special tokens (allowedSpecial: 'all') preventing runtime exceptions.
  * - Message parts[] support: counts exact BPE tokens for text while keeping non-text content classified.
@@ -14,18 +15,21 @@
  */
 
 import { Tiktoken as TiktokenModule } from 'js-tiktoken/lite';
-import cl100k_base_module from 'js-tiktoken/ranks/cl100k_base';
 import o200k_base_module from 'js-tiktoken/ranks/o200k_base';
 
 // In bundled browser context (scripts/build.js), Tiktoken and rank tables are defined in outer scope
+/* global Tiktoken, o200k_base */
 const TiktokenClass = typeof Tiktoken !== 'undefined' ? Tiktoken : TiktokenModule;
-const cl100kData = typeof cl100k_base !== 'undefined' ? cl100k_base : cl100k_base_module;
 const o200kData = typeof o200k_base !== 'undefined' ? o200k_base : o200k_base_module;
 
 export const SUPPORTED_ENCODINGS = Object.freeze({
   O200K_BASE: 'o200k_base',
   CL100K_BASE: 'cl100k_base'
 });
+
+// The one rank table shipped: cl100k_base was ~1 MB of the bundle and served retired models only.
+// ponytail: single table; ship another (or load it on demand) if a current model moves to a new encoding.
+export const BUNDLED_ENCODING = SUPPORTED_ENCODINGS.O200K_BASE;
 
 export const MODEL_TO_ENCODING = Object.freeze({
   'gpt-4o': SUPPORTED_ENCODINGS.O200K_BASE,
@@ -44,7 +48,7 @@ const clockMs = () => (typeof performance !== 'undefined' ? performance.now() : 
 
 /** UTF-8 bytes of a string as a one-char-per-byte string (ASCII is returned as is). */
 function utf8ByteString(text) {
-  if (!/[^\x00-\x7f]/.test(text)) return text;
+  if (!/[^\x00-\x7f]/.test(text)) return text; // eslint-disable-line no-control-regex -- ASCII range check
   const bytes = BpeCounter.textEncoder.encode(text); // Lone surrogates become EF BF BD, as in js-tiktoken
   let out = '';
   for (let i = 0; i < bytes.length; i += 8192) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
@@ -65,14 +69,18 @@ function utf8ByteString(text) {
 export class BpeCounter {
   static textEncoder = new TextEncoder();
 
-  constructor(ranks) {
+  /**
+   * @param {Object} ranks js-tiktoken rank file
+   * @param {{ deferred?: boolean }} [options] deferred: the rank table is filled later by build(), in slices
+   */
+  constructor(ranks, { deferred = false } = {}) {
     this.ranks = new Map();
-    for (const line of ranks.bpe_ranks.split('\n')) {
-      if (!line) continue;
-      const fields = line.split(' '); // "<marker> <offset> <token> <token> ..."
-      const offset = Number.parseInt(fields[1], 10);
-      for (let i = 2; i < fields.length; i++) this.ranks.set(atob(fields[i]), offset + i - 2);
-    }
+    this._source = ranks.bpe_ranks;
+    this._lines = null; // Split on the first build() call, so a deferred constructor costs nothing
+    this._line = 0;
+    this._field = 2;
+    this.built = false;
+    this.buildMs = 0;
     this.pieceRe = new RegExp(ranks.pat_str, 'ug');
     const specials = Object.keys(ranks.special_tokens || {});
     this.specialRe = specials.length
@@ -80,6 +88,37 @@ export class BpeCounter {
       : null;
     this.pieces = new Map(); // piece -> token count
     this.stats = { pieces: 0, pieceHits: 0 };
+    if (!deferred) this.build(Infinity);
+  }
+
+  /**
+   * Adds ranks until the table is complete or about budgetMs has passed, so the ~0.1 s build can run
+   * between the page's own tasks instead of as one long task.
+   * @param {number} budgetMs
+   * @returns {boolean} true once the table is complete
+   */
+  build(budgetMs) {
+    if (this.built) return true;
+    const t0 = clockMs();
+    const deadline = t0 + budgetMs;
+    // "<marker> <offset> <token> <token> ..." per line; o200k is a single line of 200K tokens
+    if (!this._lines) this._lines = this._source.split('\n').filter(Boolean).map(line => line.split(' '));
+    for (; this._line < this._lines.length; this._line++, this._field = 2) {
+      const fields = this._lines[this._line];
+      const offset = Number.parseInt(fields[1], 10);
+      while (this._field < fields.length) {
+        this.ranks.set(atob(fields[this._field]), offset + this._field - 2);
+        // Clock checked every 2048 entries (~0.5 ms), not per entry
+        if ((++this._field & 2047) === 0 && clockMs() >= deadline) {
+          this.buildMs += clockMs() - t0;
+          return false;
+        }
+      }
+    }
+    this.buildMs += clockMs() - t0;
+    this._lines = this._source = null;
+    this.built = true;
+    return true;
   }
 
   /** @param {string} text */
@@ -154,36 +193,65 @@ export class Tokenizer {
     this.stats = { encoded: 0, encodedChars: 0, cacheHits: 0 };
     // Lazy instance cache: encodingName -> Tiktoken instance
     this.encoders = new Map();
-    // Lazy count-only BPE per encoding (what countTokens uses); encoders above are only built on demand
-    this.counters = new Map();
+    // Count-only BPE (what countTokens uses), created by warm() or the first count
+    this.counter = null;
   }
 
   /**
-   * Count-only BPE for an encoding, built once (the rank table build is the one-off startup cost).
-   * @param {string} [encoding]
+   * Count-only BPE over the bundled table. The table build is the one-off startup cost: whatever
+   * warm() has not built yet is finished here, synchronously, so counts never depend on timing.
+   * The argument is accepted for callers that name an encoding; there is only one table.
    * @returns {BpeCounter}
    */
-  getCounter(encoding = this.defaultEncoding) {
-    const encName = this.resolveEncoding(encoding);
-    if (!this.counters.has(encName)) {
-      const t0 = clockMs();
-      this.counters.set(encName, new BpeCounter(encName === SUPPORTED_ENCODINGS.CL100K_BASE ? cl100kData : o200kData));
-      this.stats.initMs = Math.round(clockMs() - t0);
+  getCounter() {
+    if (!this.counter) this.counter = new BpeCounter(o200kData, { deferred: true });
+    if (!this.counter.built) {
+      this.counter.build(Infinity);
+      this.stats.initMs = Math.round(this.counter.buildMs);
     }
-    return this.counters.get(encName);
-  }
-
-  /** Builds the default encoding's tables ahead of the first count (e.g. while the network is busy). */
-  warm(encoding = this.defaultEncoding) {
-    this.getCounter(encoding);
+    return this.counter;
   }
 
   /**
-   * Resolves a model identifier or encoding string into a canonical encoding name.
-   * @param {string} [encodingOrModel] 
+   * Starts building the rank table ahead of the first count (e.g. while the network is busy), in
+   * ~8 ms slices between the page's own tasks, so page load never sees one ~0.1 s long task.
+   */
+  warm() {
+    if (this.counter) return;
+    const counter = this.counter = new BpeCounter(o200kData, { deferred: true });
+    const step = () => {
+      if (counter.built) return; // A count already finished it (getCounter)
+      if (counter.build(8)) this.stats.initMs = Math.round(counter.buildMs);
+      else setTimeout(step, 0);
+    };
+    setTimeout(step, 0);
+  }
+
+  /**
+   * True when the model's own tokenizer is the bundled one, so counts are exact BPE rather than an
+   * approximation (retired cl100k_base models such as GPT-4 and GPT-3.5 are approximate).
+   * @param {string} [encodingOrModel]
+   * @returns {boolean}
+   */
+  isExact(encodingOrModel) {
+    return this.getEncodingForModel(encodingOrModel) === BUNDLED_ENCODING;
+  }
+
+  /**
+   * The encoding counts are made with. Only BUNDLED_ENCODING ships, so this is always o200k_base;
+   * isExact() tells whether that matches the model's own tokenizer.
+   * @returns {string}
+   */
+  resolveEncoding() {
+    return BUNDLED_ENCODING;
+  }
+
+  /**
+   * The tokenizer a model (or encoding name) actually uses, whether or not it is bundled.
+   * @param {string} [encodingOrModel]
    * @returns {string} 'o200k_base' | 'cl100k_base'
    */
-  resolveEncoding(encodingOrModel) {
+  getEncodingForModel(encodingOrModel) {
     if (!encodingOrModel) return this.defaultEncoding;
     const lower = String(encodingOrModel).toLowerCase().trim();
 
@@ -210,25 +278,13 @@ export class Tokenizer {
   }
 
   /**
-   * Resolves model ID to encoding name.
-   * @param {string} modelId 
-   * @returns {string}
-   */
-  getEncodingForModel(modelId) {
-    return this.resolveEncoding(modelId);
-  }
-
-  /**
    * Lazily instantiates or retrieves the Tiktoken encoder for the specified encoding.
    * @param {string} [encoding] 
    * @returns {Tiktoken}
    */
   getEncoder(encoding = this.defaultEncoding) {
     const encName = this.resolveEncoding(encoding);
-    if (!this.encoders.has(encName)) {
-      const ranks = encName === SUPPORTED_ENCODINGS.CL100K_BASE ? cl100kData : o200kData;
-      this.encoders.set(encName, new TiktokenClass(ranks));
-    }
+    if (!this.encoders.has(encName)) this.encoders.set(encName, new TiktokenClass(o200kData));
     return this.encoders.get(encName);
   }
 

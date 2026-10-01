@@ -47,7 +47,7 @@ export function runPerformanceTests() {
         for (const p of node.message?.content?.parts || []) if (typeof p === 'string' && p) samples.push(p);
       }
     }
-    for (const enc of ['o200k_base', 'cl100k_base']) {
+    for (const enc of ['o200k_base']) {
       const ref = tk.getEncoder(enc);
       const mismatches = samples.filter(s => tk.getCounter(enc).count(s) !== ref.encode(s, 'all').length);
       assert(`${enc}: count-only BPE equals js-tiktoken on ${samples.length} texts (unicode, emoji, lone surrogates, special tokens, long runs)`, mismatches.length === 0);

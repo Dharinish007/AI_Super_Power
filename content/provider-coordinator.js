@@ -207,7 +207,7 @@ export class ProviderCoordinator {
         dataSource = !(conversationId && p.hasApi) ? 'dom' : unsaved ? 'dom_unsaved' : 'dom_fallback';
         messages = dom;
         // A saved chat read only from the page may miss turns (API failed, or lazy-loaded history)
-        completenessSource = !unsaved && conversationId && (p.hasApi || p.pageMayBePartial) ? 'dom_partial' : 'dom_complete';
+        completenessSource = !unsaved && conversationId && (p.hasApi || (typeof p.pageMayBePartial === 'function' ? p.pageMayBePartial(document, conversationId, dom.length) : p.pageMayBePartial)) ? 'dom_partial' : 'dom_complete';
       }
       const complete = completenessSource !== 'dom_partial';
       const awaitingData = Boolean(conversationId) && messages.length === 0;
@@ -245,10 +245,10 @@ export class ProviderCoordinator {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], 'o200k_base');
         return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming) };
       });
-      const attachments = saved?.attachments || { count: 0, estimatedTokens: 0, hasUnknown: false };
+      const attachments = saved?.attachments || p.pageAttachments?.(document) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
       // Only once the chat has a message: nothing is sent before that.
-      const hidden = messages.length ? (saved?.hidden || []).map(i => (i.tokens !== undefined ? i
+      const hidden = messages.length ? (saved?.hidden || p.pageHiddenContext?.() || []).map(i => (i.tokens !== undefined ? i
         : { ...i, tokens: scaled(this.tokenizer.countMessageTokens(`hidden:${i.kind}`, i.text, 'o200k_base')) })) : [];
 
       const state = ContextCalculator.calculate({
@@ -346,9 +346,8 @@ export class ProviderCoordinator {
   /** Toolbar badge; at most one message per 250 ms (streaming updates the page many times a second). */
   syncState(state) {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    // The badge needs numbers only: never ship hidden text or message lists to the worker/storage
-    const { contextMessages, hiddenItems, ...tokens } = state.tokens || {};
-    this._pendingSync = { ...state, tokens: { ...tokens, hiddenItems: (hiddenItems || []).map(({ text, ...rest }) => rest) } };
+    // The badge is the only consumer: send just its two values, never conversation data
+    this._pendingSync = { percentage: state.utilization?.percentage ?? null, awaitingData: Boolean(state.observables?.awaitingData) };
     if (this._syncTimer) return;
     const send = () => {
       if (!this._pendingSync) return;

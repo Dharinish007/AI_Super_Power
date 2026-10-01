@@ -12,7 +12,7 @@
  */
 
 import { ContextCalculator } from '../../engine/context-calculator.js';
-import { ConfidenceEngine, ConfidenceLevel } from '../../engine/confidence-engine.js';
+import { ConfidenceLevel } from '../../engine/confidence-engine.js';
 import { ConversationClient } from '../../content/conversation-client.js';
 import fs from 'fs';
 import path from 'path';
@@ -111,7 +111,7 @@ export function runCompletenessTests() {
     };
 
     // Effective messages uses the Authoritative Base of all 12 turns
-    const tokenizedMessages = normalized.messages.map((m, i) => ({
+    const tokenizedMessages = normalized.messages.map((m) => ({
       id: m.id,
       role: m.role,
       tokens: 100 // 100 tokens per turn = 1200 total

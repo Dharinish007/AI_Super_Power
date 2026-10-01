@@ -12,6 +12,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { EvidenceType as ClassifierEvidenceType, AccuracyClass } from '../../engine/context-classifier.js';
 import { EvidenceType as MergerEvidenceType } from '../../engine/evidence-merger.js';
+import { bundledContentScript } from '../../scripts/build.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,6 +64,12 @@ export function runBundleIntegrityTests() {
 
   const bundleContent = fs.readFileSync(bundlePath, 'utf8');
 
+  // The committed bundle is what Chrome loads: it must match the sources (line endings aside, git may convert them)
+  assert(
+    bundleContent.replace(/\r\n/g, '\n') === bundledContentScript.replace(/\r\n/g, '\n'),
+    'content/content-script.js is up to date with its sources (run `npm run build` after editing engine/, content/ or network/)'
+  );
+
   // 4. Bundle parses cleanly without SyntaxErrors
   let parsedCleanly = false;
   let syntaxErrorMessage = null;
@@ -85,6 +92,12 @@ export function runBundleIntegrityTests() {
   assert(
     evidenceTypeDecls.length === 1,
     `EvidenceType is declared exactly once in the bundle (found ${evidenceTypeDecls.length})`
+  );
+
+  // 6. Only the o200k rank table ships (cl100k served retired models only and was ~1 MB)
+  assert(
+    lines.filter(line => /^\s*const\s+o200k_base\s*=/.test(line)).length === 1 && !/const\s+cl100k_base\s*=/.test(bundleContent),
+    'Bundle inlines the o200k_base ranks once and no cl100k_base ranks'
   );
 
   return { passed, failed };

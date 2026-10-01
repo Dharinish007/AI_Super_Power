@@ -130,9 +130,9 @@ export class ContentScriptCoordinator {
 
     // Network Intelligence Observer (Group C)
     this.requestObserver = new RequestObserver({
-      onStreamChunk: (turn) => this.handleStreamingChunk(turn),
+      onStreamChunk: () => this.handleStreamingChunk(),
       onStreamComplete: (meta) => this.handleStreamComplete(meta),
-      onPromptSent: (userTurn) => this.handlePromptSent(userTurn),
+      onPromptSent: () => this.handlePromptSent(),
       onConversationLoaded: (meta) => this.handleConversationLoaded(meta)
     });
   }
@@ -192,9 +192,8 @@ export class ContentScriptCoordinator {
 
   /**
    * Throttled handler for live streaming chunk updates from Network.
-   * @param {Object} turn 
    */
-  handleStreamingChunk(turn) {
+  handleStreamingChunk() {
     if (!this._streamPendingSince) this._streamPendingSince = Date.now();
     if (this._streamRafId) return;
     // Adaptive: every 50 ms, but never more often than twice the last pass took, so a long reply in a
@@ -227,9 +226,8 @@ export class ContentScriptCoordinator {
 
   /**
    * Handler for user prompt submission captured via network.
-   * @param {Object} userTurn 
    */
-  handlePromptSent(userTurn) {
+  handlePromptSent() {
     this.handleDOMChange({ isPromptSent: true });
   }
 
@@ -382,15 +380,13 @@ export class ContentScriptCoordinator {
       const domPlan = this._domPlan.value;
       this.perf.record('domScanMs', now() - tDom);
 
-      // 3. Detect model specifications with provenance
+      // 3. Detect model specifications
       let model = null;
-      let modelProvenance = { source: 'dom', evidenceType: 'OBSERVED' };
 
       // Priority A: Network observed model from live request/SSE stream
       const netModel = this.requestObserver.getObservedModel();
       if (netModel && netModel.value) {
         model = this.modelDetector.resolveModel(netModel.value);
-        modelProvenance = { source: 'network', evidenceType: 'OBSERVED' };
       }
 
       // 4. Primary: Retrieve authoritative conversation structure from backend API
@@ -442,7 +438,6 @@ export class ContentScriptCoordinator {
             // Priority B: Authoritative model slug
             if (normalized.modelSlug) {
               model = this.modelDetector.resolveModel(normalized.modelSlug);
-              modelProvenance = { source: 'authoritative', evidenceType: 'OBSERVED' };
             }
           }
         } else {
@@ -454,7 +449,6 @@ export class ContentScriptCoordinator {
       // Priority C: DOM header switcher fallback if still unresolved
       if (!model) {
         model = domModel;
-        modelProvenance = { source: 'dom', evidenceType: 'OBSERVED' };
       }
 
       // 5. Merge in-flight turns: every network turn of this conversation (arrival order), plus a
@@ -490,8 +484,8 @@ export class ContentScriptCoordinator {
         };
       });
       const tTok = now();
-      let tokenizedMessages = tokenize(encoding);
-      let tokenizeMs = now() - tTok;
+      const tokenizedMessages = tokenize(encoding);
+      const tokenizeMs = now() - tTok;
 
       // 7. Detect tools from both DOM and Network
       const netTools = this.requestObserver.getObservedTools();
@@ -636,11 +630,8 @@ export class ContentScriptCoordinator {
       const winningPlan = reconciled.evidence?.plan?.value || PlanTier.UNKNOWN;
       const winningModelSlug = reconciled.evidence?.model?.value || null;
       model = this.modelDetector.resolveModel(winningModelSlug, winningPlan);
-      if (model.encoding && model.encoding !== encoding) {
-        const tRetok = now();
-        tokenizedMessages = tokenize(model.encoding); // Count with the winning model's tokenizer
-        tokenizeMs += now() - tRetok;
-      }
+      // One bundled tokenizer (o200k), so the counts above already hold for the winning model; models on
+      // another tokenizer (retired GPT-4 / GPT-3.5) are flagged approximate below instead of re-counted.
       this.perf.record('tokenizeMs', tokenizeMs);
 
       // Hidden context the page never shows but the API exposes. Only what this chat's own data carries
@@ -678,7 +669,8 @@ export class ContentScriptCoordinator {
         evidence: reconciled.evidence,
         conflicts: reconciled.conflicts,
         agreements: reconciled.agreements,
-        networkHealth
+        networkHealth,
+        tokenizerExact: this.tokenizer.isExact(model.encoding)
       });
 
       // Attach authoritative & network observables
@@ -868,7 +860,7 @@ export class ContentScriptCoordinator {
       if (event.triggeredAt) this.perf.record('updateLatencyMs', Date.now() - event.triggeredAt);
       contextState.diagnostics.performance = this.performanceSnapshot();
 
-      // 11. Sync state to chrome.storage.session and background service worker
+      // 11. Toolbar badge (service worker)
       this.syncState(contextState);
 
     } catch (err) {
@@ -877,14 +869,13 @@ export class ContentScriptCoordinator {
   }
 
   /**
-   * Sends the full context state to the service worker (badge + per-tab popup cache).
+   * Sends the toolbar badge values ({ percentage, awaitingData }) to the service worker.
    * @param {Object} state 
    */
   syncState(state) {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
-    // The badge needs numbers only: never ship hidden text or message lists to the worker/storage
-    const { contextMessages, hiddenItems, ...tokens } = state.tokens || {};
-    this._pendingSync = { ...state, tokens: { ...tokens, hiddenItems: (hiddenItems || []).map(({ text, ...rest }) => rest) } };
+    // The badge is the only consumer: send just its two values, never conversation data
+    this._pendingSync = { percentage: state.utilization?.percentage ?? null, awaitingData: Boolean(state.observables?.awaitingData) };
     // Leading + trailing throttle: the first update goes out at once, bursts (streaming at 20 passes/s)
     // collapse into at most one message per SYNC_MS carrying the latest state. The widget is updated
     // directly on every pass; this only feeds the toolbar badge.

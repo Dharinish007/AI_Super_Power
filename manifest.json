@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT Context Monitor",
+  "name": "AI Context Monitor",
+  "short_name": "Context Monitor",
   "version": "1.0.0",
-  "description": "Calculates and displays context-window usage on ChatGPT, Claude and Gemini with verified truth-in-measurement metrics.",
+  "description": "Shows context-window usage for ChatGPT, Claude and Gemini conversations, computed locally in your browser.",
   "icons": {
     "16": "assets/icons/icon-16.png",
     "48": "assets/icons/icon-48.png",
     "128": "assets/icons/icon-128.png"
   },
   "action": {
-    "default_title": "ChatGPT Context Monitor",
+    "default_title": "AI Context Monitor: show / hide the context widget",
     "default_icon": {
       "16": "assets/icons/icon-16.png",
       "48": "assets/icons/icon-48.png",

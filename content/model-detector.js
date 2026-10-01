@@ -106,7 +106,7 @@ export class ModelDetector {
     let spec = this.models[normModel];
     if (!spec) {
       // Check aliases
-      for (const [id, s] of Object.entries(this.models)) {
+      for (const s of Object.values(this.models)) {
         if (s.aliases && s.aliases.includes(normModel)) {
           spec = s;
           break;
@@ -214,7 +214,7 @@ export class ModelDetector {
     // Check page title or URL params if applicable
     const url = typeof window !== 'undefined' ? window.location.href : '';
     if (url.includes('model=')) {
-      const match = url.match(/model=([a-zA-Z0-9\.-]+)/);
+      const match = url.match(/model=([a-zA-Z0-9.-]+)/);
       if (match) return match[1];
     }
 

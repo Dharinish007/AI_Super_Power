@@ -320,19 +320,14 @@ export async function runReliabilityTests() {
     {
       const active = { value: 2 };
       const sw = loadServiceWorker(active);
-      await sw.send({ type: 'CONTEXT_UPDATED', payload: { utilization: { percentage: 10 }, tag: 'tab1' } }, 1);
-      await sw.send({ type: 'CONTEXT_UPDATED', payload: { utilization: { percentage: 55 }, tag: 'tab2' } }, 2);
-      // The popup is gone; per-tab isolation is checked on the stored state itself
-      assert('Tab B update never overwrites tab A (state per tab)', sw.store.tab_state_1?.tag === 'tab1' && sw.store.tab_state_2?.tag === 'tab2');
+      await sw.send({ type: 'CONTEXT_UPDATED', payload: { percentage: 10, awaitingData: false } }, 1);
+      await sw.send({ type: 'CONTEXT_UPDATED', payload: { percentage: 55, awaitingData: false } }, 2);
       assert('Badge is set per tab', sw.badges[1] === '10%' && sw.badges[2] === '55%');
-
-      sw.on.removed(1);
-      await settle();
-      assert('Closing a tab removes its state', !('tab_state_1' in sw.store) && 'tab_state_2' in sw.store);
+      assert('Nothing is stored: the badge is the only consumer of context updates', Object.keys(sw.store).length === 0);
 
       sw.on.updated(2, { status: 'loading' });
       await settle();
-      assert('Refresh / leaving ChatGPT clears the tab state and badge', !('tab_state_2' in sw.store) && sw.badges[2] === '');
+      assert('Refresh / leaving ChatGPT clears the badge', sw.badges[2] === '' && sw.badges[1] === '10%');
     }
   } finally {
     globalThis.window = prevWindow;

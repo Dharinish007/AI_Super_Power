@@ -5,7 +5,7 @@
  * tools, and model limits to calculate context utilization and breakdown statistics.
  */
 
-import { ContextClassifier, AccuracyClass, EvidenceType } from './context-classifier.js';
+import { ContextClassifier, EvidenceType } from './context-classifier.js';
 import { ConfidenceEngine } from './confidence-engine.js';
 
 export class ContextCalculator {
@@ -170,9 +170,9 @@ export class ContextCalculator {
       conversationComplete: !isPartial,
       domIsPartial: isPartial,
       renderedTurnCount: messages.length,
-      authoritativeTurnCount: Boolean(authoritative?.tokens) ? messages.length : null,
+      authoritativeTurnCount: authoritative?.tokens ? messages.length : null,
       virtualizationGap: 0,
-      completenessSource: Boolean(authoritative?.tokens) ? 'authoritative_api' : (isPartial ? 'dom_partial' : 'dom_complete')
+      completenessSource: authoritative?.tokens ? 'authoritative_api' : (isPartial ? 'dom_partial' : 'dom_complete')
     };
 
     // Confidence evaluation with evidence-based factors (Group E + F)
@@ -298,8 +298,8 @@ export class ContextCalculator {
         },
         turns: {
           value: messages.length,
-          source: Boolean(authoritative?.tokens) ? 'conversation_api' : 'dom',
-          evidenceType: Boolean(authoritative?.tokens) ? EvidenceType.EXACT : EvidenceType.OBSERVED
+          source: authoritative?.tokens ? 'conversation_api' : 'dom',
+          evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.OBSERVED
         },
         attachments: {
           value: attachments.count,
@@ -314,18 +314,18 @@ export class ContextCalculator {
         tokens: {
           user: {
             value: userTokens,
-            source: Boolean(authoritative?.tokens) ? 'conversation_api' : 'tokenizer',
-            evidenceType: Boolean(authoritative?.tokens) ? EvidenceType.EXACT : EvidenceType.ESTIMATED
+            source: authoritative?.tokens ? 'conversation_api' : 'tokenizer',
+            evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.ESTIMATED
           },
           assistant: {
             value: assistantTokens,
-            source: Boolean(authoritative?.tokens) ? 'conversation_api' : 'tokenizer',
-            evidenceType: Boolean(authoritative?.tokens) ? EvidenceType.EXACT : EvidenceType.ESTIMATED
+            source: authoritative?.tokens ? 'conversation_api' : 'tokenizer',
+            evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.ESTIMATED
           },
           total: {
             value: totalMeasurableTokens,
-            source: Boolean(authoritative?.tokens) ? 'conversation_api' : 'tokenizer',
-            evidenceType: Boolean(authoritative?.tokens) ? EvidenceType.EXACT : EvidenceType.ESTIMATED
+            source: authoritative?.tokens ? 'conversation_api' : 'tokenizer',
+            evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.ESTIMATED
           },
           contextWindow: {
             value: contextWindow,

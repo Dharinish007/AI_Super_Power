@@ -5,7 +5,8 @@
  * message parts extraction, special token safety, caching, and edge cases.
  */
 
-import { Tokenizer, SUPPORTED_ENCODINGS } from '../../engine/tokenizer.js';
+import { Tokenizer, BpeCounter, SUPPORTED_ENCODINGS } from '../../engine/tokenizer.js';
+import o200k_base from 'js-tiktoken/ranks/o200k_base';
 
 export function runTokenizerTests() {
   console.log('--- Running Tokenizer Tests ---');
@@ -35,7 +36,7 @@ export function runTokenizerTests() {
   const normalCountO2 = tokenizer.countTokens(normalText, 'o200k_base');
   const normalCountCl = tokenizer.countTokens(normalText, 'cl100k_base');
   assert('Normal text returns exact 8 tokens on o200k_base', normalCountO2 === 8);
-  assert('Normal text returns exact 8 tokens on cl100k_base', normalCountCl === 8);
+  assert('cl100k_base is not bundled: counted with o200k_base', normalCountCl === normalCountO2);
 
   // 3. Punctuation & Symbols
   const punctText = 'Hello, world! (How are you? [Fine; thanks/okay] - "yes"... -- \'really\')';
@@ -52,7 +53,7 @@ export function runTokenizerTests() {
   const unicodeCountO2 = tokenizer.countTokens(unicodeText, 'o200k_base');
   const unicodeCountCl = tokenizer.countTokens(unicodeText, 'cl100k_base');
   assert('Unicode/Emoji returns exact 28 tokens on o200k_base', unicodeCountO2 === 28);
-  assert('Unicode/Emoji returns exact 39 tokens on cl100k_base (showing o200k compression)', unicodeCountCl === 39 && unicodeCountO2 < unicodeCountCl);
+  assert('Unicode/Emoji on cl100k_base request: counted with o200k_base', unicodeCountCl === unicodeCountO2);
 
   // 6. Code blocks
   const pythonCode = '```python\ndef calculate_sum(a: int, b: int) -> int:\n    # Returns the sum of a and b\n    return a + b\n```';
@@ -108,7 +109,13 @@ export function runTokenizerTests() {
   const contO2 = tokenizer.countTokens(contraction, 'o200k_base');
   const contCl = tokenizer.countTokens(contraction, 'cl100k_base');
   assert('o200k_base encodes contractions into single subwords (8 tokens)', contO2 === 8);
-  assert('cl100k_base splits contractions into multiple tokens (16 tokens)', contCl === 16);
+  assert('cl100k_base request counts contractions with o200k_base', contCl === contO2);
+
+  // Exactness: only o200k ranks are bundled, so models on another tokenizer are approximate
+  assert('o200k models are counted exactly', tokenizer.isExact('gpt-4o') && tokenizer.isExact('o200k_base') && tokenizer.isExact('gpt-5.2-thinking'));
+  assert('Missing encoding defaults to exact o200k', tokenizer.isExact(undefined) && tokenizer.isExact(null));
+  assert('Retired cl100k models (GPT-4, GPT-3.5) are approximate', !tokenizer.isExact('gpt-4') && !tokenizer.isExact('gpt-3.5-turbo') && !tokenizer.isExact('cl100k_base'));
+  assert('Counting always uses the bundled o200k_base table', tokenizer.resolveEncoding('gpt-4') === SUPPORTED_ENCODINGS.O200K_BASE);
 
   // 10. Special tokens safety (never crash on raw prompt tokens)
   const specialTokenText = 'This is an end-of-text marker: <|endoftext|> and im_start: <|im_start|>';
@@ -133,6 +140,25 @@ export function runTokenizerTests() {
   // countMessageTokens delegates to parts handling when array is passed
   const delegatedPartsCount = tokenizer.countMessageTokens('msg-parts-2', messageWithParts, 'gpt-4o');
   assert('countMessageTokens seamlessly delegates parts array to exact parts tokenizer', delegatedPartsCount === 10);
+
+  // 12. Rank table built in slices (no long main-thread task) gives the same counts as one build
+  const full = new BpeCounter(o200k_base);
+  const sliced = new BpeCounter(o200k_base, { deferred: true });
+  assert('Deferred counter starts unbuilt', sliced.built === false);
+  let slices = 0;
+  while (!sliced.build(1)) slices++;
+  assert('Deferred build runs in several slices (' + (slices + 1) + ')', slices > 1 && sliced.built === true);
+  assert('Sliced table has every rank', sliced.ranks.size === full.ranks.size);
+  const sample = unicodeText + ' ' + pythonCode + ' ' + specialTokenText;
+  assert('Sliced table counts identically', sliced.count(sample) === full.count(sample));
+  assert('build() after completion is a no-op returning true', sliced.build(0) === true && sliced.ranks.size === full.ranks.size);
+
+  // warm() starts the build without blocking; a count needed right away finishes it synchronously
+  const warmTk = new Tokenizer();
+  warmTk.warm();
+  assert('warm() returns before the table is complete', warmTk.counter && warmTk.counter.built === false);
+  assert('Count right after warm() is still exact', warmTk.countTokens(normalText) === 8 && warmTk.counter.built === true);
+  assert('Table build time is recorded once complete', typeof warmTk.stats.initMs === 'number');
 
   return { passed, failed };
 }

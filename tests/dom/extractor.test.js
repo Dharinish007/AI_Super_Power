@@ -16,8 +16,6 @@ import { ToolDetector } from '../../content/tool-detector.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Read HTML fixture
-const fixtureHtml = fs.readFileSync(path.resolve(__dirname, '../fixtures/conversations.html'), 'utf8');
 const modelLimitsDb = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, '../../config/model-limits.json'), 'utf8')
 );

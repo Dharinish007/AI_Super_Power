@@ -53,6 +53,19 @@
   }
 
   /**
+   * Reports a page response we could not read or parse (usually an API shape change) to the
+   * diagnostics error log. Never throws: the page's own request must never be affected.
+   */
+  function reportParseError(endpoint, err) {
+    dispatchNetworkEvent('INTERCEPTION_ERROR', {
+      type: 'RESPONSE_PARSE_ERROR',
+      endpoint,
+      error: safeString(String(err?.message || err), 200),
+      timestamp: Date.now()
+    });
+  }
+
+  /**
    * Determines if a URL is a relevant ChatGPT backend endpoint.
    * @param {string} url 
    * @returns {boolean}
@@ -514,9 +527,13 @@
                     data: data.mapping ? data : null,
                     timestamp: Date.now()
                   });
-                } catch (_) {}
-              }).catch(() => {});
-            } catch (_) {}
+                } catch (err) {
+                  reportParseError(endpoint, err);
+                }
+              }).catch(err => reportParseError(endpoint, err));
+            } catch (err) {
+              reportParseError(endpoint, err);
+            }
           }
         }
 
@@ -534,9 +551,13 @@
                     models,
                     timestamp: Date.now()
                   });
-                } catch (_) {}
-              }).catch(() => {});
-            } catch (_) {}
+                } catch (err) {
+                  reportParseError(endpoint, err);
+                }
+              }).catch(err => reportParseError(endpoint, err));
+            } catch (err) {
+              reportParseError(endpoint, err);
+            }
           }
         }
 
@@ -563,9 +584,13 @@
                       timestamp: Date.now()
                     });
                   }
-                } catch (_) {}
-              }).catch(() => {});
-            } catch (_) {}
+                } catch (err) {
+                  reportParseError(endpoint, err);
+                }
+              }).catch(err => reportParseError(endpoint, err));
+            } catch (err) {
+              reportParseError(endpoint, err);
+            }
           }
         }
 

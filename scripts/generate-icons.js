@@ -96,9 +96,6 @@ function generatePngBuffer(width, height) {
         rawData[pxOffset + 3] = 255;
       } else {
         // Rounded corner outer mask
-        const cornerR = width * 0.22;
-        const inCornerX = x < cornerR || x >= width - cornerR;
-        const inCornerY = y < cornerR || y >= height - cornerR;
         
         // Background rounded square
         rawData[pxOffset] = 19;

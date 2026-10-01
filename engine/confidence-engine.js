@@ -46,7 +46,6 @@ export class ConfidenceEngine {
    * @param {boolean} [params.isPartialConversation=false] - True if DOM view is virtualized/partial
    * @param {string} [params.completenessSource='dom_complete'] - Source of completeness data
    * @param {boolean} [params.isNetworkActive=false] - True if network interception is operational
-   * @param {string} [params.encoding='o200k_base'] - BPE tokenizer encoding
    * @param {Array<Object>} [params.conflicts=[]] - Conflicting evidence between sources
    * @returns {{
    *   level: string,
@@ -74,7 +73,6 @@ export class ConfidenceEngine {
       isPartialConversation = false,
       completenessSource = 'dom_complete',
       isNetworkActive = false,
-      encoding = 'o200k_base',
       conflicts = [],
       agreements, // Fields confirmed by 2+ independent sources; undefined = legacy callers
       evidence, // Reconciled per-field evidence (value, source, evidenceType, confirmedBy); optional
@@ -128,8 +126,9 @@ export class ConfidenceEngine {
     }
 
     // --- Ground Truth Source Availability (Fallback Mode) ---
+    // A partial page already carries the larger penalty above: no API is the same gap, charged once
     if (completenessSource !== 'authoritative_api' && completenessSource !== 'in_flight_stream') {
-      score -= 0.10;
+      if (!isPartialConversation) score -= 0.10;
       factors.push({
         type: 'negative',
         // dom_complete is a chat with no saved conversation yet: there is nothing to read from the API

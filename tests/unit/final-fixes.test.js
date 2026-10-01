@@ -125,14 +125,14 @@ export async function runFinalFixesTests() {
     {
       // Badge stays blank while loading (never "0%")
       const sw = loadServiceWorker({ value: 1 });
-      await sw.send({ type: 'CONTEXT_UPDATED', payload: { utilization: { percentage: 0 }, observables: { awaitingData: true } } }, 1);
-      await sw.send({ type: 'CONTEXT_UPDATED', payload: { utilization: { percentage: 12 }, observables: { awaitingData: false } } }, 2);
+      await sw.send({ type: 'CONTEXT_UPDATED', payload: { percentage: 0, awaitingData: true } }, 1);
+      await sw.send({ type: 'CONTEXT_UPDATED', payload: { percentage: 12, awaitingData: false } }, 2);
       assert('Toolbar badge is blank while the conversation is loading', sw.badges[1] === '' && sw.badges[2] === '12%');
     }
 
     // ------------------------------------------------------------ switching conversations shows loading, not the old numbers
     {
-      const { c, env, run } = harness({ api: { [CONV_A]: convA, [CONV_B]: convB } });
+      const { env, run } = harness({ api: { [CONV_A]: convA, [CONV_B]: convB } });
       await run();
       env.widget.length = 0;
       env.url = CONV_B;

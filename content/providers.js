@@ -350,10 +350,9 @@ export const ClaudeProvider = {
         if (a.extracted_content) text.push(a.extracted_content);
         else unknownFiles++;
       }
-      for (const f of [...(m.files || []), ...(m.files_v2 || [])]) {
-        files++;
-        unknownFiles++;
-      }
+      const fileCount = (m.files || []).length + (m.files_v2 || []).length;
+      files += fileCount;
+      unknownFiles += fileCount;
       if (text.length) messages.push({ id: m.uuid, role, text: text.join('\n\n'), parts: [{ type: 'text', text: text.join('\n\n') }], isStreaming: false });
       if (tool.length) messages.push({ id: `${m.uuid}-tool`, role: 'tool', text: tool.join('\n\n'), parts: [{ type: 'text', text: tool.join('\n\n') }], isStreaming: false });
     }
@@ -374,14 +373,65 @@ export const ClaudeProvider = {
 // plan, not the model: no AI plan 32K, Google AI Plus 128K, Google AI Pro and Ultra 1M.
 const GEMINI_LIMIT_SOURCE = 'Gemini Apps Help: limits by plan (support.google.com/gemini/answer/16275805)';
 const GEMINI_LIMITS = { free: 32000, plus: 128000, pro: 1000000, ultra: 1000000 };
+// ponytail: unpublished, a rough guess; replace with a measured value when one exists
+const GEMINI_SYSTEM_PROMPT_ESTIMATE = 1500;
+// ai.google.dev/gemini-api/docs/tokens: an image (up to 384px each side) is 258 tokens; larger ones are tiled, so this is a floor
+const GEMINI_IMAGE_TOKENS = 258;
+// conversation id -> turn count at which the whole chat was seen loaded
+const geminiCompleteAt = new Map();
 
 export const GeminiProvider = {
   name: 'Gemini',
   hosts: ['gemini.google.com'],
   inputSelector: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
   hasApi: false,
-  // Gemini loads older turns as you scroll up, so a saved chat read from the page may be incomplete
-  pageMayBePartial: true,
+
+  /**
+   * Gemini loads older turns as you scroll up. The page holds the whole chat once its history is
+   * scrolled to the top with nothing loading; that turn count is remembered, so scrolling back down
+   * (or new turns) keeps the chat complete.
+   */
+  pageMayBePartial(doc, conversationId, turnCount) {
+    if (!conversationId) return false;
+    const known = geminiCompleteAt.get(conversationId);
+    if (known !== undefined && turnCount >= known) return false;
+    const first = doc.querySelector('user-query, model-response');
+    if (!first) return true;
+    let scroller = first.parentElement;
+    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+    const atTop = !scroller || scroller.scrollTop <= 0;
+    const loading = Boolean(doc.querySelector('infinite-scroller mat-progress-spinner, infinite-scroller [role="progressbar"]'));
+    if (!atTop || loading) return true;
+    geminiCompleteAt.set(conversationId, turnCount);
+    return false;
+  },
+
+  /**
+   * Context Gemini sends besides the visible turns, read from the page. The app's system prompt and
+   * Gem instructions are not readable: the prompt is a fixed estimate. Images use Google's published
+   * 258 tokens per image; other files have no readable size and stay unknown.
+   */
+  pageHiddenContext() {
+    const items = [{
+      kind: 'system_prompt', label: 'Gemini system prompt (estimate)', tokens: GEMINI_SYSTEM_PROMPT_ESTIMATE, estimated: true,
+      text: `Not readable from the page. Estimated at ~${GEMINI_SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens.`
+    }];
+    if (/\/gem\//.test(location.pathname)) {
+      items.push({ kind: 'project', label: 'Gem instructions (not readable)', tokens: 0, estimated: true, text: 'This chat uses a Gem; its instructions are sent but cannot be read from the page.' });
+    }
+    return items;
+  },
+
+  pageAttachments(doc) {
+    const queries = doc.querySelectorAll('user-query');
+    let images = 0;
+    let files = 0;
+    for (const q of queries) {
+      images += q.querySelectorAll('img:not([role="presentation"]):not(mat-icon img)').length;
+      files += q.querySelectorAll('uploaded-file, [data-test-id*="uploaded-file"], .file-preview-container').length;
+    }
+    return { count: images + files, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
+  },
 
   conversationId(url) {
     const m = String(url || '').match(/\/app\/([0-9a-f]{8,})/i) || String(url || '').match(/\/gem\/[^/]+\/([0-9a-f]{8,})/i);
