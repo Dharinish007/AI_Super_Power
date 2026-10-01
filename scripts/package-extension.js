@@ -31,7 +31,8 @@ const filesToInclude = [...new Set([
   ...manifest.content_scripts.flatMap(cs => cs.js || []),
   ...Object.values(manifest.icons),
   ...Object.values(manifest.action?.default_icon || {}),
-  ...(manifest.web_accessible_resources || []).flatMap(w => w.resources)
+  ...(manifest.web_accessible_resources || []).flatMap(w => w.resources),
+  ...(manifest.side_panel ? [manifest.side_panel.default_path, path.posix.join(path.posix.dirname(manifest.side_panel.default_path), 'sidepanel.js')] : [])
 ])];
 
 // Verify all files exist

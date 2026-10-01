@@ -60,7 +60,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep channel open for async response
 });
 
-// Toolbar icon: there is no popup (the in-page widget is the only context UI); a click shows / hides it
-chrome.action?.onClicked.addListener((tab) => {
-  if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE_OVERLAY' }).catch(() => {});
-});
+// Toolbar icon: opens the side panel (Chrome narrows the page to make room)
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});

@@ -2,20 +2,24 @@
   "manifest_version": 3,
   "name": "AI Context Monitor",
   "short_name": "Context Monitor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shows context-window usage for ChatGPT, Claude and Gemini conversations, computed locally in your browser.",
+  "minimum_chrome_version": "116",
   "icons": {
     "16": "assets/icons/icon-16.png",
     "48": "assets/icons/icon-48.png",
     "128": "assets/icons/icon-128.png"
   },
   "action": {
-    "default_title": "AI Context Monitor: show / hide the context widget",
+    "default_title": "AI Context Monitor: open the side panel",
     "default_icon": {
       "16": "assets/icons/icon-16.png",
       "48": "assets/icons/icon-48.png",
       "128": "assets/icons/icon-128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
   },
   "background": {
     "service_worker": "background/service-worker.js",
@@ -69,7 +73,8 @@
   ],
   "permissions": [
     "storage",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",

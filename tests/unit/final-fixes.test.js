@@ -271,8 +271,8 @@ export async function runFinalFixesTests() {
       assert('Bundle calls prefetch() before waiting for the DOM', /coordinator\.prefetch\(\);[\s\S]*DOMContentLoaded/.test(fs.readFileSync(path.join(root, 'content/content-script.js'), 'utf8')));
 
       const sw = loadServiceWorker({ value: 7 });
-      sw.on.clicked({ id: 7 });
-      assert('Toolbar icon click toggles the in-page widget instead of opening a popup', sw.tabs.sent.length === 1 && sw.tabs.sent[0].id === 7 && sw.tabs.sent[0].msg.type === 'TOGGLE_OVERLAY');
+      assert('Toolbar icon opens the side panel (setPanelBehavior called)', sw.sidePanelBehaviorSet === true);
+      assert('Toolbar icon does not send TOGGLE_OVERLAY', sw.tabs.sent.length === 0);
       const reply = await Promise.race([sw.send({ type: 'GET_POPUP_STATE' }), sleep(50).then(() => 'no-reply')]);
       assert('Popup state endpoint is gone', reply === 'no-reply');
     }

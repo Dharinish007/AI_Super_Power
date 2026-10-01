@@ -58,11 +58,15 @@ export function loadServiceWorker(activeTabId) {
   const store = {};
   const badges = {};
   const on = {};
+  let sidePanelBehaviorSet = false;
   const chrome = {
     action: {
       setBadgeText: async ({ tabId, text }) => { badges[tabId] = text; },
       setBadgeBackgroundColor: async () => {},
       onClicked: { addListener(fn) { on.clicked = fn; } }
+    },
+    sidePanel: {
+      setPanelBehavior: async () => { sidePanelBehaviorSet = true; }
     },
     runtime: {
       getManifest: () => ({ version: 'test' }),
@@ -90,7 +94,7 @@ export function loadServiceWorker(activeTabId) {
   };
   vm.runInNewContext(serviceWorkerCode, { chrome, console });
   const send = (msg, tabId) => new Promise(resolve => on.message(msg, { tab: tabId ? { id: tabId } : undefined }, resolve));
-  return { store, badges, on, send, tabs: chrome.tabs };
+  return { store, badges, on, send, tabs: chrome.tabs, sidePanelBehaviorSet };
 }
 
 export async function runReliabilityTests() {

@@ -45,6 +45,14 @@ assert(fs.existsSync(swPath), `Service worker file exists: ${manifest.background
 // The in-page widget is the only context UI; the toolbar icon toggles it instead of opening a popup
 assert(manifest.action && !manifest.action.default_popup, 'No duplicate popup UI (action has no default_popup)');
 
+// Check side panel
+if (manifest.side_panel?.default_path) {
+  const panelPath = path.join(rootDir, manifest.side_panel.default_path);
+  assert(fs.existsSync(panelPath), `Side panel HTML file exists: ${manifest.side_panel.default_path}`);
+  const panelScript = path.join(path.dirname(panelPath), 'sidepanel.js');
+  assert(fs.existsSync(panelScript), `Side panel script file exists: sidepanel/sidepanel.js`);
+}
+
 for (const [size, iconRelPath] of Object.entries(manifest.icons)) {
   const iconPath = path.join(rootDir, iconRelPath);
   assert(fs.existsSync(iconPath), `Icon file (${size}x${size}) exists: ${iconRelPath}`);
@@ -61,7 +69,7 @@ for (const cs of manifest.content_scripts || []) {
 assert(!manifest.permissions.includes('<all_urls>'), 'Permissions do not contain broad <all_urls>');
 assert(manifest.permissions.includes('storage'), 'Required "storage" permission declared');
 assert(manifest.permissions.includes('unlimitedStorage'), '"unlimitedStorage" declared (saved Capsules can exceed the 10 MB storage.local quota)');
-assert(manifest.permissions.every(p => ['storage', 'unlimitedStorage'].includes(p)), 'No permissions beyond storage + unlimitedStorage');
+assert(manifest.permissions.every(p => ['storage', 'unlimitedStorage', 'sidePanel'].includes(p)), 'No permissions beyond storage + unlimitedStorage + sidePanel');
 const SUPPORTED_HOSTS = ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://claude.ai/*', 'https://gemini.google.com/*'];
 assert(JSON.stringify([...(manifest.host_permissions || [])].sort()) === JSON.stringify([...SUPPORTED_HOSTS].sort()), 'Host permissions scoped exactly to ChatGPT, Claude and Gemini');
 
