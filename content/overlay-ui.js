@@ -117,7 +117,7 @@ const STYLES = `
 
   .stack { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: var(--track); gap: 2px; margin: 4px 0 10px; }
   .stack i { display: block; min-width: 3px; }
-  .leg { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 6px; margin: 0 -6px; border-radius: 6px; width: calc(100% + 12px); }
+  .leg { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0 -6px; border-radius: 6px; width: calc(100% + 12px); }
   .leg:hover { background: var(--hover); }
   .leg .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
   .leg .sw.off { background: transparent !important; border: 1px solid var(--muted); }
@@ -388,6 +388,17 @@ function textButton(parent, label, onClick, cls = 'btn') {
   b.type = 'button';
   if (onClick) b.addEventListener('click', onClick);
   return b;
+}
+
+/** Saves text as a file named `<base>-YYYY-MM-DD.<ext>` (a plain download: no permission needed). */
+function download(parent, base, ext, text, type = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = h('a', null, parent);
+  a.href = url;
+  a.download = `${base}-${new Date().toISOString().slice(0, 10)}.${ext}`;
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /**
@@ -828,15 +839,9 @@ function CapsulePanel(parent, ctx) {
   textButton(pickBtns, 'Copy', () => navigator.clipboard.writeText(pickedText()).then(() => ctx.toast('Copied'), () => ctx.toast('Copy failed')));
   textButton(pickBtns, 'Clear', () => { selected.clear(); renderList(); });
 
-  // Export: one JSON file with every Capsule (a download; no permission needed)
+  // Export: one JSON file with every Capsule
   exportBtn.addEventListener('click', () => {
-    const url = URL.createObjectURL(new Blob([exportCapsules(items, store.key)], { type: 'application/json' }));
-    const a = h('a', null, view);
-    a.href = url;
-    a.download = `${store.key}-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    download(view, store.key, 'json', exportCapsules(items, store.key), 'application/json');
     ctx.toast(`Exported ${items.length} ${noun}${items.length === 1 ? '' : 's'}`);
   });
 
@@ -1031,14 +1036,7 @@ export class ContextWidget {
     const exportChat = (format) => {
       const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
       if (!msgs.length) return this._toast('Open a conversation first');
-      const type = format === 'json' ? 'application/json' : 'text/plain';
-      const url = URL.createObjectURL(new Blob([formatChatExport(msgs, format, { provider })], { type }));
-      const a = h('a', null, bigSec.body);
-      a.href = url;
-      a.download = `chat-${new Date().toISOString().slice(0, 10)}.${format}`;
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      download(bigSec.body, 'chat', format, formatChatExport(msgs, format, { provider }), format === 'json' ? 'application/json' : 'text/plain');
       this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
     };
     for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {

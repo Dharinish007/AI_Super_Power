@@ -19,7 +19,7 @@ import { mergeLiveTurns } from './turn-merger.js';
 import { ConversationClient } from './conversation-client.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { RequestObserver } from '../network/request-observer.js';
-import { analyzeContext } from '../engine/context-advisor.js';
+import { badgeSender, listenForToggle, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -110,8 +110,7 @@ export class ContentScriptCoordinator {
     };
     this.perf = new PerfStats();
     this._sessionStartTokens = new Map(); // conversationId -> used tokens when first measured on this page
-    this._syncTimer = null;
-    this._lastSyncAt = 0;
+    this._sendBadge = badgeSender(this.perf.counters);
     this.attachmentDetector = new AttachmentDetector();
     this.toolDetector = new ToolDetector();
     // UI adapter: the only ChatGPT-specific UI knowledge is the name and where the input is
@@ -179,18 +178,7 @@ export class ContentScriptCoordinator {
     // Build the BPE rank table (one-off, ~0.1 s) while the first pass waits on the network
     this.tokenizer.warm();
 
-    // Toolbar icon click (background service worker) shows / hides the widget
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-      chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request && request.type === 'TOGGLE_OVERLAY') {
-          this.overlayUI.isVisible = !this.overlayUI.isVisible;
-          this.overlayUI.render();
-          sendResponse({ success: true, isVisible: this.overlayUI.isVisible });
-          return true;
-        }
-        return false;
-      });
-    }
+    listenForToggle(this.overlayUI);
   }
 
   /**
@@ -265,13 +253,8 @@ export class ContentScriptCoordinator {
     await this.handleDOMChange({ isRefresh: true });
   }
 
-  /**
-   * Short hash identifying a conversation in diagnostics without exposing its id.
-   * @param {string|null} conversationId
-   * @returns {string|null}
-   */
   _conversationRef(conversationId) {
-    return conversationId ? this.tokenizer.hashString(conversationId).toString(16) : null;
+    return conversationRef(this.tokenizer, conversationId);
   }
 
   /**
@@ -283,34 +266,19 @@ export class ContentScriptCoordinator {
     const currentRef = this._conversationRef(
       this.conversationClient.extractConversationId() || this.requestObserver.getActiveConversationId()
     );
-    const copiedAt = new Date().toISOString();
-    const d = this.latestState?.diagnostics;
-    if (!d) return { note: 'Nothing read yet in this tab', currentConversationRef: currentRef, copiedAt };
-    if (d.conversation?.ref !== currentRef) {
-      return {
-        note: 'The conversation on screen is still loading; data from the previous conversation is withheld',
-        currentConversationRef: currentRef,
-        loading: true,
-        version: d.version,
-        copiedAt
-      };
-    }
     // Page structure counts are read now (once, at copy time) instead of on every analysis pass
     const count = (sel) => (typeof document !== 'undefined' ? document.querySelectorAll(sel).length : null);
-    return {
-      ...d,
+    return diagnosticsSnapshot(this.latestState, currentRef, {}, () => ({
       dom: {
-        ...d.dom,
+        ...this.latestState.diagnostics.dom,
         roleNodes: count('[data-message-author-role]'),
         turnContainers: count("[data-testid^='conversation-turn-']"),
         articles: count('article'),
         sections: count('section'),
         modelSlugNodes: count('[data-message-model-slug]')
       },
-      performance: this.performanceSnapshot(),
-      copiedAt,
-      stateAgeMs: Date.now() - this.latestState.timestamp
-    };
+      performance: this.performanceSnapshot()
+    }));
   }
 
   /**
@@ -371,9 +339,8 @@ export class ContentScriptCoordinator {
       const rawDomMessages = this.messageExtractor.extractMessages(document);
       this.perf.record('domMessagesMs', now() - tDom);
       const domAttachments = this.attachmentDetector.detect(document);
-      // Pass the raw slug (not the resolved family key) so the UI shows the real model name
+      // The raw slug (not the resolved family key), so the UI shows the real model name
       const domModelRaw = this.modelDetector.detectRawModelString(document);
-      const domModel = this.modelDetector.resolveModel(domModelRaw);
       const domTools = this.toolDetector.detect(document);
       // The plan is account-level and the detector reads the whole sidebar (layout + every link), so it
       // is re-read at most every 5 s, and always on Refresh / navigation (the session API is primary)
@@ -383,14 +350,8 @@ export class ContentScriptCoordinator {
       const domPlan = this._domPlan.value;
       this.perf.record('domScanMs', now() - tDom);
 
-      // 3. Detect model specifications
-      let model = null;
-
-      // Priority A: Network observed model from live request/SSE stream
+      // 3. Model seen in this conversation's own request / stream (a candidate in step 9)
       const netModel = this.requestObserver.getObservedModel();
-      if (netModel && netModel.value) {
-        model = this.modelDetector.resolveModel(netModel.value);
-      }
 
       // 4. Primary: Retrieve authoritative conversation structure from backend API
       let effectiveMessages = rawDomMessages;
@@ -437,21 +398,11 @@ export class ContentScriptCoordinator {
             if (normalized.attachments && normalized.attachments.count > 0) {
               effectiveAttachments = normalized.attachments;
             }
-
-            // Priority B: Authoritative model slug
-            if (normalized.modelSlug) {
-              model = this.modelDetector.resolveModel(normalized.modelSlug);
-            }
           }
         } else {
           dataSource = 'dom_fallback';
           apiError = authResult.error || 'Failed to fetch conversation';
         }
-      }
-
-      // Priority C: DOM header switcher fallback if still unresolved
-      if (!model) {
-        model = domModel;
       }
 
       // 5. Merge in-flight turns: every network turn of this conversation (arrival order), plus a
@@ -471,9 +422,10 @@ export class ContentScriptCoordinator {
       // rendered yet) means it is still loading, not empty: "0 tokens" would be wrong. A 404 is final.
       const awaitingData = Boolean(conversationId) && effectiveMessages.length === 0 && authStatus !== 404;
 
-      const encoding = model?.encoding || 'o200k_base';
-
-      // 6. Tokenize messages incrementally using model-aware BPE tokenizer with parts[] support
+      // 6. Tokenize messages incrementally (BPE with parts[] support). One bundled tokenizer (o200k), so
+      //    the counts hold for whichever model wins; models on another tokenizer (retired GPT-4 / GPT-3.5)
+      //    are flagged approximate below instead of re-counted.
+      const encoding = 'o200k_base';
       const tokenize = (enc) => effectiveMessages.map(msg => {
         const parts = msg.parts || [{ type: 'text', text: msg.text }];
         const partsResult = this.tokenizer.countMessagePartsTokens(msg.id, parts, enc);
@@ -574,7 +526,7 @@ export class ContentScriptCoordinator {
       if (normalized?.modelSlug) {
         modelCandidates.push({ value: normalized.modelSlug, compareKey: modelKey(normalized.modelSlug), source: 'conversation_api', evidenceType: EvidenceType.EXACT });
       }
-      if (domModelRaw && domModel && domModel.id !== 'unknown') {
+      if (domModelRaw) {
         modelCandidates.push({ value: domModelRaw, compareKey: modelKey(domModelRaw), source: 'dom', evidenceType: EvidenceType.OBSERVED });
       }
 
@@ -632,9 +584,7 @@ export class ContentScriptCoordinator {
       // Update model + plan-aware limits with winning evidence
       const winningPlan = reconciled.evidence?.plan?.value || PlanTier.UNKNOWN;
       const winningModelSlug = reconciled.evidence?.model?.value || null;
-      model = this.modelDetector.resolveModel(winningModelSlug, winningPlan);
-      // One bundled tokenizer (o200k), so the counts above already hold for the winning model; models on
-      // another tokenizer (retired GPT-4 / GPT-3.5) are flagged approximate below instead of re-counted.
+      const model = this.modelDetector.resolveModel(winningModelSlug, winningPlan);
       this.perf.record('tokenizeMs', tokenizeMs);
 
       // Hidden context the page never shows but the API exposes. Only what this chat's own data carries
@@ -645,7 +595,7 @@ export class ContentScriptCoordinator {
         hiddenItems.push({ kind: 'account_memory', label: 'Saved memories (may be included)', text: accountMemories.join('\n'), included: false });
       }
       // Cached per kind + text hash: memory/instructions are re-counted only when they change, not every pass
-      const hidden = hiddenItems.map((i, n) => ({ ...i, tokens: this.tokenizer.countMessageTokens(`hidden:${i.kind}:${n}`, i.text, model.encoding || encoding) }));
+      const hidden = hiddenItems.map((i, n) => ({ ...i, tokens: this.tokenizer.countMessageTokens(`hidden:${i.kind}:${n}`, i.text, encoding) }));
       // OpenAI's system prompt never reaches the browser; count a labelled estimate so the total is not
       // silently short. ponytail: one fixed figure; per-model/per-tool estimates if published sizes diverge.
       if (effectiveMessages.length > 0) hidden.push({ // Nothing is sent before the first message
@@ -663,10 +613,6 @@ export class ContentScriptCoordinator {
         dropStaleTools: true, // ChatGPT: older tool output is not resent
         fitToWindow: true,    // ChatGPT: long chats keep only the newest turns that fit
         tools,
-        memory: {
-          observed: tools.list.some(t => t.type === 'memory'),
-          enabled: true
-        },
         completeness,
         isPartial: !conversationComplete,
         evidence: reconciled.evidence,
@@ -693,32 +639,11 @@ export class ContentScriptCoordinator {
       contextState.completeness.hiddenContextMeasured = false;
 
       // Context intelligence: health, consumers, growth and advice from the measured values only
-      if (!awaitingData && conversationId && !this._sessionStartTokens.has(conversationId)) {
-        this._sessionStartTokens.set(conversationId, contextState.tokens.totalMeasurable);
-      }
-      contextState.intelligence = analyzeContext({
-        percentage: contextState.utilization.percentage,
-        usedTokens: contextState.tokens.totalMeasurable,
-        contextLimit: contextState.model.contextWindow,
-        remainingTokens: contextState.tokens.remaining,
-        messages: contextState.tokens.contextMessages,
-        attachments: effectiveAttachments,
-        isLowerBound: !conversationComplete,
-        hiddenTokens: contextState.tokens.hidden,
-        sessionStartTokens: conversationId ? (this._sessionStartTokens.get(conversationId) ?? null) : null
-      });
+      addIntelligence(contextState, { conversationId, awaitingData, attachments: effectiveAttachments, isLowerBound: !conversationComplete, sessionStart: this._sessionStartTokens });
 
-      // Limit and token provenance depend on the winning model + plan, so they are recorded only now.
-      // The limit comes from the curated limits table (OBSERVED + VERIFIED/UNVERIFIED status), never EXACT.
+      // Limit and token provenance depend on the winning model + plan, so they are recorded only now
       const ev = reconciled.evidence;
-      const windowKnown = Boolean(contextState.model.contextWindow);
-      ev.limit = {
-        value: contextState.model.contextWindow,
-        status: windowKnown ? contextState.model.limitStatus : 'UNKNOWN',
-        source: windowKnown ? 'model_db' : 'unknown',
-        reference: windowKnown ? (model.limitSource || null) : null,
-        evidenceType: windowKnown ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-      };
+      ev.limit = limitEvidence(contextState, model.limitSource);
       // Counted locally from visible text: an estimate of what the model receives, not reported usage
       const counted = (value) => ({ value, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED, textFrom: dataSource });
       ev.tokens = {
@@ -838,9 +763,6 @@ export class ContentScriptCoordinator {
         contextState.observables.apiError = apiError;
       }
 
-      contextState.evidence = reconciled.evidence;
-      contextState.conflicts = reconciled.conflicts;
-
       // A newer pass started while this one awaited the API; its result wins
       if (runSeq !== this._runSeq) {
         this.perf.counters.superseded++;
@@ -871,40 +793,9 @@ export class ContentScriptCoordinator {
     }
   }
 
-  /**
-   * Sends the toolbar badge values ({ percentage, awaitingData }) to the service worker.
-   * @param {Object} state 
-   */
+  /** Toolbar badge (service worker); see badgeSender. */
   syncState(state) {
-    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
-    // The badge is the only consumer: send just its two values, never conversation data
-    this._pendingSync = { percentage: state.utilization?.percentage ?? null, awaitingData: Boolean(state.observables?.awaitingData) };
-    // Leading + trailing throttle: the first update goes out at once, bursts (streaming at 20 passes/s)
-    // collapse into at most one message per SYNC_MS carrying the latest state. The widget is updated
-    // directly on every pass; this only feeds the toolbar badge.
-    const SYNC_MS = 250;
-    if (this._syncTimer) {
-      this.perf.counters.syncsCoalesced++;
-      return;
-    }
-    const send = () => {
-      const payload = this._pendingSync;
-      this._pendingSync = null;
-      if (!payload) return;
-      this._lastSyncAt = Date.now();
-      this.perf.counters.syncsSent++;
-      chrome.runtime.sendMessage({ type: 'CONTEXT_UPDATED', payload }).catch(() => {
-        // Suppress errors when service worker is temporarily inactive
-      });
-    };
-    const wait = SYNC_MS - (Date.now() - this._lastSyncAt);
-    if (wait <= 0) {
-      send();
-      // Hold the window open so the next burst coalesces into one trailing send
-      this._syncTimer = setTimeout(() => { this._syncTimer = null; send(); }, SYNC_MS);
-    } else {
-      this._syncTimer = setTimeout(() => { this._syncTimer = null; send(); }, wait);
-    }
+    this._sendBadge(state);
   }
 
   /**

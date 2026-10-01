@@ -74,7 +74,6 @@ function harness(o = {}) {
   };
   c.messageExtractor.extractMessages = () => env.dom;
   c.modelDetector.detectRawModelString = () => env.domModel;
-  c.modelDetector.detect = () => c.modelDetector.resolveModel(env.domModel);
   c.planDetector.detect = () => env.domPlan || { value: 'unknown', source: 'unknown', evidenceType: 'UNKNOWN' };
   const bridge = (eventType, payload) => c.requestObserver.handleMessage({ source: globalThis.window, data: { source: 'CHATGPT_CONTEXT_MONITOR_NET', eventType, payload } });
   const run = async () => { await c.handleDOMChange(); return c.latestState; };

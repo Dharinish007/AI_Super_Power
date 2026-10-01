@@ -271,6 +271,7 @@ export async function runCapsuleTests() {
   assert('Store: an edit without library fields keeps tags and project', JSON.stringify(L1b.tags) === '["backend","auth"]' && L1b.project === 'api');
   const L1c = await lib.save({ id: L1.id, title: 'Auth plan v2', body: 'x', tags: '', project: '' });
   assert('Store: empty tags / project from the editor clear them', L1c.tags.length === 0 && L1c.project === null);
+  await new Promise(r => setTimeout(r, 2)); // Saves in the same millisecond tie on updatedAt: this one must be newest
   await lib.save({ id: L1.id, title: 'Auth plan', body: 'JWT and refresh tokens', tags: 'backend, auth', project: 'api' });
   const beforePin = (await lib.list()).find(c => c.id === L3.id).updatedAt;
   await lib.setPinned(L3.id, true);

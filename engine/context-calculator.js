@@ -1,6 +1,6 @@
 /**
  * ChatGPT Context Monitor - Context Calculator
- * 
+ *
  * Aggregates token measurements across conversation messages, attachments,
  * tools, and model limits to calculate context utilization and breakdown statistics.
  */
@@ -10,36 +10,20 @@ import { ConfidenceEngine } from './confidence-engine.js';
 
 export class ContextCalculator {
   /**
-   * Formats a raw token number into a human-friendly string (e.g. 1,250 -> 1.3K, 128000 -> 128K)
-   * @param {number|null} count 
-   * @returns {string}
-   */
-  static formatTokenCount(count) {
-    if (count === null || count === undefined || isNaN(count)) {
-      return 'Unknown';
-    }
-    if (count < 1000) {
-      return count.toLocaleString();
-    }
-    if (count < 1000000) {
-      const rounded = (Math.round(count / 100) / 10).toFixed(1).replace(/\.0$/, '');
-      return `${rounded}K`;
-    }
-    const m = (Math.round(count / 10000) / 100).toFixed(2).replace(/\.00$/, '');
-    return `${m}M`;
-  }
-
-  /**
    * Calculates comprehensive context usage state.
-   * 
+   *
    * @param {Object} input
-   * @param {Array<{ id: string, role: string, tokens: number }>} input.messages
-   * @param {Object} input.model
-   * @param {Object} input.attachments
-   * @param {Object} input.tools
-   * @param {Object} input.memory
-   * @param {Object} input.authoritative
-   * @param {boolean} input.isPartial
+   * @param {Array<{ id: string, role: string, tokens: number }>} input.messages Tokenized turns, in order
+   * @param {Object} input.model Resolved model: { id, displayName, contextWindow, limitStatus, recognized, encoding }
+   * @param {Object|string} [input.plan] Plan evidence ({ value | tier, source }) or a tier name
+   * @param {Object} [input.attachments] { count, estimatedTokens, hasUnknown, files }
+   * @param {Array<Object>} [input.hidden] Hidden context items: { kind, label, text, tokens, included? }
+   * @param {Object} [input.tools] { observed, list }
+   * @param {Object} [input.completeness] Completeness record from the coordinator
+   * @param {boolean} [input.isPartial] Turns may be missing (count is a lower bound)
+   * @param {boolean} [input.dropStaleTools] / [input.fitToWindow] ChatGPT context rules (see below)
+   * @param {Object} [input.evidence] Reconciled evidence (EvidenceMerger), with conflicts / agreements
+   * @param {boolean} [input.tokenizerExact] false when the provider's own tokenizer is not the one counting
    * @returns {Object} Context state object
    */
   static calculate(input = {}) {
@@ -47,8 +31,6 @@ export class ContextCalculator {
     const model = input.model || { displayName: 'Unknown', contextWindow: null, id: 'unknown' };
     const attachments = input.attachments || { count: 0, estimatedTokens: 0, hasUnknown: false };
     const tools = input.tools || { observed: false, list: [] };
-    const memory = input.memory || { enabled: false, observed: false };
-    const authoritative = input.authoritative || null;
     const isPartial = Boolean(input.isPartial);
     // Hidden context read from the API (custom instructions, memory, system/hidden messages): [{ kind, label, text, tokens }]
     const hidden = Array.isArray(input.hidden) ? input.hidden : [];
@@ -75,7 +57,7 @@ export class ContextCalculator {
       if (planTier !== 'unknown' && model.contextWindow) {
         contextWindow = model.contextWindow;
       } else if (input.plan === undefined && model.contextWindow) {
-        // Backward compatibility for standalone callers without plan context
+        // Standalone callers (tests) without plan context
         contextWindow = model.contextWindow;
       }
     }
@@ -93,7 +75,7 @@ export class ContextCalculator {
     let messages = live;
     let outOfWindow = [];
     if (input.fitToWindow && contextWindow) {
-      let budget = contextWindow -(attachments.estimatedTokens || 0) - hiddenTokens;
+      let budget = contextWindow - (attachments.estimatedTokens || 0) - hiddenTokens;
       let cut = live.length - 1; // index of the oldest kept turn
       budget -= live.length ? (live[cut].tokens || 0) : 0;
       while (cut > 0 && (live[cut - 1].tokens || 0) <= budget) {
@@ -110,51 +92,31 @@ export class ContextCalculator {
     // Sum message tokens by author role and track non-text parts
     let userTokens = 0;
     let assistantTokens = 0;
-    let nonTextPartsCount = 0;
     const nonTextPartsList = [];
-
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      const msgTokens = msg.tokens || 0;
-
-      // Track non-text parts when provided
+    for (const msg of messages) {
       if (Array.isArray(msg.nonTextParts) && msg.nonTextParts.length > 0) {
-        nonTextPartsCount += msg.nonTextParts.length;
         nonTextPartsList.push(...msg.nonTextParts);
       } else if (Array.isArray(msg.parts)) {
         for (const p of msg.parts) {
           if (p && typeof p === 'object' && p.type && p.type !== 'text') {
-            nonTextPartsCount++;
-            nonTextPartsList.push({
-              type: p.type,
-              classification: p.classification || 'UNKNOWN'
-            });
+            nonTextPartsList.push({ type: p.type, classification: p.classification || 'UNKNOWN' });
           }
         }
       }
-
-      if (msg.role === 'user') {
-        userTokens += msgTokens;
-      } else {
-        assistantTokens += msgTokens;
-      }
+      if (msg.role === 'user') userTokens += msg.tokens || 0;
+      else assistantTokens += msg.tokens || 0;
     }
     const conversationTokens = userTokens + assistantTokens;
-
-    // Attachment tokens
     const attachmentTokens = attachments.estimatedTokens || 0;
-
-    // Total measurable context
     const totalMeasurableTokens = conversationTokens + attachmentTokens + hiddenTokens;
+    const utilizationPercent = contextWindow > 0
+      ? Math.min(100, Number(((totalMeasurableTokens / contextWindow) * 100).toFixed(1)))
+      : null;
 
-    let utilizationPercent = null;
-    if (contextWindow && contextWindow > 0) {
-      utilizationPercent = Math.min(100, Number(((totalMeasurableTokens / contextWindow) * 100).toFixed(1)));
-    }
-
-    // Epistemic classification for each dimension
+    // Epistemic classification for each dimension. Token counts are always made locally (no site
+    // reports its own usage), so the conversation and the total are ESTIMATED.
     const accuracy = {
-      conversation: ContextClassifier.classifyConversation(Boolean(authoritative?.tokens)),
+      conversation: ContextClassifier.classifyConversation(false),
       model: ContextClassifier.classifyModel(model.id),
       plan: ContextClassifier.classifyPlan(planTier),
       contextWindow: ContextClassifier.classifyLimit(contextWindow, model.limitStatus === 'VERIFIED'),
@@ -162,29 +124,26 @@ export class ContextCalculator {
       memory: ContextClassifier.classifyMemory(),
       tools: ContextClassifier.classifyTools(tools.observed),
       hiddenContext: ContextClassifier.classifyHiddenContext(),
-      total: ContextClassifier.classifyTotal(Boolean(authoritative?.tokens))
+      total: ContextClassifier.classifyTotal(false)
     };
 
-    const completenessInput = input.completeness || null;
-    const completeness = completenessInput || {
+    const completeness = input.completeness || {
       conversationComplete: !isPartial,
       domIsPartial: isPartial,
       renderedTurnCount: messages.length,
-      authoritativeTurnCount: authoritative?.tokens ? messages.length : null,
+      authoritativeTurnCount: null,
       virtualizationGap: 0,
-      completenessSource: authoritative?.tokens ? 'authoritative_api' : (isPartial ? 'dom_partial' : 'dom_complete')
+      completenessSource: isPartial ? 'dom_partial' : 'dom_complete'
     };
 
     // Confidence evaluation with evidence-based factors (Group E + F)
     const confidence = ConfidenceEngine.evaluate({
-      isAuthoritative: Boolean(authoritative?.tokens),
       // An unrecognized slug is displayed by name but is not "known": it has no limit
       isModelKnown: model.id !== 'unknown' && model.recognized !== false,
       isLimitVerified: Boolean(contextWindow) && model.limitStatus !== 'UNVERIFIED',
       contextLimit: contextWindow,
       planTier,
       isPlanKnown: planTier !== 'unknown' && Boolean(planTier),
-      modelDisplayName: model.displayName,
       messageCount: messages.length,
       attachmentCount: attachments.count,
       hasUnknownAttachments: attachments.hasUnknown,
@@ -192,14 +151,14 @@ export class ContextCalculator {
       isPartialConversation: isPartial,
       completenessSource: completeness.completenessSource,
       isNetworkActive: Boolean(input.networkHealth?.networkAvailable),
-      encoding: model.encoding || 'o200k_base',
       conflicts: input.conflicts || [],
       agreements: input.agreements,
       evidence: input.evidence,
       tokenizerExact: input.tokenizerExact !== false
     });
 
-    const apiContextLimit = model.apiContextLimit ?? (model.id !== 'unknown' ? (model.contextWindow || contextWindow) : null);
+    // Counted locally from visible text: an estimate of what the model receives, not reported usage
+    const estimated = (value) => ({ value, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED });
 
     return {
       timestamp: Date.now(),
@@ -207,21 +166,11 @@ export class ContextCalculator {
         id: model.id || 'unknown',
         displayName: model.displayName || 'Unknown Model',
         encoding: model.encoding || 'o200k_base',
-        apiContextLimit,
-        contextWindow: contextWindow,
-        maxOutput: model.maxOutput || null,
-        planTier,
+        contextWindow,
         limitStatus: model.limitStatus || (contextWindow ? 'VERIFIED' : 'UNKNOWN'),
-        recognized: model.recognized !== false && model.id !== 'unknown',
-        source: model.source || 'unverified',
-        accuracy: accuracy.model
+        recognized: model.recognized !== false && model.id !== 'unknown'
       },
-      plan: {
-        tier: planTier,
-        displayName: planTier.charAt(0).toUpperCase() + planTier.slice(1),
-        source: planSource,
-        accuracy: accuracy.plan
-      },
+      plan: { tier: planTier, source: planSource },
       tokens: {
         user: userTokens,
         assistant: assistantTokens,
@@ -238,20 +187,9 @@ export class ContextCalculator {
         },
         totalMeasurable: totalMeasurableTokens,
         // Window minus measured tokens; hidden context is not measurable, so the true remainder is lower
-        remaining: contextWindow ? Math.max(0, contextWindow - totalMeasurableTokens) : null,
-        formatted: {
-          user: this.formatTokenCount(userTokens),
-          assistant: this.formatTokenCount(assistantTokens),
-          conversation: this.formatTokenCount(conversationTokens),
-          attachments: this.formatTokenCount(attachmentTokens),
-          total: this.formatTokenCount(totalMeasurableTokens),
-          contextWindow: contextWindow ? this.formatTokenCount(contextWindow) : 'Unknown'
-        }
+        remaining: contextWindow ? Math.max(0, contextWindow - totalMeasurableTokens) : null
       },
-      utilization: {
-        percentage: utilizationPercent,
-        formatted: utilizationPercent !== null ? `${utilizationPercent}%` : 'Unknown'
-      },
+      utilization: { percentage: utilizationPercent },
       completeness: {
         conversationComplete: completeness.conversationComplete,
         domIsPartial: completeness.domIsPartial,
@@ -264,99 +202,28 @@ export class ContextCalculator {
         messagesCount: messages.length,
         attachmentsCount: attachments.count,
         attachmentFiles: attachments.files || [],
-        toolsObserved: tools.observed,
-        toolsList: tools.list || [],
-        memoryObserved: memory.observed,
         isPartialConversation: isPartial,
-        conversationComplete: completeness.conversationComplete,
-        domIsPartial: completeness.domIsPartial,
-        renderedTurnCount: completeness.renderedTurnCount,
-        authoritativeTurnCount: completeness.authoritativeTurnCount,
-        virtualizationGap: completeness.virtualizationGap,
-        completenessSource: completeness.completenessSource,
-        nonTextPartsCount,
+        nonTextPartsCount: nonTextPartsList.length,
         nonTextPartsList
       },
       accuracy,
       tokenizerExact: input.tokenizerExact !== false,
       confidence,
+      // Coordinators pass reconciled evidence; standalone callers get the token and completeness provenance
       evidence: input.evidence || {
-        model: {
-          value: model.id,
-          source: model.source || 'model_db',
-          evidenceType: model.id !== 'unknown' ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-        },
-        plan: {
-          value: planTier,
-          source: planSource,
-          evidenceType: planTier !== 'unknown' ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-        },
-        limit: {
-          value: contextWindow,
-          apiLimit: apiContextLimit,
-          status: model.limitStatus || (contextWindow ? 'VERIFIED' : 'UNKNOWN'),
-          source: model.limitSource || 'model_db',
-          evidenceType: contextWindow ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-        },
-        turns: {
-          value: messages.length,
-          source: authoritative?.tokens ? 'conversation_api' : 'dom',
-          evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.OBSERVED
-        },
-        attachments: {
-          value: attachments.count,
-          source: attachments.source || 'dom',
-          evidenceType: attachments.count > 0 ? (attachments.hasUnknown ? EvidenceType.ESTIMATED : EvidenceType.OBSERVED) : EvidenceType.OBSERVED
-        },
-        tools: {
-          value: tools.list.map(t => t.type || t.label).join(','),
-          source: tools.source || 'dom',
-          evidenceType: tools.observed ? EvidenceType.OBSERVED : EvidenceType.OBSERVED
-        },
         tokens: {
-          user: {
-            value: userTokens,
-            source: authoritative?.tokens ? 'conversation_api' : 'tokenizer',
-            evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.ESTIMATED
-          },
-          assistant: {
-            value: assistantTokens,
-            source: authoritative?.tokens ? 'conversation_api' : 'tokenizer',
-            evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.ESTIMATED
-          },
-          total: {
-            value: totalMeasurableTokens,
-            source: authoritative?.tokens ? 'conversation_api' : 'tokenizer',
-            evidenceType: authoritative?.tokens ? EvidenceType.EXACT : EvidenceType.ESTIMATED
-          },
-          contextWindow: {
-            value: contextWindow,
-            source: 'model_db',
-            // Looked up from a curated table, not reported by ChatGPT, so never EXACT
-            evidenceType: contextWindow ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-          }
+          user: estimated(userTokens),
+          assistant: estimated(assistantTokens),
+          total: estimated(totalMeasurableTokens),
+          contextWindow: { value: contextWindow, source: 'model_db', evidenceType: contextWindow ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN }
         },
         completeness: {
           value: completeness.conversationComplete ? 'COMPLETE' : 'PARTIAL',
           source: completeness.completenessSource,
-          evidenceType: completeness.completenessSource === 'authoritative_api' ? EvidenceType.EXACT : EvidenceType.OBSERVED,
-          domIsPartial: completeness.domIsPartial,
-          virtualizationGap: completeness.virtualizationGap
-        },
-        serverContext: {
-          value: 'UNOBSERVABLE',
-          source: 'unknown',
-          evidenceType: EvidenceType.UNKNOWN
-        },
-        conflicts: input.conflicts || [],
-        hasConflicts: Boolean(input.conflicts && input.conflicts.length > 0)
+          evidenceType: completeness.completenessSource === 'authoritative_api' ? EvidenceType.EXACT : EvidenceType.OBSERVED
+        }
       },
-      conflicts: input.conflicts || [],
-      limitations: [
-        'Visible conversation text is not the complete prompt submitted to the model.',
-        'Hidden server-side system prompts, developer instructions, and runtime metadata are not measurable from the client.',
-        'Tool schemas and memory retrieval token overhead remain classified as UNKNOWN.'
-      ]
+      conflicts: input.conflicts || []
     };
   }
 }

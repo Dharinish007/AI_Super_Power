@@ -150,7 +150,7 @@ export function runCompletenessTests() {
     });
 
     assert(state.tokens.conversation === 750, 'Preserves all 15 turns totaling 750 tokens');
-    assert(state.observables.virtualizationGap === 12, 'Observables record exact virtualization gap (12)');
+    assert(state.completeness.virtualizationGap === 12, 'Completeness records exact virtualization gap (12)');
   }
 
   // 4. Branch Changes & Regenerated Turns (Only active branch counted, abandoned excluded)
@@ -238,7 +238,7 @@ export function runCompletenessTests() {
     assert(state.completeness.domIsPartial === true, 'DOM is marked domIsPartial=true');
     assert(state.completeness.completenessSource === 'dom_partial', 'Completeness source is dom_partial');
     assert(state.observables.isPartialConversation === true, 'isPartialConversation observable is true');
-    assert(state.confidence.reasons.some(r => r.includes('partially loaded / virtualized in DOM')), 'Confidence engine includes partial/virtualized warning');
+    assert(state.confidence.factors.some(f => f.type === 'negative' && f.text.includes('partially loaded / virtualized in DOM')), 'Confidence engine includes partial/virtualized warning');
     assert(state.confidence.score <= 0.65, 'Confidence score penalizes unverified partial DOM');
   }
 

@@ -8,7 +8,6 @@
  * 4. Unknown model + unknown plan
  * 5. Conflicting plan signals (e.g. Network 'plus' vs DOM 'free')
  * 6. Outdated or corrupted config handling (graceful fallback)
- * 7. Refreshed / versioned config dynamically loaded
  * 8. Strict distinction: OpenAI API limit vs ChatGPT product limit (Never mixed)
  * 9. Utilization calculation with known context limit
  * 10. Safe fallback: unknown limit -> utilization = UNKNOWN
@@ -188,10 +187,7 @@ export function runModelPlanLimitsTests() {
 
   assert('Utilization with known limit: Calculates exact percentage (5100 / 32768 = 15.6%)',
     knownCalc.utilization.percentage === 15.6 &&
-    knownCalc.utilization.formatted === '15.6%'
-  );
-  assert('Utilization with known limit: Formatted context window shows "32.8K"',
-    knownCalc.tokens.formatted.contextWindow === '32.8K'
+    knownCalc.model.contextWindow === 32768
   );
   assert('Classification of verified limit is OBSERVED',
     knownCalc.accuracy.contextWindow === AccuracyClass.OBSERVED
@@ -210,11 +206,8 @@ export function runModelPlanLimitsTests() {
   assert('Utilization when limit is unknown: percentage is null',
     unknownCalc.utilization.percentage === null
   );
-  assert('Utilization when limit is unknown: formatted is "Unknown"',
-    unknownCalc.utilization.formatted === 'Unknown'
-  );
-  assert('Utilization when limit is unknown: tokens.formatted.contextWindow is "Unknown"',
-    unknownCalc.tokens.formatted.contextWindow === 'Unknown'
+  assert('Utilization when limit is unknown: no window, no remaining room',
+    unknownCalc.model.contextWindow === null && unknownCalc.tokens.remaining === null
   );
   assert('Classification of unknown limit is UNKNOWN',
     unknownCalc.accuracy.contextWindow === AccuracyClass.UNKNOWN
@@ -225,7 +218,6 @@ export function runModelPlanLimitsTests() {
   // =========================================================================
   // 9a. Verified model + plan improves confidence
   const verifiedLimitConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     isLimitVerified: true,
     planTier: 'plus',
@@ -242,7 +234,6 @@ export function runModelPlanLimitsTests() {
 
   // 9b. Unknown plan lowers confidence
   const unverifiedPlanConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     isLimitVerified: false,
     planTier: 'unknown',
@@ -260,7 +251,6 @@ export function runModelPlanLimitsTests() {
 
   // 9c. Unverified plan tier (e.g. Go tier with null limit)
   const unverifiedTierConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     isLimitVerified: false,
     planTier: 'go',
@@ -276,12 +266,7 @@ export function runModelPlanLimitsTests() {
   );
 
   // =========================================================================
-  // 10. Refreshed & Versioned Config
-  // =========================================================================
-  assert('Detector exposes active config version "2.1.0"', detector.getConfigVersion() === '2.1.0');
-
-  // =========================================================================
-  // 11. Current ChatGPT model families (pattern-matched slugs)
+  // 10. Current ChatGPT model families (pattern-matched slugs)
   // =========================================================================
   const instantPlus = detector.resolveModel('gpt-5-6-sol', 'plus');
   assert('Unlisted gpt-5.x slug resolves to Instant family (Plus 54K)',
@@ -305,45 +290,6 @@ export function runModelPlanLimitsTests() {
   assert('gpt-4.1 no longer substring-matches legacy GPT-4 (8K)', detector.resolveModel('gpt-4.1', 'plus').id === 'chatgpt-instant');
   assert('Substring match prefers longest key (gpt-4o-mini-2024 -> gpt-4o-mini)',
     detector.resolveModel('gpt-4o-mini-2024-07-18', 'plus').id === 'gpt-4o-mini');
-  assert('Detector exposes last updated date', Boolean(detector.getLastUpdated()));
-
-  // Test refreshing with updated config
-  const customConfig = {
-    version: '2.1.0',
-    lastUpdated: '2026-09-25',
-    models: {
-      'gpt-next': {
-        displayName: 'GPT-Next',
-        encoding: 'o200k_base',
-        apiContextLimit: 500000,
-        productLimits: {
-          pro: {
-            contextWindow: 500000,
-            status: 'VERIFIED',
-            source: 'Future OpenAI release notes'
-          }
-        }
-      }
-    },
-    plans: {
-      pro: { displayName: 'Pro', tier: 'pro' }
-    }
-  };
-
-  const freshDetector = new ModelDetector(modelLimitsDb);
-  const refreshResult = freshDetector.refreshConfig(customConfig);
-
-  assert('refreshConfig succeeds with valid new schema', refreshResult.success === true && refreshResult.version === '2.1.0');
-  assert('freshDetector resolves newly added model from refreshed config',
-    freshDetector.resolveModel('gpt-next', 'pro').contextWindow === 500000
-  );
-
-  // Test refreshing with invalid / corrupted config
-  const badRefreshResult = freshDetector.refreshConfig({ corrupted: true });
-  assert('refreshConfig rejects malformed config missing "models" and preserves existing data',
-    badRefreshResult.success === false &&
-    freshDetector.getConfigVersion() === '2.1.0'
-  );
 
   return { passed, failed };
 }

@@ -11,16 +11,40 @@
 import { Tokenizer } from '../engine/tokenizer.js';
 import { ContextCalculator } from '../engine/context-calculator.js';
 import { EvidenceMerger, EvidenceType } from '../engine/evidence-merger.js';
-import { analyzeContext } from '../engine/context-advisor.js';
 import { ContextWidget } from './overlay-ui.js';
 import { toWidgetState } from './widget-state.js';
 import { mergeLiveTurns } from './turn-merger.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { invalidateText, trustTextCache } from './providers.js';
+import { badgeSender, listenForToggle, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
 
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
 const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
 const API_BACKOFF_MS = 15000; // After a failed read, wait before trying again (Refresh skips this)
+
+/**
+ * Page turns newer than the saved copy (just sent, or a reply still being written), so they count at
+ * once instead of after the next saved-copy read (up to API_TTL_MS later).
+ * Counting turns only works when the page shows the whole chat (Claude). Gemini renders just the turns
+ * scrolled into view, so the page is also aligned on the last saved user message: everything after it,
+ * past the saved turns that follow it, is new. The larger of the two answers wins.
+ * @param {Array<{ role: string, text: string }>} savedMessages
+ * @param {Array<{ role: string, text: string }>} dom Page turns, in order
+ * @returns {Array<Object>}
+ */
+export function unsavedPageTurns(savedMessages, dom) {
+  const saved = savedMessages.filter(m => m.role !== 'tool');
+  const byCount = dom.length > saved.length ? dom.slice(saved.length) : [];
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  let lastUser = -1;
+  for (let i = saved.length - 1; i >= 0; i--) if (saved[i].role === 'user') { lastUser = i; break; }
+  if (lastUser === -1) return byCount;
+  const text = norm(saved[lastUser].text);
+  let onPage = -1;
+  for (let i = dom.length - 1; i >= 0; i--) if (dom[i].role === 'user' && norm(dom[i].text) === text) { onPage = i; break; }
+  const byText = onPage === -1 ? [] : dom.slice(onPage + 1 + (saved.length - 1 - lastUser));
+  return byText.length > byCount.length ? byText : byCount;
+}
 
 export class ProviderCoordinator {
   /** @param {Object} provider Adapter from content/providers.js */
@@ -49,6 +73,7 @@ export class ProviderCoordinator {
     this._apiInFlight = null;
     this._wasStreaming = false;
     this._sessionStartTokens = new Map();
+    this._sendBadge = badgeSender();
   }
 
   init() {
@@ -64,15 +89,7 @@ export class ProviderCoordinator {
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
     this._loadSiteTokenizer();
     this._listenForLimits();
-    if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
-      chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request?.type !== 'TOGGLE_OVERLAY') return false;
-        this.overlayUI.isVisible = !this.overlayUI.isVisible;
-        this.overlayUI.render();
-        sendResponse({ success: true, isVisible: this.overlayUI.isVisible });
-        return true;
-      });
-    }
+    listenForToggle(this.overlayUI);
   }
 
   /**
@@ -152,18 +169,12 @@ export class ProviderCoordinator {
   }
 
   _conversationRef(id) {
-    return id ? this.tokenizer.hashString(id).toString(16) : null;
+    return conversationRef(this.tokenizer, id);
   }
 
   getDiagnostics() {
     const currentRef = this._conversationRef(this.provider.conversationId(location.href));
-    const copiedAt = new Date().toISOString();
-    const d = this.latestState?.diagnostics;
-    if (!d) return { note: 'Nothing read yet in this tab', provider: this.provider.name, currentConversationRef: currentRef, copiedAt };
-    if (d.conversation.ref !== currentRef) {
-      return { note: 'The conversation on screen is still loading; data from the previous conversation is withheld', provider: this.provider.name, currentConversationRef: currentRef, loading: true, copiedAt };
-    }
-    return { ...d, copiedAt, stateAgeMs: Date.now() - this.latestState.timestamp };
+    return diagnosticsSnapshot(this.latestState, currentRef, { provider: this.provider.name });
   }
 
   /**
@@ -233,8 +244,7 @@ export class ProviderCoordinator {
         dataSource = 'authoritative';
         completenessSource = 'authoritative_api';
         // Turns on the page beyond the saved ones are live (just sent / still streaming)
-        const savedVisible = saved.messages.filter(m => m.role !== 'tool').length;
-        messages = mergeLiveTurns(saved.messages, dom.length > savedVisible ? dom.slice(savedVisible) : [], { conversationId, baseIsFinal: true });
+        messages = mergeLiveTurns(saved.messages, unsavedPageTurns(saved.messages, dom), { conversationId, baseIsFinal: true });
       } else {
         // Saved copy read fine but holds no turns yet (brand-new chat): the page has the whole chat.
         // Saved turns that normalize to nothing (format change) stay a fallback, flagged as partial.
@@ -326,28 +336,10 @@ export class ProviderCoordinator {
       if (api.error) state.observables.apiError = saved ? `Conversation API failed (${api.error}); using the last good copy` : `Conversation API failed (${api.error}); reading the page`;
       state.completeness.isLowerBound = !complete;
       state.completeness.hiddenContextMeasured = false;
-      const windowKnown = Boolean(state.model.contextWindow);
-      ev.limit = {
-        value: state.model.contextWindow,
-        status: windowKnown ? state.model.limitStatus : 'UNKNOWN',
-        source: windowKnown ? 'model_db' : 'unknown',
-        reference: windowKnown ? limit.source : null,
-        evidenceType: windowKnown ? EvidenceType.OBSERVED : EvidenceType.UNKNOWN
-      };
+      ev.limit = limitEvidence(state, limit.source);
       ev.tokens = { total: { value: state.tokens.totalMeasurable, source: 'tokenizer', evidenceType: EvidenceType.ESTIMATED, approximate: !exact || hidden.some(i => i.estimated) } };
 
-      if (!awaitingData && conversationId && !this._sessionStartTokens.has(conversationId)) this._sessionStartTokens.set(conversationId, state.tokens.totalMeasurable);
-      state.intelligence = analyzeContext({
-        percentage: state.utilization.percentage,
-        usedTokens: state.tokens.totalMeasurable,
-        contextLimit: state.model.contextWindow,
-        remainingTokens: state.tokens.remaining,
-        messages: state.tokens.contextMessages,
-        attachments,
-        isLowerBound: !complete,
-        hiddenTokens: state.tokens.hidden,
-        sessionStartTokens: conversationId ? (this._sessionStartTokens.get(conversationId) ?? null) : null
-      });
+      addIntelligence(state, { conversationId, awaitingData, attachments, isLowerBound: !complete, sessionStart: this._sessionStartTokens });
 
       // Structure only: no message text, no raw conversation id
       state.diagnostics = {
@@ -367,9 +359,6 @@ export class ProviderCoordinator {
         confidence: { level: state.confidence.level, percentage: state.confidence.percentage, highBlockers: state.confidence.highBlockers || [] },
         intelligence: { health: state.intelligence.health.level, advice: state.intelligence.advice.title }
       };
-      state.evidence = ev;
-      state.conflicts = reconciled.conflicts;
-
       this.latestState = state;
       this.overlayUI.update(toWidgetState(state, { provider: p.name }));
       this.syncState(state);
@@ -378,18 +367,8 @@ export class ProviderCoordinator {
     }
   }
 
-  /** Toolbar badge; at most one message per 250 ms (streaming updates the page many times a second). */
+  /** Toolbar badge (service worker); see badgeSender. */
   syncState(state) {
-    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-    // The badge is the only consumer: send just its two values, never conversation data
-    this._pendingSync = { percentage: state.utilization?.percentage ?? null, awaitingData: Boolean(state.observables?.awaitingData) };
-    if (this._syncTimer) return;
-    const send = () => {
-      if (!this._pendingSync) return;
-      chrome.runtime.sendMessage({ type: 'CONTEXT_UPDATED', payload: this._pendingSync }).catch(() => {});
-      this._pendingSync = null;
-    };
-    send();
-    this._syncTimer = setTimeout(() => { this._syncTimer = null; send(); }, 250);
+    this._sendBadge(state);
   }
 }

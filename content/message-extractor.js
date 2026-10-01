@@ -191,14 +191,6 @@ export class MessageExtractor {
     });
   }
 
-  /**
-   * Extracts messages using one selector strategy.
-   * @private
-   */
-  _extractWith(root, selector) {
-    return this._extractFrom(this._topTurns(root, selector));
-  }
-
   /** @private */
   _extractFrom(topTurns) {
     const messages = [];

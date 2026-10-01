@@ -16,7 +16,9 @@ const rootDir = path.resolve(__dirname, '..');
 console.log('[Validator] Running Manifest V3 & Extension Pre-flight Verification...\n');
 
 let errorCount = 0;
+let checkCount = 0;
 function assert(condition, message) {
+  checkCount++;
   if (!condition) {
     console.error(`❌ [FAIL] ${message}`);
     errorCount++;
@@ -58,16 +60,17 @@ for (const cs of manifest.content_scripts || []) {
 // 4. Permissions check
 assert(!manifest.permissions.includes('<all_urls>'), 'Permissions do not contain broad <all_urls>');
 assert(manifest.permissions.includes('storage'), 'Required "storage" permission declared');
+assert(manifest.permissions.includes('unlimitedStorage'), '"unlimitedStorage" declared (saved Capsules can exceed the 10 MB storage.local quota)');
+assert(manifest.permissions.every(p => ['storage', 'unlimitedStorage'].includes(p)), 'No permissions beyond storage + unlimitedStorage');
 const SUPPORTED_HOSTS = ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://claude.ai/*', 'https://gemini.google.com/*'];
 assert(JSON.stringify([...(manifest.host_permissions || [])].sort()) === JSON.stringify([...SUPPORTED_HOSTS].sort()), 'Host permissions scoped exactly to ChatGPT, Claude and Gemini');
 
-// 5. Config files check
+// 5. Config files check (inlined into content-script.js by the build)
 assert(fs.existsSync(path.join(rootDir, 'config', 'model-limits.json')), 'config/model-limits.json exists');
-assert(fs.existsSync(path.join(rootDir, 'config', 'selectors.json')), 'config/selectors.json exists');
 
 console.log('\n--- Verification Result ---');
 if (errorCount === 0) {
-  console.log('🎉 All 12 Extension Validation checks PASSED with 0 errors.\n');
+  console.log(`🎉 All ${checkCount} Extension Validation checks PASSED with 0 errors.\n`);
   process.exit(0);
 } else {
   console.error(`💥 Extension Validation FAILED with ${errorCount} error(s).\n`);

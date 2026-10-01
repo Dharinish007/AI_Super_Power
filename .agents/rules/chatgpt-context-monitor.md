@@ -9,7 +9,7 @@ Rule: `Official Chrome Documentation > Google Chrome Skill > Third-Party Guidanc
 ## Architecture & Code Boundaries
 - Strictly Manifest V3. No MV2 features or deprecated APIs.
 - Keep DOM extraction, context analysis, network research, service worker, and UI responsibilities cleanly separated.
-- Content scripts must never block the main thread; batch DOM mutations and use debouncing with `requestAnimationFrame`.
+- Content scripts must never block the main thread; batch DOM mutations and debounce with timers (`setTimeout`: `requestAnimationFrame` is paused in background tabs, which froze live counts).
 - Service workers are ephemeral; never store in-memory state in variables. Use `chrome.storage.local` / `chrome.storage.session`.
 - Async `runtime.onMessage` listeners must return `true;` synchronously to keep message channels open.
 
@@ -27,7 +27,7 @@ Every measurement must explicitly distinguish:
 
 ## Security & Privacy
 - Process all conversation data locally. Zero conversation text or hashes sent to external servers.
-- Use minimum required permissions (`storage`, specific `host_permissions` for `https://chatgpt.com/*` and `https://chat.openai.com/*`).
+- Use minimum required permissions (`storage`, specific `host_permissions` for `https://chatgpt.com/*`, `https://chat.openai.com/*`, `https://claude.ai/*` and `https://gemini.google.com/*`).
 
 ## Implementation Discipline
 - Inspect repository before writing major code.

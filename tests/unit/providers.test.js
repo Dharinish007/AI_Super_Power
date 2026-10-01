@@ -307,6 +307,32 @@ export async function runProvidersTests() {
       assert('Gemini: page mode "Pro" and saved model "3.6 Pro" agree (no conflict)', s.conflicts.length === 0 && s.confidence.level !== 'LOW');
       assert('Gemini: widget shows Gemini and the saved model', toWidgetState(s, { provider: 'Gemini' }).model === 'Gemini · 3.6 Pro');
 
+      // Long chat: the page renders only the turns in view (fewer than saved). A message just sent and its
+      // reply in progress count at once, without waiting for the next saved-copy read
+      {
+        const lazy = {
+          ...env,
+          apiCalls: 0,
+          api: [gTurn('r_1', 'First question', [reply('rc_1', 'First answer.')], 'rc_1', '3.6 Pro'),
+            gTurn('r_2', 'Second question', [reply('rc_2', 'Second answer.')], 'rc_2', '3.6 Pro'),
+            gTurn('r_3', 'Third question', [reply('rc_3', 'Third answer.')], 'rc_3', '3.6 Pro')],
+          dom: [
+            { id: 'gemini-dom-0-user', role: 'user', text: 'Third  question' }, // Page whitespace differs
+            { id: 'gemini-dom-1-assistant', role: 'assistant', text: 'Third answer.' },
+            { id: 'gemini-dom-2-user', role: 'user', text: 'A brand new question' },
+            { id: 'gemini-dom-3-assistant', role: 'assistant', text: 'A reply still being writ' }
+          ]
+        };
+        const g = harness(GeminiProvider, lazy);
+        const sl = await g.run();
+        const savedTokens = ['First question', 'First answer.', 'Second question', 'Second answer.', 'Third question', 'Third answer.'].reduce((n, t) => n + count(t), 0);
+        assert('Gemini lazy page: new turns count at once (no wait for the next saved read)',
+          sl.tokens.totalMeasurable === savedTokens + count('A brand new question') + count('A reply still being writ') + GeminiProvider.systemPromptEstimate('3.6 Pro').tokens &&
+          sl.observables.messagesCount === 8 && lazy.apiCalls === 1);
+        lazy.dom = lazy.dom.slice(0, 2); // Nothing new on the page: the saved copy alone, nothing doubled
+        assert('Gemini lazy page: turns already saved are not counted twice', (await g.run()).observables.messagesCount === 6);
+      }
+
       // Gemini's own tokenizer (Gemma 4) loaded: counts switch to it, exact, no approximate-tokenizer penalty
       {
         const g = harness(GeminiProvider, { ...env });

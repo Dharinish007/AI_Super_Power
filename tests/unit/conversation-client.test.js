@@ -126,9 +126,6 @@ export function runConversationClientTests() {
   client.cache.set('test-cache-id', { data: shortFixture, timestamp: Date.now() });
   assert('Retrieves cached conversation without re-fetching within TTL', client.cache.has('test-cache-id'));
 
-  client.clearCache();
-  assert('clearCache flushes cache and active state', client.cache.size === 0 && client.lastError === null);
-
   // 7. Comparison: DOM scraping count vs Authoritative API count
   // In DOM with virtualization, suppose only the 2 most recent turns were rendered
   const simulatedDomMessages = longNormalized.messages.slice(-2);

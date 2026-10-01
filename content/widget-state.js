@@ -38,17 +38,6 @@ export function alertLevel(pct) {
 }
 
 /**
- * Rough count of user+assistant exchanges that still fit, from this chat's own average size.
- * null when the window is unknown or too few turns exist to average.
- * @param {{ remainingTokens: number|null, turns: number, stats?: { user: number, assistant: number } }} vm
- */
-export function exchangesLeft(vm) {
-  if (vm.remainingTokens === null || vm.remainingTokens === undefined || !vm.stats || vm.turns < 4) return null;
-  const perExchange = ((vm.stats.user + vm.stats.assistant) / vm.turns) * 2;
-  return perExchange > 0 ? Math.floor(vm.remainingTokens / perExchange) : null;
-}
-
-/**
  * Running token total after each turn (what the chat has cost so far), thinned to at most `max`
  * points so a very long chat stays cheap to draw; the last point is always the true total.
  * @param {Array<{ tokens: number }>} messages
@@ -169,7 +158,7 @@ export function toWidgetState(s, opts = {}) {
         : 'Counted locally from the text visible on the page; the site may count a little differently.'
   } : {};
 
-  const isLowerBound =s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
+  const isLowerBound = s.completeness?.isLowerBound ?? (!authoritative && Boolean(s.completeness?.domIsPartial));
 
   const vm = {
     provider,
@@ -236,8 +225,9 @@ export function toWidgetState(s, opts = {}) {
           ? `Chat is longer than the window: the oldest ${dropped.count} turns are no longer seen by the model. Start a new chat to keep full context.`
           : null,
     diagnostics: s.diagnostics || null,
+    // Exchanges that still fit at the chat's current pace (context-advisor.js); null when unknown
+    exchangesLeft: s.intelligence?.growth?.exchangesLeft ?? null,
     ready: true
   };
-  vm.exchangesLeft = exchangesLeft(vm);
   return vm;
 }

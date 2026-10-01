@@ -59,7 +59,7 @@ export function runNetworkObserverTests() {
     assert(observer.networkAvailable === false, 'Observer initializes with networkAvailable=false');
     assert(observer.interceptionErrors === 0, 'Observer initializes with 0 interception errors');
 
-    dispatchMockBridgeMessage(observer, 'INTERCEPTOR_READY', { features: ['fetch', 'xhr', 'sse'] });
+    dispatchMockBridgeMessage(observer, 'INTERCEPTOR_READY', {});
     assert(observer.networkAvailable === true, 'INTERCEPTOR_READY handshake sets networkAvailable=true');
     assert(observer.getHealth().networkAvailable === true, 'getHealth() reports networkAvailable=true');
   }
@@ -90,7 +90,7 @@ export function runNetworkObserverTests() {
     assert(observer.getObservedModel()?.source === 'network', 'Stamps model provenance as source: network');
     assert(observer.getObservedModel()?.evidenceType === 'OBSERVED', 'Stamps model evidenceType as OBSERVED');
 
-    const pendingUser = observer.getPendingUserTurn();
+    const pendingUser = observer.pendingUserTurn;
     assert(pendingUser !== null, 'Retains pending user turn in-flight');
     assert(pendingUser.id === 'usr-msg-999', 'Pending user turn retains exact message ID');
     assert(pendingUser.role === 'user', 'Pending user turn is user role');
@@ -127,7 +127,7 @@ export function runNetworkObserverTests() {
       modelSlug: 'gpt-4o'
     });
 
-    let liveTurn = observer.getStreamingTurn();
+    let liveTurn = observer.activeStreamingTurn;
     assert(liveTurn !== null, 'Streaming assistant turn is populated');
     assert(liveTurn.id === 'asst-msg-001', 'Streaming assistant turn retains message ID');
     assert(liveTurn.isStreaming === true, 'Streaming assistant turn marked isStreaming=true');
@@ -144,19 +144,19 @@ export function runNetworkObserverTests() {
       status: 'in_progress',
       modelSlug: 'gpt-4o'
     });
-    assert(observer.getStreamingTurn().text === 'Hello! I am examining your context pipeline.', 'Streaming turn updates text smoothly');
+    assert(observer.activeStreamingTurn.text === 'Hello! I am examining your context pipeline.', 'Streaming turn updates text smoothly');
     assert(streamChunks.length === 2, 'Fires onStreamChunk callback on each update');
 
     // Stream completed
-    dispatchMockBridgeMessage(observer, 'STREAM_COMPLETED', {
+    dispatchMockBridgeMessage(observer, 'GENERATION_DONE', {
       streamId: 'stream-1',
       conversationId: 'conv-test-123',
       messageId: 'asst-msg-001',
       modelSlug: 'gpt-4o'
     });
 
-    assert(observer.getStreamingTurn().isStreaming === false, 'Stream complete sets isStreaming=false');
-    assert(observer.getStreamingTurn().status === 'finished_successfully', 'Stream complete sets status to finished');
+    assert(observer.activeStreamingTurn.isStreaming === false, 'Stream complete sets isStreaming=false');
+    assert(observer.activeStreamingTurn.status === 'finished_successfully', 'Stream complete sets status to finished');
     assert(observer.getHealth().activeStreamsCount === 0, 'Decrements active streams count to 0');
     assert(completedMeta !== null && completedMeta.conversationId === 'conv-test-123', 'Fires onStreamComplete callback');
   }
@@ -189,14 +189,14 @@ export function runNetworkObserverTests() {
       status: 'in_progress'
     });
 
-    assert(observer.getPendingUserTurn() !== null, 'Has pending user turn in conv-A');
-    assert(observer.getStreamingTurn() !== null, 'Has streaming assistant turn in conv-A');
+    assert(observer.pendingUserTurn !== null, 'Has pending user turn in conv-A');
+    assert(observer.activeStreamingTurn !== null, 'Has streaming assistant turn in conv-A');
 
     // Switch to conv-B
     observer.setActiveConversationId('conv-B');
     assert(observer.getActiveConversationId() === 'conv-B', 'Switches active conversation ID');
-    assert(observer.getPendingUserTurn() === null, 'Flushes in-flight user turn on conversation switch');
-    assert(observer.getStreamingTurn() === null, 'Flushes streaming turn on conversation switch');
+    assert(observer.pendingUserTurn === null, 'Flushes in-flight user turn on conversation switch');
+    assert(observer.activeStreamingTurn === null, 'Flushes streaming turn on conversation switch');
   }
 
   // 6. Multi-Source Deduplication Pipeline (Authoritative API + Network + DOM)
@@ -275,7 +275,7 @@ export function runNetworkObserverTests() {
     });
 
     assert(observer.getHealth().interceptionErrors === 1, 'Records interception error in health status');
-    assert(observer.getHealth().errorCount === 1, 'Error count correctly tracked');
+    assert(observer.getHealth().interceptionErrors === 1, 'Error count correctly tracked');
 
     dispatchMockBridgeMessage(observer, 'ENDPOINT_STATUS_ERROR', {
       endpoint: '/backend-api/conversation',
@@ -284,8 +284,8 @@ export function runNetworkObserverTests() {
     assert(observer.getHealth().interceptionErrors === 2, 'Records status error in health status');
 
     // Simulate complete network failure: verify observer getters don't throw
-    assert(observer.getStreamingTurn() === null, 'No active stream during error');
-    assert(observer.getPendingUserTurn() === null, 'No pending user turn during error');
+    assert(observer.activeStreamingTurn === null, 'No active stream during error');
+    assert(observer.pendingUserTurn === null, 'No pending user turn during error');
     assert(Array.isArray(observer.getObservedTools()), 'getObservedTools() returns valid array even on error');
   }
 
@@ -298,8 +298,7 @@ export function runNetworkObserverTests() {
       status: 200
     });
 
-    const health = observer.getHealth();
-    assert(health.unsupportedEndpoints.includes('/backend-api/canvas/save'), 'Tracks new/unsupported endpoint for health monitoring');
+    assert(observer.unsupportedEndpoints.has('/backend-api/canvas/save'), 'Tracks new/unsupported endpoint for health monitoring');
   }
 
   // 9. Security & Privacy Protection
@@ -321,7 +320,7 @@ export function runNetworkObserverTests() {
       }
     });
 
-    const pending = observer.getPendingUserTurn();
+    const pending = observer.pendingUserTurn;
     assert(pending.headers === undefined, 'Does not store or forward Authorization or Cookie headers');
     assert(JSON.stringify(observer.getHealth()).includes('eyJhbGciOi') === false, 'No auth tokens exist in health state');
     assert(JSON.stringify(pending).includes('__Secure-next-auth') === false, 'No session cookies exist in message state');
@@ -338,7 +337,7 @@ export function runNetworkObserverTests() {
       modelSlug: 'o1'
     });
 
-    const turn = observer.getStreamingTurn();
+    const turn = observer.activeStreamingTurn;
     assert(turn.source === 'network', 'Turn records source: network');
     assert(turn.evidenceType === 'OBSERVED', 'Turn records evidenceType: OBSERVED');
 

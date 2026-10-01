@@ -14,6 +14,8 @@
  * - Automatic cycle detection and graceful fallbacks.
  */
 
+import { CHATGPT_IMAGE_TOKENS } from './attachment-detector.js';
+
 export class ConversationClient {
   // Bearer token for same-origin /backend-api calls. Memory only: never stored, logged, or put in state.
   #accessToken = null;
@@ -23,7 +25,6 @@ export class ConversationClient {
     this.cache = new Map(); // conversationId -> { data, normalized, timestamp }
     this.cacheTtlMs = options.cacheTtlMs || 5000; // 5-second in-memory cache to prevent spamming
     this.activeFetches = new Map(); // conversationId -> Promise
-    this.lastError = null;
     this.failures = new Map(); // conversationId -> { result, timestamp }
     this.captured = new Map(); // conversationId -> last known-good payload (page's own request or our last success)
     this.fetchSeq = new Map(); // conversationId -> latest request number; older responses never overwrite newer
@@ -213,13 +214,11 @@ export class ConversationClient {
             errorMessage = 'Rate limited: too many conversation requests';
           }
 
-          this.lastError = { status, message: errorMessage, timestamp: now };
           return { success: false, error: errorMessage, status };
         }
 
         const rawData = await response.json();
         if (!rawData || !rawData.mapping) {
-          this.lastError = { status: 200, message: 'Malformed conversation payload: missing mapping tree', timestamp: now };
           return { success: false, error: 'Malformed conversation payload', status: 200 };
         }
 
@@ -232,7 +231,6 @@ export class ConversationClient {
           });
         }
 
-        this.lastError = null;
         return { success: true, data: rawData };
 
       } catch (err) {
@@ -240,8 +238,6 @@ export class ConversationClient {
 
         const isAbort = err.name === 'AbortError';
         const errorMessage = isAbort ? 'Request timed out after 8s' : (err.message || 'Network fetch failure');
-        this.lastError = { status: 0, message: errorMessage, timestamp: now };
-
         return { success: false, error: errorMessage, isNetworkError: true };
       }
     })();
@@ -386,11 +382,7 @@ export class ConversationClient {
         } else if (part.text) {
           normalizedParts.push({ type: 'text', text: part.text });
         } else {
-          normalizedParts.push({
-            type: part.content_type || part.type || 'unknown',
-            classification: 'UNKNOWN',
-            details: part
-          });
+          normalizedParts.push({ type: part.content_type || part.type || 'unknown', classification: 'UNKNOWN' });
         }
       }
     }
@@ -542,7 +534,7 @@ export class ConversationClient {
 
     for (const att of allAttachments) {
       if (att.type === 'image') {
-        attachmentEstimatedTokens += 300; // Calibrated vision tokens
+        attachmentEstimatedTokens += CHATGPT_IMAGE_TOKENS;
       } else {
         hasUnknownAttachments = true;
       }
@@ -618,12 +610,4 @@ export class ConversationClient {
     return this._memoriesPromise;
   }
 
-  /**
-   * Clears internal cache (e.g. on navigation or logout).
-   */
-  clearCache() {
-    this.cache.clear();
-    this.activeFetches.clear();
-    this.lastError = null;
-  }
 }

@@ -26,8 +26,8 @@ The extension operates across three isolated browser contexts coordinated via me
 
 ```text
 [ MAIN World: ChatGPT Web ]
-  │ window.fetch & XHR instrumentation (content/network-interceptor.js)
-  │ window.dispatchEvent(CustomEvent)
+  │ window.fetch / SSE observation (content/network-interceptor.js)
+  │ window.postMessage bridge
   ▼
 [ ISOLATED World: Content Script ] (content/content-script.js built via scripts/build.js)
   ├── Lifecycle & Event Routing (content/content-main.js)
@@ -38,17 +38,13 @@ The extension operates across three isolated browser contexts coordinated via me
   ├── Local Offline BPE Tokenizer (engine/tokenizer.js via js-tiktoken)
   ├── Context Calculator & Epistemic Classifier (engine/context-calculator.js, context-classifier.js)
   ├── Explainable Confidence Engine (engine/confidence-engine.js)
-  └── In-Page Shadow DOM HUD Overlay (content/overlay-ui.js)
+  ├── In-Page Shadow DOM widget (content/overlay-ui.js; Capsules / Skills in content/capsule.js)
+  └── Claude / Gemini: content/provider-coordinator.js + adapters in content/providers.js
   │
-  ├── chrome.storage.session.set({ latestContextState })
-  └── chrome.runtime.sendMessage({ type: 'CONTEXT_UPDATED' })
+  └── chrome.runtime.sendMessage({ type: 'CONTEXT_UPDATED', payload: { percentage, awaitingData } })
   ▼
 [ BACKGROUND Service Worker ] (background/service-worker.js)
-  └── Updates extension toolbar badge (text & color) based on utilization
-  ▲
-  └── Queries state for Action Popup
-[ ACTION POPUP Dashboard ] (popup/popup.html, popup.js, popup.css)
-  └── Analytics breakdown, Evidence & Confidence cards, Lower-Bound indicator
+  └── Updates the toolbar badge (text & color); a toolbar icon click shows / hides the widget (no popup)
 ```
 
 ### Build Pipeline Invariant
@@ -78,7 +74,7 @@ The extension operates across three isolated browser contexts coordinated via me
    * Source disagreements must be recorded in `conflicts` (`{ field, winning, discarded, reason }`) rather than silently dropped.
 5. **Local-First Privacy**:
    * 100% offline tokenization. Zero conversation text or user data leaves the browser.
-   * Host permissions strictly scoped to `https://chatgpt.com/*` and `https://chat.openai.com/*`.
+   * Host permissions strictly scoped to `https://chatgpt.com/*`, `https://chat.openai.com/*`, `https://claude.ai/*` and `https://gemini.google.com/*`.
 
 ---
 
@@ -100,9 +96,9 @@ The extension operates across three isolated browser contexts coordinated via me
 * **Automatic Detection**:
   * **Model Resolution**: Reconciles authoritative API slug $\rightarrow$ network payload $\rightarrow$ DOM header switcher button $\rightarrow$ `config/model-limits.json`. Fallback is `unknown` (with `null` context window), never an arbitrary hardcoded 128K.
   * **Tools & MCP**: Automatically captures both network tool calls (`web_search`, python code interpreter) and DOM tool execution chips.
-  * **Streaming**: Debounced via `requestAnimationFrame` to prevent UI thrashing during assistant generation.
+  * **Streaming**: Debounced with timers (not `requestAnimationFrame`, which is paused in background tabs) to prevent UI thrashing during assistant generation.
 * **Manual Interaction**:
-  * Popup "⟳ Rescan" button and HUD collapse/expand triggers refresh view from cached session state without clearing in-flight streaming turn buffers.
+  * The widget's Refresh button re-reads the conversation now (bypassing the short cache and failure back-off) without clearing in-flight streaming turns.
 
 ---
 
@@ -127,7 +123,7 @@ The extension operates across three isolated browser contexts coordinated via me
   * If `authoritativeTurnCount > renderedTurnCount`: flags `domIsPartial = true`, records `virtualizationGap`.
 * **API Offline / DOM Fallback**:
   * If existing conversation API is unreachable: marks `domIsPartial = true`, sets `completenessSource = 'dom_partial'`.
-  * Flags context as **Lower Bound** (`serverContextCompleteness.isLowerBound = true`), triggering warning banners in HUD and popup, and applying virtualization confidence penalties.
+  * Flags context as **Lower Bound** (`completeness.isLowerBound = true`), triggering the widget's warning line and the partial-conversation confidence penalty.
 
 ---
 
@@ -139,9 +135,9 @@ When investigating issues, observe the **Iron Law**: find and verify the root ca
    * Content Script / Overlay: In-page Chrome DevTools Console.
    * Network Interceptor: Page Console with prefix `[ChatGPT Network Interceptor]`.
    * Service Worker: `chrome://extensions` → "Inspect views: service worker".
-   * Action Popup: Right-click popup icon → "Inspect".
+   * Widget: its **Copy diagnostics** button copies a structure-only snapshot (no message text).
 2. **Trace the Real Execution Flow**:
-   $$\text{Network/DOM Event} \rightarrow \text{Extractor/Interceptor} \rightarrow \text{EvidenceMerger} \rightarrow \text{ContextCalculator} \rightarrow \text{OverlayUI/Popup}$$
+   $$\text{Network/DOM Event} \rightarrow \text{Extractor/Interceptor} \rightarrow \text{EvidenceMerger} \rightarrow \text{ContextCalculator} \rightarrow \text{OverlayUI}$$
    * Validate real runtime payloads against expected shapes rather than guessing.
 3. **Avoid Heuristic Hacks**:
    * Never modify `engine/` calculation math to fix an upstream extraction or timing issue.
@@ -151,26 +147,23 @@ When investigating issues, observe the **Iron Law**: find and verify the root ca
 
 ## 9. Testing & Regression Verification
 
-Regression prevention is strictly enforced across 7 test suites:
+Regression prevention is strictly enforced across the suites listed in `tests/run-tests.js`:
 
 1. **Test Architecture**:
-   * Pure Node.js test runner via `node test/run-tests.js`.
+   * Pure Node.js test runner: `npm test` (`tests/run-tests.js`).
    * Fast, isolated execution without external testing framework bloat.
    * Node-based DOM mocks for `document`, `MutationObserver`, and `CustomEvent`.
    * In-memory mocks for `chrome.runtime`, `chrome.storage.local`, and `chrome.storage.session`.
-2. **Core Test Suites**:
-   * `test/test-tokenizer.js`: BPE tokenization, caching, chat markup overhead, edge cases.
-   * `test/test-model-detector.js`: Model slug matching, context window lookup, unknown fallback.
-   * `test/test-context-calculator.js`: Token aggregation, utilization percentages, epistemic classifications.
-   * `test/test-conversation-client.js`: Tree-branch traversal, message mapping, node parsing, attachment references.
-   * `test/test-network-intelligence.js`: MAIN-world event handling, streaming delta assembly, token aggregation.
-   * `test/test-context-completeness.js`: Virtualization gap detection, DOM partial detection, lower-bound indicators.
-   * `test/test-evidence-confidence.js`: 4-tier evidence tagging (`EXACT`, `OBSERVED`, `ESTIMATED`, `UNKNOWN`), source priority resolution, explainable confidence calculation, conflict logging.
+2. **Core Test Suites** (`tests/unit/*.test.js`, `tests/dom/extractor.test.js`): tokenizer (exact against js-tiktoken), Gemma tokenizer,
+   model / plan limits, context engine, conversation client, network observer + interceptor, completeness, evidence & confidence,
+   providers (Claude, Gemini), widget state, capsules, reliability, performance equivalence, and bundle integrity (the committed
+   `content/content-script.js` must equal a fresh build).
+   * Real browser: `node scripts/benchmark.js` runs the built bundle in headless Chrome against a mock ChatGPT page.
 3. **Regression Protocol**:
-   * Run `npm test` after any change (baseline: 232+ tests passing).
+   * Run `npm test` after any change (baseline: 780+ tests passing).
    * Verify both the reported failure case and existing baseline workflows.
    * Always write a targeted test case reproducing the issue before implementing a fix.
-   * Run `npm run validate` to enforce all 12 Manifest V3 rules.
+   * Run `npm run validate` (Manifest V3 pre-flight checks) and `npm run lint`.
 
 ---
 
@@ -210,8 +203,8 @@ A task or bug fix is complete only when all the following conditions are met:
 
 1. **Code Quality**: Clean, modular Manifest V3 code adhering to security, privacy, and architectural boundaries.
 2. **Bundle Rebuilt**: `npm run build` executes cleanly and updates `content/content-script.js`.
-3. **Unit & Integration Tests**: `npm test` passes 100% of test suites (232+ tests, 0 failures).
-4. **Manifest V3 Pre-Flight Check**: `npm run validate` passes all 12 extension validation rules.
+3. **Unit & Integration Tests**: `npm test` passes 100% of test suites (780+ tests, 0 failures); `npm run lint` is clean.
+4. **Manifest V3 Pre-Flight Check**: `npm run validate` passes every check.
 5. **Release Packaging**: `npm run pack` verifies bundle contents.
 6. **Adversarial Review**: Code has been reviewed against regressions, edge cases, and unexpected side effects.
 7. **Proof Provided**: Test run evidence and exact results are documented in the final report.

@@ -5,7 +5,7 @@
  * message parts extraction, special token safety, caching, and edge cases.
  */
 
-import { Tokenizer, BpeCounter, SUPPORTED_ENCODINGS } from '../../engine/tokenizer.js';
+import { Tokenizer, BpeCounter, BUNDLED_ENCODING } from '../../engine/tokenizer.js';
 import o200k_base from 'js-tiktoken/ranks/o200k_base';
 
 export function runTokenizerTests() {
@@ -96,13 +96,6 @@ export function runTokenizerTests() {
   const c1Modified = tokenizer.countMessageTokens(msg1Id, msg1Text + ' Please explain in km/h.', 'gpt-4o');
   assert('Modified text invalidates cache and returns higher count', c1Modified > c1);
 
-  // 9. Model-aware encoding resolution
-  assert('Resolves GPT-4o to o200k_base', tokenizer.getEncodingForModel('gpt-4o') === SUPPORTED_ENCODINGS.O200K_BASE);
-  assert('Resolves o1 to o200k_base', tokenizer.getEncodingForModel('o1') === SUPPORTED_ENCODINGS.O200K_BASE);
-  assert('Resolves o3-mini to o200k_base', tokenizer.getEncodingForModel('o3-mini') === SUPPORTED_ENCODINGS.O200K_BASE);
-  assert('Resolves GPT-4 to cl100k_base', tokenizer.getEncodingForModel('gpt-4') === SUPPORTED_ENCODINGS.CL100K_BASE);
-  assert('Resolves GPT-3.5 Turbo to cl100k_base', tokenizer.getEncodingForModel('gpt-3.5-turbo') === SUPPORTED_ENCODINGS.CL100K_BASE);
-  assert('Falls back to default o200k_base for unknown model', tokenizer.getEncodingForModel('some-new-model') === SUPPORTED_ENCODINGS.O200K_BASE);
 
   // Contraction difference across encodings
   const contraction = "It's we'll they'd shouldn't couldn't won't I'm you're";
@@ -112,10 +105,11 @@ export function runTokenizerTests() {
   assert('cl100k_base request counts contractions with o200k_base', contCl === contO2);
 
   // Exactness: only o200k ranks are bundled, so models on another tokenizer are approximate
-  assert('o200k models are counted exactly', tokenizer.isExact('gpt-4o') && tokenizer.isExact('o200k_base') && tokenizer.isExact('gpt-5.2-thinking'));
+  // The model's encoding comes from config/model-limits.json (`encoding` per model)
+  assert('o200k models are counted exactly', tokenizer.isExact('o200k_base'));
   assert('Missing encoding defaults to exact o200k', tokenizer.isExact(undefined) && tokenizer.isExact(null));
-  assert('Retired cl100k models (GPT-4, GPT-3.5) are approximate', !tokenizer.isExact('gpt-4') && !tokenizer.isExact('gpt-3.5-turbo') && !tokenizer.isExact('cl100k_base'));
-  assert('Counting always uses the bundled o200k_base table', tokenizer.resolveEncoding('gpt-4') === SUPPORTED_ENCODINGS.O200K_BASE);
+  assert('Retired cl100k models (GPT-4, GPT-3.5) are approximate', !tokenizer.isExact('cl100k_base'));
+  assert('Counting always uses the bundled o200k_base table', tokenizer.resolveEncoding('cl100k_base') === BUNDLED_ENCODING);
 
   // 10. Special tokens safety (never crash on raw prompt tokens)
   const specialTokenText = 'This is an end-of-text marker: <|endoftext|> and im_start: <|im_start|>';

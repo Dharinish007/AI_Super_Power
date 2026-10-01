@@ -9,7 +9,7 @@
  *   stream  - 6 s of a streamed reply (network chunks + DOM growth): update latency, blocking time
  *   idle    - 12 s with a small periodic page change: API re-downloads of an unchanged conversation
  *
- * Usage: node scripts/benchmark.js [turns]
+ * Usage: node scripts/benchmark.js [turns]   (CHROME_PATH=... to use another Chrome; BENCH_BUNDLE=... for another build)
  */
 
 import { spawn } from 'child_process';
@@ -20,7 +20,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const TURNS = Number(process.argv[2]) || 150;
 const CONV = 'bbbbbbbb-1111-4222-8333-444444444444';
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
@@ -130,9 +130,15 @@ async function main() {
       window.__longTasks = [];
       new PerformanceObserver(l => { for (const e of l.getEntries()) window.__longTasks.push({ start: e.startTime, dur: e.duration }); }).observe({ type: 'longtask', buffered: false });
       window.chrome = { runtime: {
-        sendMessage: (m) => { if (m?.type === 'CONTEXT_UPDATED') window.__updates.push({ t: performance.now(), used: m.payload.tokens?.totalMeasurable, ready: !m.payload.observables?.awaitingData, perf: m.payload.diagnostics?.performance || null }); return Promise.resolve(); },
+        sendMessage: (m) => { if (m?.type === 'CONTEXT_UPDATED') window.__updates.push({ t: performance.now(), pct: m.payload.percentage, ready: !m.payload.awaitingData }); return Promise.resolve(); },
         onMessage: { addListener() {} }, getManifest: () => ({ version: 'bench' })
-      }, storage: { session: { set: async () => {} } } };
+      } };
+      // Exact token count the widget shows (the pill's accessible label), e.g. "Context usage 12,345 tokens, ..."
+      window.__shownTokens = () => {
+        const label = document.getElementById('chatgpt-context-monitor-host')?.shadowRoot?.querySelector('.pill')?.getAttribute('aria-label') || '';
+        const m = label.match(/([0-9,]+) tokens/);
+        return m ? Number(m[1].replace(/,/g, '')) : null;
+      };
       window.__t0 = performance.now();
       true
     `);
@@ -144,8 +150,8 @@ async function main() {
     // ---- load
     await delay(6000);
     results.load = await cdp.eval(`(() => {
-      const first = window.__updates.find(u => u.ready && u.used > 0);
-      return { firstDataMs: first ? Math.round(first.t - window.__t0) : null, usedTokens: first?.used ?? null, firstPassPerf: first?.perf?.timings ? Object.fromEntries(Object.entries(first.perf.timings).map(([k, v]) => [k, v.max])) : null,
+      const first = window.__updates.find(u => u.ready && u.pct !== null);
+      return { firstDataMs: first ? Math.round(first.t - window.__t0) : null, percentage: first?.pct ?? null, usedTokens: window.__shownTokens(),
         blockingMs: Math.round(${blocking('window.__t0', 'window.__t0 + 6000')}),
         updates: window.__updates.length };
     })()`);
@@ -178,19 +184,19 @@ async function main() {
         md.textContent = text;
         const sent = performance.now(); const len = text.length;
         post('STREAM_CHUNK', { conversationId: '${CONV}', messageId: ID, role: 'assistant', text, status: 'in_progress', streamKey: 'k1' });
-        // latency: until the widget's token text changes after this chunk (what the user sees)
+        // latency: until the token count the widget shows changes after this chunk (what the user sees)
         const shown = await new Promise(r => {
-          const el = document.getElementById('chatgpt-context-monitor-host').shadowRoot.querySelector('.tokens');
-          const before = el.textContent;
-          const mo = new MutationObserver(() => { if (el.textContent !== before) { mo.disconnect(); r(performance.now()); } });
-          mo.observe(el, { childList: true, characterData: true, subtree: true });
+          const el = document.getElementById('chatgpt-context-monitor-host').shadowRoot.querySelector('.pill');
+          const before = el.getAttribute('aria-label');
+          const mo = new MutationObserver(() => { if (el.getAttribute('aria-label') !== before) { mo.disconnect(); r(performance.now()); } });
+          mo.observe(el, { attributes: true, attributeFilter: ['aria-label'] });
           setTimeout(() => { mo.disconnect(); r(null); }, 1500);
         });
         if (shown !== null) lat.push(shown - sent);
       }
       const end = performance.now();
       lat.sort((a, b) => a - b);
-      return { chunks: 60, updates: window.__updates.length - n0,
+      return { chunks: 60, updates: window.__updates.length - n0, usedTokensAfter: window.__shownTokens(),
         updateLatencyMs: { median: Math.round(lat[Math.floor(lat.length / 2)] || -1), p95: Math.round(lat[Math.floor(lat.length * 0.95)] || -1), samples: lat.length },
         blockingMs: Math.round(${blocking('start', 'end')}) };
     })()`);
@@ -206,7 +212,6 @@ async function main() {
     })()`);
     results.idle = { ...idle, apiDownloads: hits.conversation - before.conversation };
 
-    results.selfReported = await cdp.eval(`window.__updates.at(-1)?.perf || 'not instrumented'`);
     console.log(JSON.stringify({ turns: TURNS, textKB: Math.round(turns.reduce((s, t) => s + t.text.length, 0) / 1024), ...results }, null, 2));
   } finally {
     chrome.kill();

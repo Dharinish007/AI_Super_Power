@@ -1,22 +1,27 @@
 /**
  * ChatGPT Context Monitor - Tool Detector
- * 
+ *
  * Observes client-side indicators of Web Search, Python / Advanced Data Analysis,
  * Memory updates, and Connected Apps / MCP invocations.
- * 
+ *
  * In strict adherence to project accuracy rules:
  * Tool executions are classified as OBSERVED, while their underlying context
  * token impact (retrieved search snippets, memory vectors, tool schemas)
  * remains classified as UNKNOWN.
  */
 
-// One selector group per tool type (same selectors as before, now read in a single page query)
-const TOOL_GROUPS = [
-  "button[aria-label*='Searched'], div[class*='search-pill'], [data-testid='web-search-citations']",
-  "div[data-testid='code-execution'], button[aria-label*='Ran Python'], button[aria-label*='Finished analyzing']",
-  "div[data-testid='memory-updated'], button[aria-label*='Memory updated'], button[aria-label*='Memory accessed']",
-  "[data-testid='canvas-container'], button[aria-label*='Open canvas']",
-  "[data-testid='mcp-tool-pill'], [data-testid='connected-app-pill'], button[aria-label*='Used tool']"
+// One entry per tool type: selectors, and the label (with a count where the page shows one per call)
+const TOOLS = [
+  { type: 'web_search', selector: "button[aria-label*='Searched'], div[class*='search-pill'], [data-testid='web-search-citations']",
+    label: (n) => `Web Search (${n} action${n > 1 ? 's' : ''})` },
+  { type: 'code_interpreter', selector: "div[data-testid='code-execution'], button[aria-label*='Ran Python'], button[aria-label*='Finished analyzing']",
+    label: (n) => `Python Code Interpreter (${n} execution${n > 1 ? 's' : ''})` },
+  { type: 'memory', selector: "div[data-testid='memory-updated'], button[aria-label*='Memory updated'], button[aria-label*='Memory accessed']",
+    label: () => 'Memory Reference / Update' },
+  { type: 'canvas', selector: "[data-testid='canvas-container'], button[aria-label*='Open canvas']",
+    label: () => 'Canvas Editor / Artifact' },
+  { type: 'apps_mcp', selector: "[data-testid='mcp-tool-pill'], [data-testid='connected-app-pill'], button[aria-label*='Used tool']",
+    label: (n) => `Apps / MCP Tools (${n} call${n > 1 ? 's' : ''})` }
 ];
 
 /**
@@ -36,66 +41,14 @@ export function queryGroups(root, groups) {
 export class ToolDetector {
   /**
    * Scans DOM for tool indicators.
-   * @param {Document|HTMLElement} root 
+   * @param {Document|HTMLElement} root
    * @returns {{ observed: boolean, list: Array<{ type: string, label: string, status: string, tokenStatus: string }> }}
    */
   detect(root = document) {
-    const tools = [];
-    const [searchChips, codeExecEls, memoryEls, canvasEls, appEls] = queryGroups(root, TOOL_GROUPS);
-
-    // 1. Web Search
-    if (searchChips && searchChips.length > 0) {
-      tools.push({
-        type: 'web_search',
-        label: `Web Search (${searchChips.length} action${searchChips.length > 1 ? 's' : ''})`,
-        status: 'OBSERVED',
-        tokenStatus: 'UNKNOWN'
-      });
-    }
-
-    // 2. Python / Code Interpreter / Advanced Data Analysis
-    if (codeExecEls && codeExecEls.length > 0) {
-      tools.push({
-        type: 'code_interpreter',
-        label: `Python Code Interpreter (${codeExecEls.length} execution${codeExecEls.length > 1 ? 's' : ''})`,
-        status: 'OBSERVED',
-        tokenStatus: 'UNKNOWN'
-      });
-    }
-
-    // 3. Memory Updates or Access
-    if (memoryEls && memoryEls.length > 0) {
-      tools.push({
-        type: 'memory',
-        label: 'Memory Reference / Update',
-        status: 'OBSERVED',
-        tokenStatus: 'UNKNOWN'
-      });
-    }
-
-    // 4. Canvas / Artifacts
-    if (canvasEls && canvasEls.length > 0) {
-      tools.push({
-        type: 'canvas',
-        label: 'Canvas Editor / Artifact',
-        status: 'OBSERVED',
-        tokenStatus: 'UNKNOWN'
-      });
-    }
-
-    // 5. Apps / MCP / Custom GPT Tools
-    if (appEls && appEls.length > 0) {
-      tools.push({
-        type: 'apps_mcp',
-        label: `Apps / MCP Tools (${appEls.length} call${appEls.length > 1 ? 's' : ''})`,
-        status: 'OBSERVED',
-        tokenStatus: 'UNKNOWN'
-      });
-    }
-
-    return {
-      observed: tools.length > 0,
-      list: tools
-    };
+    const found = queryGroups(root, TOOLS.map(t => t.selector));
+    const list = TOOLS
+      .map((t, i) => (found[i].length ? { type: t.type, label: t.label(found[i].length), status: 'OBSERVED', tokenStatus: 'UNKNOWN' } : null))
+      .filter(Boolean);
+    return { observed: list.length > 0, list };
   }
 }

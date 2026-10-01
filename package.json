@@ -5,7 +5,7 @@
   "main": "background/service-worker.js",
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.js && node scripts/generate-icons.js",
+    "build": "node scripts/build.js",
     "test": "node tests/run-tests.js",
     "validate": "node scripts/validate-extension.js",
     "pack": "node scripts/package-extension.js",

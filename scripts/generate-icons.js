@@ -3,6 +3,7 @@
  * 
  * Generates valid, pixel-perfect PNG icons (16x16, 48x48, 128x128)
  * using Node.js built-in zlib module without any external dependencies.
+ * The icons are committed; run this only when the design changes: node scripts/generate-icons.js
  */
 
 import fs from 'fs';
@@ -14,28 +15,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const iconsDir = path.resolve(__dirname, '../assets/icons');
 
-// Precomputed CRC32 table
-const crcTable = new Uint32Array(256);
-for (let n = 0; n < 256; n++) {
-  let c = n;
-  for (let k = 0; k < 8; k++) {
-    if (c & 1) {
-      c = 0xedb88320 ^ (c >>> 1);
-    } else {
-      c = c >>> 1;
-    }
-  }
-  crcTable[n] = c;
-}
-
-function crc32(buf) {
-  let crc = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) {
-    crc = crcTable[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
 function createChunk(type, data) {
   const typeBuf = Buffer.from(type, 'ascii');
   const lenBuf = Buffer.alloc(4);
@@ -43,7 +22,7 @@ function createChunk(type, data) {
 
   const toCrc = Buffer.concat([typeBuf, data]);
   const crcBuf = Buffer.alloc(4);
-  crcBuf.writeUInt32BE(crc32(toCrc), 0);
+  crcBuf.writeUInt32BE(zlib.crc32(toCrc), 0);
 
   return Buffer.concat([lenBuf, typeBuf, data, crcBuf]);
 }

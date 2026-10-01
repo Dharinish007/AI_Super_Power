@@ -62,30 +62,6 @@ export function runEvidenceConfidenceTests() {
   );
 
   // =========================================================================
-  // Scenario 1: all fields EXACT (Authoritative usage tokens)
-  // =========================================================================
-  const allExactConf = ConfidenceEngine.evaluate({
-    isAuthoritative: true,
-    isModelKnown: true,
-    modelDisplayName: 'GPT-4o',
-    messageCount: 10
-  });
-
-  assert('Scenario 1 [all fields EXACT]: Level is HIGH and percentage is 100%',
-    allExactConf.level === ConfidenceLevel.HIGH &&
-    allExactConf.percentage === 100 &&
-    allExactConf.score === 1.0
-  );
-  assert('Scenario 1 [all fields EXACT]: Observable confidence is 100%',
-    allExactConf.observableConfidence.percentage === 100 &&
-    allExactConf.observableConfidence.level === ConfidenceLevel.HIGH
-  );
-  assert('Scenario 1 [all fields EXACT]: Server context status is EXACT_USAGE and isLowerBound is false',
-    allExactConf.serverContextCompleteness.status === 'EXACT_USAGE' &&
-    allExactConf.serverContextCompleteness.isLowerBound === false
-  );
-
-  // =========================================================================
   // Scenario 2: mixed EXACT/OBSERVED/ESTIMATED
   // =========================================================================
   const mixedReconcile = EvidenceMerger.reconcileState({
@@ -126,7 +102,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 3: unknown attachments
   // =========================================================================
   const unknownAttachConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 8,
     attachmentCount: 2,
@@ -144,7 +119,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 4: unknown tool overhead
   // =========================================================================
   const toolConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 8,
     attachmentCount: 0,
@@ -183,7 +157,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 5: incomplete DOM (Virtualization / Partial rendering)
   // =========================================================================
   const partialDomConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 4,
     isPartialConversation: true,
@@ -194,10 +167,6 @@ export function runEvidenceConfidenceTests() {
   assert('Scenario 5 [incomplete DOM]: Penalizes partial DOM significantly',
     partialDomConf.score <= 0.60
   );
-  assert('Scenario 5 [incomplete DOM]: Marks serverContextCompleteness as LOWER_BOUND',
-    partialDomConf.serverContextCompleteness.status === 'LOWER_BOUND' &&
-    partialDomConf.serverContextCompleteness.isLowerBound === true
-  );
   assert('Scenario 5 [incomplete DOM]: Factor explicitly mentions lower bound',
     partialDomConf.factors.some(f => f.type === 'negative' && f.text.includes('lower bound'))
   );
@@ -206,7 +175,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 6: API unavailable (DOM Fallback)
   // =========================================================================
   const apiUnavailableConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 6,
     isPartialConversation: true,
@@ -225,7 +193,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 7: Network unavailable
   // =========================================================================
   const netUnavailableConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 6,
     isNetworkActive: false,
@@ -265,7 +232,6 @@ export function runEvidenceConfidenceTests() {
   );
 
   const conflictConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 12,
     completenessSource: 'authoritative_api',
@@ -304,7 +270,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 10: complete authoritative conversation
   // =========================================================================
   const cleanAuthConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     modelDisplayName: 'GPT-4o',
     messageCount: 14,
@@ -327,7 +292,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 11: new chat
   // =========================================================================
   const newChatConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 0,
     completenessSource: 'dom_complete',
@@ -343,7 +307,6 @@ export function runEvidenceConfidenceTests() {
   // Scenario 12: fallback mode (pure DOM, no API, no Network)
   // =========================================================================
   const fallbackConf = ConfidenceEngine.evaluate({
-    isAuthoritative: false,
     isModelKnown: true,
     messageCount: 4,
     attachmentCount: 0,

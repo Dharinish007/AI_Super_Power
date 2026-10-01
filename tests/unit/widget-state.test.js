@@ -4,7 +4,7 @@
  */
 
 import { ClaudeProvider } from '../../content/providers.js';
-import { toWidgetState, formatModelName, alertLevel, exchangesLeft, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage } from '../../content/widget-state.js';
+import { toWidgetState, formatModelName, alertLevel, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage } from '../../content/widget-state.js';
 
 export function runWidgetStateTests() {
   console.log('--- Running Widget View-State Tests ---');
@@ -119,12 +119,9 @@ export function runWidgetStateTests() {
   assert('alertLevel: below 80% is quiet', alertLevel(79.9) === 0 && alertLevel(null) === 0);
   assert('alertLevel: 80 and 95 are the steps', alertLevel(80) === 80 && alertLevel(94.9) === 80 && alertLevel(95) === 95 && alertLevel(120) === 95);
 
-  // 17 turns, 3132 + 3928 visible tokens -> ~415 per turn, ~831 per exchange; 46940 left -> ~56
-  assert('exchangesLeft: remaining / average exchange', exchangesLeft(vm) === 56);
-  assert('exchangesLeft: too few turns to estimate', exchangesLeft({ ...vm, turns: 3 }) === null);
-  assert('exchangesLeft: unknown window', exchangesLeft(domOnly) === null);
-  assert('exchangesLeft: full window is 0', exchangesLeft({ ...vm, remainingTokens: 0 }) === 0);
-  assert('View state carries the estimate', vm.exchangesLeft === 56);
+  // Exchanges left come from the context advisor (current pace), never recomputed here
+  assert('View state carries the advisor estimate', toWidgetState({ ...engine, intelligence: { growth: { exchangesLeft: 56 } } }).exchangesLeft === 56);
+  assert('No advisor estimate: none shown', vm.exchangesLeft === null);
 
   assert('formatModelName: gpt-5-5-thinking', formatModelName('gpt-5-5-thinking') === 'GPT-5.5 Thinking');
   assert('formatModelName: gpt-4o-mini', formatModelName('gpt-4o-mini') === 'GPT-4o Mini');

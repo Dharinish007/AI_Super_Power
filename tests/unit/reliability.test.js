@@ -65,7 +65,6 @@ export function loadServiceWorker(activeTabId) {
       onClicked: { addListener(fn) { on.clicked = fn; } }
     },
     runtime: {
-      lastError: null,
       getManifest: () => ({ version: 'test' }),
       onInstalled: { addListener() {} },
       onMessage: { addListener(fn) { on.message = fn; } }
@@ -169,14 +168,13 @@ export async function runReliabilityTests() {
       bridge(obs, 'CONVERSATION_REQUEST', { conversationId: CONV_A, userMessage: { id: U1, text: 'first', parts: [{ type: 'text', text: 'first' }] } });
       bridge(obs, 'STREAM_CHUNK', { streamKey: 's1', conversationId: CONV_A, messageId: A1, role: 'assistant', text: 'reply one', status: 'finished_successfully' });
       bridge(obs, 'GENERATION_DONE', { streamKey: 's1', conversationId: CONV_A });
-      bridge(obs, 'STREAM_COMPLETED', { streamKey: 's1', conversationId: CONV_A });
       bridge(obs, 'CONVERSATION_REQUEST', { conversationId: CONV_A, userMessage: { id: U2, text: 'second', parts: [{ type: 'text', text: 'second' }] } });
       bridge(obs, 'STREAM_CHUNK', { streamKey: 's2', conversationId: CONV_A, messageId: A2, role: 'assistant', text: 'reply tw', status: 'in_progress' });
 
       const turns = obs.getLiveTurns();
       assert('Rapid consecutive messages: all 4 live turns kept in order', turns.map(t => t.id).join() === [U1, A1, U2, A2].join());
       assert('Live assistant streaming turn marked streaming', turns[3].isStreaming === true && turns[1].isStreaming === false);
-      assert('GENERATION_DONE + STREAM_COMPLETED for one stream refresh once', refreshes.length === 1);
+      assert('One completion event per stream: one refresh', refreshes.length === 1);
 
       bridge(obs, 'STREAM_CHUNK', { streamKey: 's9', conversationId: CONV_B, messageId: 'late', role: 'assistant', text: 'from B', status: 'in_progress' });
       assert('Chunk from another conversation is ignored', !obs.getLiveTurns().some(t => t.id === 'late'));
@@ -188,7 +186,7 @@ export async function runReliabilityTests() {
       bridge(obs, 'STREAM_CHUNK', { conversationId: CONV_A, messageId: A2, role: 'assistant', text: 'x', modelSlug: 'gpt-5-6', status: 'in_progress' });
       obs.setActiveConversationId(CONV_B);
       assert('Switching conversations clears turns, stream and model',
-        obs.getLiveTurns().length === 0 && obs.getStreamingTurn() === null && obs.getObservedModel() === null);
+        obs.getLiveTurns().length === 0 && obs.activeStreamingTurn === null && obs.getObservedModel() === null);
       assert('Plan (account-level) survives a conversation switch', (() => {
         bridge(obs, 'ACCOUNT_PLAN_OBSERVED', { planType: 'go' });
         obs.setActiveConversationId(CONV_A);

@@ -2,8 +2,8 @@
  * ChatGPT Context Monitor - MAIN-World Network Interceptor
  * 
  * Injected into the page's MAIN execution context at document_start.
- * Safely instruments window.fetch and XMLHttpRequest to passively observe
- * ChatGPT application traffic and stream generation without interfering with page operations.
+ * Safely instruments window.fetch to passively observe ChatGPT application traffic and
+ * stream generation without interfering with page operations.
  * 
  * Rules:
  * - Runs in window (MAIN world)
@@ -23,18 +23,13 @@
   window.__CHATGPT_CONTEXT_MONITOR_INTERCEPTOR_LOADED__ = true;
 
   const BRIDGE_SOURCE = 'CHATGPT_CONTEXT_MONITOR_NET';
-  const BRIDGE_VERSION = '1.0';
 
-  /**
-   * Dispatches a message to the isolated-world content script via postMessage.
-   * @param {string} eventType 
-   * @param {Object} payload 
-   */
   // Latest event per sticky type. This script runs at document_start but the isolated listener
   // only at document_idle, so early events (plan, first conversation load) would otherwise be lost.
-  const STICKY_EVENTS = new Set(['ACCOUNT_PLAN_OBSERVED', 'CONVERSATION_LOADED', 'MODELS_OBSERVED', 'LIMITS_OBSERVED']);
+  const STICKY_EVENTS = new Set(['ACCOUNT_PLAN_OBSERVED', 'CONVERSATION_LOADED', 'LIMITS_OBSERVED']);
   const stickyCache = new Map();
 
+  /** Posts an event to the isolated-world content script. */
   function dispatchNetworkEvent(eventType, payload = {}) {
     if (STICKY_EVENTS.has(eventType)) {
       stickyCache.set(eventType, payload);
@@ -42,7 +37,6 @@
     try {
       window.postMessage({
         source: BRIDGE_SOURCE,
-        version: BRIDGE_VERSION,
         eventType,
         payload,
         timestamp: Date.now()
@@ -63,6 +57,19 @@
       error: safeString(String(err?.message || err), 200),
       timestamp: Date.now()
     });
+  }
+
+  /**
+   * Parses a copy of a 200 response off the page's critical path. A body that no longer parses (or a
+   * handler that throws on a changed shape) is reported to diagnostics, never thrown at the page.
+   */
+  function readJson(response, endpoint, onData) {
+    if (response.status !== 200 || !response.body || response.bodyUsed) return;
+    try {
+      response.clone().text().then(text => onData(JSON.parse(text))).catch(err => reportParseError(endpoint, err));
+    } catch (err) {
+      reportParseError(endpoint, err);
+    }
   }
 
   /**
@@ -168,18 +175,20 @@
     let currentMessageId = null;
     let currentModelSlug = null;
     let accumulatedText = '';
-    let lastParts = [];
-    let detectedTools = [];
+    const detectedTools = [];
     let lastDispatchTime = 0;
     let lastDeltaPath = null; // Delta v1 omits "p"/"o" on consecutive appends to the same path
     let currentRole = 'assistant'; // Role of the message currently streaming (assistant, tool, user echo)
     let completed = false;
     const DISPATCH_THROTTLE_MS = 50;
 
-    // Sends the full accumulated text of the current message, bypassing the throttle.
+    // The current message's full text so far, at most every DISPATCH_THROTTLE_MS unless `force`.
     // System/internal messages are never reported as conversation turns.
-    const flushChunk = (status) => {
-      if (!accumulatedText || currentRole === 'system') return;
+    const sendChunk = (status, { force = false, allowEmpty = false } = {}) => {
+      const now = Date.now();
+      if (currentRole === 'system' || (!accumulatedText && !allowEmpty)) return;
+      if (!force && now - lastDispatchTime < DISPATCH_THROTTLE_MS) return;
+      lastDispatchTime = now;
       emit('STREAM_CHUNK', {
         streamId,
         conversationId: meta.conversationId,
@@ -189,9 +198,10 @@
         status,
         modelSlug: currentModelSlug,
         tools: detectedTools,
-        timestamp: Date.now()
+        timestamp: now
       });
     };
+    const flushChunk = (status) => sendChunk(status, { force: true });
 
     // Exactly one completion per stream, whether it ends with [DONE] or the connection just closes
     const completeStream = () => {
@@ -270,56 +280,23 @@
                   currentModelSlug = msg.metadata.model_slug;
                 }
 
-                // Check tool / search recipient
-                if (msg.recipient && msg.recipient !== 'all') {
-                  const toolName = safeString(msg.recipient, 64);
-                  if (!detectedTools.includes(toolName)) {
-                    detectedTools.push(toolName);
-                    emit('TOOL_INVOKED', {
-                      streamId,
-                      toolName,
-                      timestamp: Date.now()
-                    });
-                  }
+                // Tool / search recipient, and tool calls in the metadata
+                const tools = [
+                  msg.recipient && msg.recipient !== 'all' ? safeString(msg.recipient, 64) : null,
+                  msg.metadata?.action_data || msg.metadata?.tool_calls ? (msg.metadata.action_data?.type || 'tool_call') : null
+                ];
+                for (const tool of tools) {
+                  if (!tool || detectedTools.includes(tool)) continue;
+                  detectedTools.push(tool);
+                  emit('TOOL_INVOKED', { streamId, toolName: tool, timestamp: Date.now() });
                 }
 
-                // Check action data or tool calls in metadata
-                if (msg.metadata?.action_data || msg.metadata?.tool_calls) {
-                  const toolName = msg.metadata.action_data?.type || 'tool_call';
-                  if (!detectedTools.includes(toolName)) {
-                    detectedTools.push(toolName);
-                    emit('TOOL_INVOKED', {
-                      streamId,
-                      toolName,
-                      timestamp: Date.now()
-                    });
-                  }
-                }
-
-                // Extract text parts
                 if (msg.content && Array.isArray(msg.content.parts)) {
-                  lastParts = msg.content.parts;
-                  const textParts = lastParts.filter(p => typeof p === 'string');
-                  accumulatedText = textParts.join('\n');
+                  accumulatedText = msg.content.parts.filter(p => typeof p === 'string').join('\n');
                 }
 
-                // Throttled stream chunk dispatch
-                const now = Date.now();
-                if (authorRole !== 'system' && (now - lastDispatchTime >= DISPATCH_THROTTLE_MS || msg.status === 'finished_successfully')) {
-                  lastDispatchTime = now;
-                  emit('STREAM_CHUNK', {
-                    streamId,
-                    conversationId: meta.conversationId,
-                    messageId: currentMessageId,
-                    role: authorRole,
-                    text: accumulatedText,
-                    partsCount: lastParts.length,
-                    status: msg.status || 'in_progress',
-                    modelSlug: currentModelSlug,
-                    tools: detectedTools,
-                    timestamp: now
-                  });
-                }
+                // A message with no text yet is still reported: the turn exists
+                sendChunk(msg.status || 'in_progress', { force: msg.status === 'finished_successfully', allowEmpty: true });
               }
 
               // 3. Handle JSON Patch / Delta formats if present
@@ -337,23 +314,7 @@
                     appended = true;
                   }
                 }
-                if (appended && currentRole !== 'system') {
-                  const now = Date.now();
-                  if (now - lastDispatchTime >= DISPATCH_THROTTLE_MS) {
-                    lastDispatchTime = now;
-                    emit('STREAM_CHUNK', {
-                      streamId,
-                      conversationId: meta.conversationId,
-                      messageId: currentMessageId,
-                      role: currentRole,
-                      text: accumulatedText,
-                      status: 'in_progress',
-                      modelSlug: currentModelSlug,
-                      tools: detectedTools,
-                      timestamp: now
-                    });
-                  }
-                }
+                if (appended) sendChunk('in_progress');
               }
 
             } catch (_) {
@@ -363,26 +324,8 @@
         }
       }
 
-      // Flush remaining line in buffer
-      if (buffer.startsWith('data:')) {
-        const remainingData = buffer.slice(5).trim();
-        if (remainingData === '[DONE]') {
-          completeStream();
-        }
-      }
-
-      // Connection closed without [DONE]: still flush the final text and complete once
+      // [DONE] seen, or the connection closed without it: flush the final text and complete once
       completeStream();
-
-      emit('STREAM_COMPLETED', {
-        streamId,
-        conversationId: meta.conversationId,
-        messageId: currentMessageId,
-        textLength: accumulatedText.length,
-        modelSlug: currentModelSlug,
-        tools: detectedTools,
-        timestamp: Date.now()
-      });
 
     } catch (err) {
       flushChunk('aborted');
@@ -507,111 +450,53 @@
 
         // Handle conversation retrieval: GET /backend-api/conversation/{id}
         else if (CONVERSATION_GET_RE.test(endpoint) && method === 'GET') {
-          if (response.status === 200 && response.body && !response.bodyUsed) {
-            try {
-              const cloned = response.clone();
-              cloned.text().then(text => {
-                try {
-                  // Only the conversation on screen is used: the page also prefetches others (e.g. on
-                  // sidebar hover), and parsing + copying each multi-MB tree across worlds was wasted work
-                  const endpointId = (endpoint.match(/conversation\/([0-9a-f-]{8,})/i) || [])[1];
-                  if (endpointId && !window.location.pathname.includes(endpointId)) return;
-                  const data = JSON.parse(text);
-                  dispatchNetworkEvent('CONVERSATION_LOADED', {
-                    endpoint,
-                    conversationId: data.conversation_id || (endpoint.match(/conversation\/([0-9a-f-]{8,})/i) || [])[1] || null,
-                    title: safeString(data.title, 100),
-                    modelSlug: safeString(data.default_model_slug || data.model_slug, 50),
-                    mappingNodesCount: data.mapping ? Object.keys(data.mapping).length : 0,
-                    // Full tree the page already downloaded: authoritative data with no extra request or token
-                    data: data.mapping ? data : null,
-                    timestamp: Date.now()
-                  });
-                } catch (err) {
-                  reportParseError(endpoint, err);
-                }
-              }).catch(err => reportParseError(endpoint, err));
-            } catch (err) {
-              reportParseError(endpoint, err);
-            }
-          }
-        }
-
-        // Handle model list: GET /backend-api/models
-        else if (url.includes('/backend-api/models') && method === 'GET') {
-          if (response.status === 200 && response.body && !response.bodyUsed) {
-            try {
-              const cloned = response.clone();
-              cloned.text().then(text => {
-                try {
-                  const data = JSON.parse(text);
-                  const models = Array.isArray(data.models) ? data.models.map(m => m.slug || m.id).filter(Boolean) : [];
-                  dispatchNetworkEvent('MODELS_OBSERVED', {
-                    endpoint,
-                    models,
-                    timestamp: Date.now()
-                  });
-                } catch (err) {
-                  reportParseError(endpoint, err);
-                }
-              }).catch(err => reportParseError(endpoint, err));
-            } catch (err) {
-              reportParseError(endpoint, err);
-            }
+          const endpointId = (endpoint.match(/conversation\/([0-9a-f-]{8,})/i) || [])[1] || null;
+          // Only the conversation on screen is used: the page also prefetches others (e.g. on sidebar
+          // hover), and parsing + copying each multi-MB tree across worlds was wasted work
+          if (!endpointId || window.location.pathname.includes(endpointId)) {
+            readJson(response, endpoint, (data) => dispatchNetworkEvent('CONVERSATION_LOADED', {
+              endpoint,
+              conversationId: data.conversation_id || endpointId,
+              title: safeString(data.title, 100),
+              modelSlug: safeString(data.default_model_slug || data.model_slug, 50),
+              // Full tree the page already downloaded: authoritative data with no extra request or token
+              data: data.mapping ? data : null,
+              timestamp: Date.now()
+            }));
           }
         }
 
         // Handle account & plan observation: GET /backend-api/accounts/check or /backend-api/me
         else if ((endpoint.startsWith('/backend-api/accounts/check') || endpoint === '/backend-api/me') && method === 'GET') {
-          if (response.status === 200 && response.body && !response.bodyUsed) {
-            try {
-              const cloned = response.clone();
-              cloned.text().then(text => {
-                try {
-                  const data = JSON.parse(text);
-                  let planType = null;
-                  if (data.accounts) {
-                    const def = data.accounts.default || (Array.isArray(data.accounts) ? data.accounts[0] : Object.values(data.accounts)[0]);
-                    // accounts/check nests the tier under .account; "structure" is personal/workspace, not a plan
-                    planType = def?.account?.plan_type || def?.plan_type || data.plan_type;
-                  } else {
-                    planType = data.account_plan?.plan_type || data.plan_type;
-                  }
-                  if (planType) {
-                    dispatchNetworkEvent('ACCOUNT_PLAN_OBSERVED', {
-                      endpoint,
-                      planType: safeString(planType, 50),
-                      timestamp: Date.now()
-                    });
-                  }
-                } catch (err) {
-                  reportParseError(endpoint, err);
-                }
-              }).catch(err => reportParseError(endpoint, err));
-            } catch (err) {
-              reportParseError(endpoint, err);
+          readJson(response, endpoint, (data) => {
+            let planType;
+            if (data.accounts) {
+              const def = data.accounts.default || (Array.isArray(data.accounts) ? data.accounts[0] : Object.values(data.accounts)[0]);
+              // accounts/check nests the tier under .account; "structure" is personal/workspace, not a plan
+              planType = def?.account?.plan_type || def?.plan_type || data.plan_type;
+            } else {
+              planType = data.account_plan?.plan_type || data.plan_type;
             }
-          }
+            if (planType) dispatchNetworkEvent('ACCOUNT_PLAN_OBSERVED', { endpoint, planType: safeString(planType, 50), timestamp: Date.now() });
+          });
         }
 
         // Plan feature allowances: POST /backend-api/conversation/init (the page loads it itself).
         // Only the limit fields are forwarded: feature names, counts and reset times.
         else if (endpoint === '/backend-api/conversation/init') {
-          if (response.status === 200 && response.body && !response.bodyUsed) {
-            response.clone().json().then(data => {
-              const list = (v) => (Array.isArray(v) ? v : []);
-              dispatchNetworkEvent('LIMITS_OBSERVED', {
-                limitsProgress: list(data?.limits_progress).map(l => ({
-                  feature: safeString(l?.feature_name, 64), remaining: typeof l?.remaining === 'number' ? l.remaining : null, resetAfter: safeString(l?.reset_after, 64)
-                })),
-                blocked: list(data?.blocked_features).map(b => safeString(typeof b === 'string' ? b : (b?.feature_name || b?.name), 64)).filter(Boolean),
-                modelLimits: list(data?.model_limits).map(m => ({
-                  model: safeString(m?.model_slug || m?.slug || m?.model, 64), remaining: typeof m?.remaining === 'number' ? m.remaining : null, resetAfter: safeString(m?.reset_after || m?.resets_after, 64)
-                })),
-                timestamp: Date.now()
-              });
-            }).catch(() => {});
-          }
+          readJson(response, endpoint, (data) => {
+            const list = (v) => (Array.isArray(v) ? v : []);
+            dispatchNetworkEvent('LIMITS_OBSERVED', {
+              limitsProgress: list(data?.limits_progress).map(l => ({
+                feature: safeString(l?.feature_name, 64), remaining: typeof l?.remaining === 'number' ? l.remaining : null, resetAfter: safeString(l?.reset_after, 64)
+              })),
+              blocked: list(data?.blocked_features).map(b => safeString(typeof b === 'string' ? b : (b?.feature_name || b?.name), 64)).filter(Boolean),
+              modelLimits: list(data?.model_limits).map(m => ({
+                model: safeString(m?.model_slug || m?.slug || m?.model, 64), remaining: typeof m?.remaining === 'number' ? m.remaining : null, resetAfter: safeString(m?.reset_after || m?.resets_after, 64)
+              })),
+              timestamp: Date.now()
+            });
+          });
         }
 
         // Untracked / New backend endpoint detection
@@ -638,76 +523,17 @@
   }
 
   // ==========================================
-  // 2. Instrument XMLHttpRequest
+  // 2. PostMessage Bridge Handshake
   // ==========================================
-  const originalXHR = window.XMLHttpRequest;
-
-  if (typeof originalXHR === 'function' && originalXHR.prototype) {
-    const origOpen = originalXHR.prototype.open;
-    const origSend = originalXHR.prototype.send;
-
-    originalXHR.prototype.open = function(method, url, ...rest) {
-      try {
-        this.__cm_url = typeof url === 'string' ? url : '';
-        this.__cm_method = typeof method === 'string' ? method.toUpperCase() : 'GET';
-      } catch (_) {}
-      return origOpen.call(this, method, url, ...rest);
-    };
-
-    originalXHR.prototype.send = function(body) {
-      if (this.__cm_url && isRelevantBackendUrl(this.__cm_url)) {
-        const endpoint = extractEndpointPath(this.__cm_url);
-
-        try {
-          this.addEventListener('load', function() {
-            try {
-              if (this.status >= 400) {
-                dispatchNetworkEvent('ENDPOINT_STATUS_ERROR', {
-                  endpoint,
-                  status: this.status,
-                  timestamp: Date.now()
-                });
-              } else if (endpoint.includes('/backend-api/conversation')) {
-                dispatchNetworkEvent('XHR_CONVERSATION_OBSERVED', {
-                  endpoint,
-                  status: this.status,
-                  timestamp: Date.now()
-                });
-              }
-            } catch (_) {}
-          });
-
-          this.addEventListener('error', function() {
-            dispatchNetworkEvent('INTERCEPTION_ERROR', {
-              type: 'XHR_NETWORK_ERROR',
-              endpoint,
-              timestamp: Date.now()
-            });
-          });
-        } catch (_) {}
-      }
-
-      return origSend.call(this, body);
-    };
-  }
-
-  // ==========================================
-  // 3. PostMessage Bridge Handshake
-  // ==========================================
-  // Announce interceptor presence to isolated-world extension
-  dispatchNetworkEvent('INTERCEPTOR_READY', {
-    features: ['fetch', 'xhr', 'sse'],
-    timestamp: Date.now()
-  });
+  // Announce interceptor presence to isolated-world extension (ChatGPT's app talks to /backend-api
+  // with fetch only, so XMLHttpRequest is left alone)
+  dispatchNetworkEvent('INTERCEPTOR_READY', { timestamp: Date.now() });
 
   // Listen for ping requests from isolated world
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;
     if (event.data?.source === 'CHATGPT_CONTEXT_MONITOR_ISOLATED' && event.data?.type === 'PING') {
-      dispatchNetworkEvent('INTERCEPTOR_READY', {
-        features: ['fetch', 'xhr', 'sse'],
-        timestamp: Date.now()
-      });
+      dispatchNetworkEvent('INTERCEPTOR_READY', { timestamp: Date.now() });
       // Replay what happened before the listener existed
       for (const [eventType, payload] of stickyCache) {
         dispatchNetworkEvent(eventType, payload);

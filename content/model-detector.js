@@ -5,8 +5,7 @@
  * active model and resolves context-window limits based on the actual model + ChatGPT plan tier.
  * 
  * Features:
- * - Model + Plan-aware context limit lookup
- * - Versioned, refreshable limits configuration (avoids frozen hardcoded datasets)
+ * - Model + Plan-aware context limit lookup (config/model-limits.json)
  * - Strict distinction: ChatGPT product context limit vs OpenAI Developer API limit
  * - Safe fallback: unknown limit -> contextWindow = null, utilization = UNKNOWN
  * - Zero guessing / zero fabrication
@@ -19,21 +18,8 @@ export class ModelDetector {
    * @param {Object} modelLimitsDatabase Parsed content of config/model-limits.json
    */
   constructor(modelLimitsDatabase = {}) {
-    this._loadConfig(modelLimitsDatabase);
-  }
-
-  /**
-   * Internal configuration loader and validator.
-   * @private
-   */
-  _loadConfig(database = {}) {
-    this.version = database.version || '1.0.0';
-    this.lastUpdated = database.lastUpdated || null;
-    this.metadata = database.metadata || {};
-    this.models = database.models || {};
-    this.plans = database.plans || {};
-    this.productDisclaimers = database.productDisclaimers || {};
-    this.fallback = database.productDisclaimers?.unknownModelFallback || {
+    this.models = modelLimitsDatabase.models || {};
+    this.fallback = modelLimitsDatabase.productDisclaimers?.unknownModelFallback || {
       displayName: 'Unknown Model',
       encoding: 'o200k_base',
       apiContextLimit: null,
@@ -41,45 +27,6 @@ export class ModelDetector {
       maxOutput: null,
       source: 'Unrecognized model'
     };
-  }
-
-  /**
-   * Refreshes the active limits configuration dynamically.
-   * Validates schema and versioning to prevent corrupted overrides.
-   * 
-   * @param {Object} newDatabase 
-   * @returns {{ success: boolean, version?: string, error?: string }}
-   */
-  refreshConfig(newDatabase) {
-    if (!newDatabase || typeof newDatabase !== 'object') {
-      return { success: false, error: 'Config must be an object' };
-    }
-    if (!newDatabase.models || typeof newDatabase.models !== 'object') {
-      return { success: false, error: 'Config missing required "models" dictionary' };
-    }
-
-    this._loadConfig(newDatabase);
-    return {
-      success: true,
-      version: this.version,
-      lastUpdated: this.lastUpdated
-    };
-  }
-
-  /**
-   * Returns active dataset version.
-   * @returns {string}
-   */
-  getConfigVersion() {
-    return this.version;
-  }
-
-  /**
-   * Returns active dataset last updated date.
-   * @returns {string|null}
-   */
-  getLastUpdated() {
-    return this.lastUpdated;
   }
 
   /**
@@ -222,15 +169,12 @@ export class ModelDetector {
   }
 
   /**
-   * True when `slug` is `key` plus a date or word suffix: "gpt-4o-2024-08-06", "gpt-4o-latest",
-   * "gpt-4-turbo-preview". A leading version digit is rejected ("gpt-4-1-nano" is not "gpt-4").
-   * @param {string} slug
-   * @param {string} key
-   * @returns {boolean}
+   * Comparison identity for evidence merging: "gpt-5-6", "GPT-5.6" and "5.6 Instant" are the same
+   * model; "gpt-5-6-thinking" is not. Display values are left untouched.
+   * @param {string} value
+   * @returns {string}
    */
   static modelKey(value) {
-    // Comparison identity for evidence merging: "gpt-5-6", "GPT-5.6" and "5.6 Instant" are the same
-    // model; "gpt-5-6-thinking" is not. Display values are left untouched.
     return String(value || '').toLowerCase().trim()
       .replace(/^chatgpt[\s-]*/, '')
       .replace(/^gpt[\s-]*/, '')
@@ -238,6 +182,13 @@ export class ModelDetector {
       .replace(/-instant$/, '');
   }
 
+  /**
+   * True when `slug` is `key` plus a date or word suffix: "gpt-4o-2024-08-06", "gpt-4o-latest",
+   * "gpt-4-turbo-preview". A leading version digit is rejected ("gpt-4-1-nano" is not "gpt-4").
+   * @param {string} slug
+   * @param {string} key
+   * @returns {boolean}
+   */
   static isVariantOf(slug, key) {
     if (!slug.startsWith(key + '-')) return false;
     const suffix = slug.slice(key.length + 1);
@@ -332,8 +283,7 @@ export class ModelDetector {
       };
     }
 
-    // 4. Backward compatibility when no plan argument is passed:
-    // Retains underlying model API context window for callers without plan context
+    // 4. No plan given (standalone callers and tests): the model's API context window
     return {
       id: matchedId,
       displayName,
@@ -349,16 +299,5 @@ export class ModelDetector {
       lastVerified: spec.apiLastVerified || spec.lastVerified || null,
       recognized: true
     };
-  }
-
-  /**
-   * Runs complete detection from DOM root.
-   * @param {Document|HTMLElement} root 
-   * @param {string|null} [planString=null]
-   * @returns {Object}
-   */
-  detect(root = document, planString = null) {
-    const raw = this.detectRawModelString(root);
-    return this.resolveModel(raw, planString);
   }
 }
