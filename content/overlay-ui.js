@@ -18,10 +18,11 @@
  * Components build their DOM once; updates write only what changed, and page-derived strings are
  * only ever assigned as text, never HTML.
  *
- * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js).
+ * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js)
+ * | Skills (the same panel with kind 'skill': reusable instructions).
  */
 
-import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules } from './capsule.js';
+import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, CapsuleStore, buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, insertText, chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff, formatCost, exportCapsules, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert } from './capsule.js';
 import { formatModelName } from './widget-state.js';
 
 const STYLES = `
@@ -148,6 +149,7 @@ const STYLES = `
 
   /* Capsules */
   .caps { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .caps > * { flex-shrink: 0; } /* A long list scrolls; it never squeezes the buttons and cards */
   .caps .fine { margin-top: 0; }
   .btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .btn { display: inline-flex; align-items: center; justify-content: center; height: 26px; padding: 0 10px; border-radius: 7px;
@@ -371,13 +373,18 @@ function textButton(parent, label, onClick, cls = 'btn') {
  * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
  * a MutationObserver watches for the reply's END marker and opens it in the editor; Save stores it.
  * The saved list (one for all sites) has Insert / Copy / Edit / Delete.
+ * With `kind: 'skill'` the same panel is the Skills tab: reusable instructions written by the user
+ * (＋ New Skill, starter Skills on first open), no AI capture, no Update.
  * @param {HTMLElement} parent
- * @param {{ provider: string, findInput: () => Element|null, replySelector: string|null, storage: Object|null,
- *   toast: (text: string) => void, reveal: () => void }} ctx
+ * @param {{ kind?: 'capsule'|'skill', provider: string, findInput: () => Element|null, replySelector: string|null,
+ *   storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
  */
 function CapsulePanel(parent, ctx) {
+  const isSkill = ctx.kind === 'skill';
+  const noun = isSkill ? 'Skill' : 'Capsule';
+  const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
   const view = h('div', 'body caps hide', parent);
-  const store = ctx.storage ? new CapsuleStore(ctx.storage) : null;
+  const store = ctx.storage ? new CapsuleStore(ctx.storage, isSkill ? { key: SKILLS_KEY, noun } : {}) : null;
 
   // The site's limit is reached: the AI here cannot write the Capsule
   const limitCard = h('div', 'card warn hide', view);
@@ -399,6 +406,10 @@ function CapsulePanel(parent, ctx) {
   handoffBtn.dataset.tip = 'Copy this chat with the Capsule prompt; paste it into another AI that still has messages left';
   const hint = h('div', 'fine', view, 'Select part of the chat first to capture only that part.');
 
+  // Skills tab: written by the user
+  const newBtn = textButton(view, '＋ New Skill', () => openDraft({ source: 'You' }), 'btn primary');
+  const skillHint = h('div', 'fine', view, 'Insert adds to what is already in the chat box: insert a Capsule, then a Skill, and send them together.');
+
   const wait = h('div', 'card wait hide', view);
   wait.setAttribute('role', 'status');
   h('div', 't', wait, 'Waiting for the Capsule…');
@@ -407,29 +418,33 @@ function CapsulePanel(parent, ctx) {
 
   const draft = h('div', 'card hide', view);
   const titleIn = h('input', 'field', draft);
-  titleIn.placeholder = 'Title';
+  titleIn.placeholder = isSkill ? 'Skill name, e.g. Code reviewer' : 'Title';
   titleIn.maxLength = 80;
-  titleIn.setAttribute('aria-label', 'Capsule title');
+  titleIn.setAttribute('aria-label', `${noun} title`);
   const bodyIn = h('textarea', 'field', draft);
   bodyIn.spellcheck = false;
-  bodyIn.setAttribute('aria-label', 'Capsule text');
+  bodyIn.setAttribute('aria-label', `${noun} text`);
+  if (isSkill) bodyIn.placeholder = 'How the AI should answer, e.g. "Review my code like a senior developer. Bugs first, be short."';
   const draftBtns = h('div', 'btns', draft);
 
   const listHead = h('div', 'caps-h hide', view);
   const list = h('div', 'caps', view);
   list.style.padding = '0';
-  const empty = h('div', 'fine', view, 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
+  const empty = h('div', 'fine', view, isSkill
+    ? 'No Skills yet. A Skill is an instruction you reuse, like "Explain simply". Add one, then insert it into any AI.'
+    : 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
   const io = h('div', 'btns', view);
   const exportBtn = textButton(io, '📤 Export');
-  exportBtn.dataset.tip = 'Download all Capsules as a JSON file (backup, or move to another PC)';
+  exportBtn.dataset.tip = `Download all ${noun}s as a JSON file (backup, or move to another PC)`;
   const importBtn = textButton(io, '📥 Import');
-  importBtn.dataset.tip = 'Add Capsules from an exported file; newer copies replace older ones';
+  importBtn.dataset.tip = `Add ${noun}s from an exported file; newer copies replace older ones`;
   const fileIn = h('input', 'hide', view);
   fileIn.type = 'file';
   fileIn.accept = '.json,application/json';
-  fileIn.setAttribute('aria-label', 'Capsules file to import');
+  fileIn.setAttribute('aria-label', `${noun}s file to import`);
 
-  let items = []; // Saved Capsules, newest first
+  let items = []; // Saved Capsules (or Skills), newest first
+  let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
   let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
   const tokenCache = new Map(); // `${id}:${updatedAt}` -> estimated tokens
 
@@ -443,11 +458,14 @@ function CapsulePanel(parent, ctx) {
   const mode = (m) => {
     current = m;
     const idle = m === 'idle';
-    show(limitCard, idle && Boolean(limit));
-    show(handoffCard, idle && Boolean(handoff));
-    show(create, idle);
-    show(alt, idle);
-    show(hint, idle);
+    const capture = idle && !isSkill; // AI capture exists only for Capsules
+    show(limitCard, capture && Boolean(limit));
+    show(handoffCard, capture && Boolean(handoff));
+    show(create, capture);
+    show(alt, capture);
+    show(hint, capture);
+    show(newBtn, idle && isSkill);
+    show(skillHint, idle && isSkill);
     show(wait, m === 'waiting');
     show(draft, m === 'draft');
   };
@@ -517,7 +535,7 @@ function CapsulePanel(parent, ctx) {
   }
 
   const chat = () => readTranscript(document, ctx.userSelector, ctx.replySelector);
-  const copy = (capsule, done) => navigator.clipboard.writeText(formatForInsert(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
+  const copy = (capsule, done) => navigator.clipboard.writeText(fmt(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
 
   create.addEventListener('click', () => {
     const selection = takeSelection();
@@ -569,11 +587,11 @@ function CapsulePanel(parent, ctx) {
       await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value });
       if (editing?.fromHandoff) await clearHandoff(ctx.storage);
     } catch (e) {
-      return ctx.toast(e?.message === 'Capsule is empty' ? 'Capsule is empty' : 'Save failed');
+      return ctx.toast(e?.message === `${noun} is empty` ? e.message : 'Save failed');
     }
     editing = null;
     mode('idle');
-    ctx.toast('Capsule saved');
+    ctx.toast(`${noun} saved`);
     refresh();
   });
   textButton(draftBtns, 'Discard', () => { editing = null; mode('idle'); });
@@ -586,7 +604,7 @@ function CapsulePanel(parent, ctx) {
     const key = `${capsule.id}:${capsule.updatedAt}`;
     if (!tokenCache.has(key)) {
       let n = null;
-      try { n = ctx.countTokens ? ctx.countTokens(formatForInsert(capsule)) : null; } catch (_) {}
+      try { n = ctx.countTokens ? ctx.countTokens(fmt(capsule)) : null; } catch (_) {}
       tokenCache.set(key, n);
     }
     return tokenCache.get(key);
@@ -606,17 +624,19 @@ function CapsulePanel(parent, ctx) {
     const btns = h('div', 'btns', card);
     textButton(btns, 'Insert', () => {
       const input = ctx.findInput();
-      if (input && insertText(input, formatForInsert(capsule))) ctx.toast('Inserted: add your question and send');
+      if (input && insertText(input, fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : 'Inserted: add your question and send');
       else copy(capsule, 'Chat box not found: copied instead');
     });
     textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
     // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
-    const upd = textButton(btns, 'Update', () => {
-      if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
-      if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
-      promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
-    });
-    upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
+    if (!isSkill) {
+      const upd = textButton(btns, 'Update', () => {
+        if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
+        if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
+        promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
+      });
+      upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
+    }
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
       if (!del.dataset.armed) {
@@ -650,8 +670,12 @@ function CapsulePanel(parent, ctx) {
 
   async function refresh() {
     if (!store) return;
+    if (isSkill && !seeded) {
+      seeded = true;
+      try { await store.seed(STARTER_SKILLS); } catch (_) {}
+    }
     try {
-      handoff = await readHandoff(ctx.storage);
+      handoff = isSkill ? null : await readHandoff(ctx.storage);
     } catch (_) { handoff = null; }
     const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
     if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
@@ -671,14 +695,14 @@ function CapsulePanel(parent, ctx) {
 
   // Export: one JSON file with every Capsule (a download; no permission needed)
   exportBtn.addEventListener('click', () => {
-    const url = URL.createObjectURL(new Blob([exportCapsules(items)], { type: 'application/json' }));
+    const url = URL.createObjectURL(new Blob([exportCapsules(items, store.key)], { type: 'application/json' }));
     const a = h('a', null, view);
     a.href = url;
-    a.download = `capsules-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${store.key}-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    ctx.toast(`Exported ${items.length} Capsule${items.length === 1 ? '' : 's'}`);
+    ctx.toast(`Exported ${items.length} ${noun}${items.length === 1 ? '' : 's'}`);
   });
 
   // Import: merge a file from Export (newer copies win; invalid entries skipped)
@@ -692,7 +716,7 @@ function CapsulePanel(parent, ctx) {
       ctx.toast(`${r.added} added, ${r.updated} updated, ${r.skipped} skipped`);
       refresh();
     } catch (e) {
-      ctx.toast(e?.message === 'Not a Capsules file' ? 'Not a Capsules file' : 'Import failed');
+      ctx.toast(e?.message === `Not a ${noun}s file` ? e.message : 'Import failed');
     }
   });
 
@@ -757,10 +781,13 @@ export class ContextWidget {
     // A Capsule saved or deleted on another site / tab shows up here too
     try {
       chrome.storage?.onChanged?.addListener((changes, area) => {
-        if (area === 'local' && (changes[CAPSULES_KEY] || changes[CAPSULE_HANDOFF_KEY])) this.parts?.caps.refresh();
+        if (area !== 'local') return;
+        if (changes[CAPSULES_KEY] || changes[CAPSULE_HANDOFF_KEY]) this.parts?.caps.refresh();
+        if (changes[SKILLS_KEY]) this.parts?.skills.refresh();
       });
     } catch (_) {}
     this.parts.caps.refresh();
+    this.parts.skills.refresh();
     this._loadPrefs();
     this.render();
   }
@@ -797,6 +824,7 @@ export class ContextWidget {
     };
     const tabContext = tab('Context', 'context');
     const tabCaps = tab('Capsules', 'capsules');
+    const tabSkills = tab('Skills', 'skills');
     const themeBtn = iconButton(head, ICONS.auto, 'Theme: auto');
     const collapseBtn = iconButton(head, ICONS.collapse, 'Collapse');
     const closeBtn = iconButton(head, ICONS.close, 'Close (Alt+T to reopen)');
@@ -856,7 +884,7 @@ export class ContextWidget {
     const evidence = h('ul', 'evidence', diag.body);
     h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not.');
 
-    const caps = CapsulePanel(panel, {
+    const panelCtx = {
       provider,
       findInput: () => this.adapter.findInput(),
       replySelector: this.adapter.replySelector,
@@ -869,7 +897,9 @@ export class ContextWidget {
         this._setTab('capsules');
         if (!this.isExpanded) this._setExpanded(true);
       }
-    });
+    };
+    const caps = CapsulePanel(panel, panelCtx);
+    const skills = CapsulePanel(panel, { ...panelCtx, kind: 'skill' });
 
     const foot = h('div', 'foot', panel);
     const conf = h('div', 'conf', foot);
@@ -936,7 +966,7 @@ export class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, body, foot, caps, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
       sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
@@ -946,6 +976,7 @@ export class ContextWidget {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
     this.parts?.caps.setView(viewState);
+    this.parts?.skills.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
     if (!this.hostElement.isConnected) (document.body || document.documentElement).appendChild(this.hostElement);
     this.render();
@@ -961,12 +992,14 @@ export class ContextWidget {
     show(p.pill, !this.isExpanded);
     show(p.panel, this.isExpanded);
     setAttr(p.pill, 'aria-expanded', String(this.isExpanded));
-    const onCaps = this.tab === 'capsules';
-    show(p.body, !onCaps);
-    show(p.foot, !onCaps);
-    show(p.caps.view, onCaps);
-    setAttr(p.tabContext, 'aria-selected', String(!onCaps));
-    setAttr(p.tabCaps, 'aria-selected', String(onCaps));
+    const onContext = this.tab === 'context';
+    show(p.body, onContext);
+    show(p.foot, onContext);
+    show(p.caps.view, this.tab === 'capsules');
+    show(p.skills.view, this.tab === 'skills');
+    setAttr(p.tabContext, 'aria-selected', String(onContext));
+    setAttr(p.tabCaps, 'aria-selected', String(this.tab === 'capsules'));
+    setAttr(p.tabSkills, 'aria-selected', String(this.tab === 'skills'));
 
     const vm = this.latestState || { ready: false, usedTokens: 0, percentage: null, evidence: [], breakdown: [], hiddenItems: [], limits: [], confidenceLevel: 'LOW', confidence: 0, provider: this.adapter.provider, model: 'Detecting…' };
     const lvl = vm.ready === false ? 'LOW' : vm.confidenceLevel;
@@ -1071,9 +1104,10 @@ export class ContextWidget {
     if (open) this.parts.head.focus({ preventScroll: true });
   }
 
-  /** @param {'context'|'capsules'} key */
+  /** @param {'context'|'capsules'|'skills'} key */
   _setTab(key) {
     if (this.tab !== key && key === 'capsules') this.parts.caps.refresh();
+    if (this.tab !== key && key === 'skills') this.parts.skills.refresh();
     this.tab = key;
     this.render();
     this._savePrefs();
@@ -1237,7 +1271,7 @@ export class ContextWidget {
         if (!s || typeof s !== 'object') return;
         if (s.pos && ['left', 'right'].includes(s.pos.side) && Number.isFinite(s.pos.dx) && Number.isFinite(s.pos.y)) this.pos = s.pos;
         if (THEMES.includes(s.theme)) this.theme = s.theme;
-        if (s.tab === 'context' || s.tab === 'capsules') this.tab = s.tab;
+        if (['context', 'capsules', 'skills'].includes(s.tab)) this.tab = s.tab;
         this.isExpanded = Boolean(s.expanded);
         this.render();
       }).catch(() => {});
@@ -1255,6 +1289,7 @@ export class ContextWidget {
 
   unmount() {
     this.parts?.caps.stop();
+    this.parts?.skills.stop();
     this.hostElement?.remove();
     this.hostElement = null;
     this.shadowRoot = null;

@@ -5033,6 +5033,7 @@ function toWidgetState(s, opts = {}) {
  *   formatForInsert     what Insert puts in the chat box
  *   CapsuleStore        list / save / remove / importMany in chrome.storage.local (one list shared by all sites)
  *   exportCapsules      export file text; normalizeCapsule checks each imported Capsule
+ *   Skills              the same store under SKILLS_KEY: reusable instructions (formatSkillForInsert, STARTER_SKILLS)
  *   insertText          puts text in a site's chat box (rich editor or textarea)
  */
 
@@ -5040,6 +5041,7 @@ const CAPSULE_START = '=== CAPSULE START ===';
 const CAPSULE_END = '=== CAPSULE END ===';
 const CAPSULE_MAX_SELECTION = 4000;
 const CAPSULES_KEY = 'capsules';
+const SKILLS_KEY = 'skills';
 const CAPSULE_HANDOFF_KEY = 'capsuleHandoff';
 // Hand-off conversation size: ~15K tokens, fits even Gemini's free 32K window with room for the reply
 const CAPSULE_MAX_TRANSCRIPT = 60000;
@@ -5275,48 +5277,86 @@ function formatForInsert(capsule) {
   return `Context from an earlier AI conversation (Capsule: ${capsule.title}). Use it as background for what I ask next.\n\n${capsule.body}`;
 }
 
+/** A Skill is an instruction for how the AI should answer; it applies to the rest of the chat. */
+function formatSkillForInsert(skill) {
+  return `Follow these instructions for the rest of this chat (Skill: ${skill.title}):\n\n${skill.body}`;
+}
+
+/** Shown the first time the Skills tab opens; the user can edit or delete them. */
+const STARTER_SKILLS = [
+  {
+    id: 'starter-code-review',
+    title: 'Code reviewer',
+    body: 'Review my code like a senior developer.\n- List real bugs first, with the line and a fix.\n- Then security and performance problems.\n- Then up to 3 improvements that matter.\nBe short. Do not rewrite the whole file unless I ask.'
+  },
+  {
+    id: 'starter-explain-simply',
+    title: 'Explain simply',
+    body: 'Explain like I am new to this topic.\n- Short sentences, everyday words, no jargon (or explain it in one line).\n- Start with the main idea, then one small example.\n- End with a one-line summary.'
+  },
+  {
+    id: 'starter-step-by-step',
+    title: 'Step-by-step answers',
+    body: 'Answer as numbered steps I can follow one by one.\n- One action per step.\n- Put commands and code in code blocks.\n- Say what I should see after each important step.\n- Keep it as short as possible.'
+  }
+].map(s => ({ ...s, source: 'Starter' }));
+
 const newCapsuleId = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
 
 /**
- * Capsules in a chrome.storage area, newest first: { id, title, body, source, createdAt, updatedAt }.
+ * Capsules (or Skills) in a chrome.storage area, newest first: { id, title, body, source, createdAt, updatedAt }.
  * ponytail: read-modify-write of one list; two tabs saving in the same instant can drop one save.
- * Per-capsule keys if that ever shows up.
+ * Per-item keys if that ever shows up.
  */
 class CapsuleStore {
-  /** @param {{ get: Function, set: Function }} area chrome.storage.local (or a fake with the same API) */
-  constructor(area) {
+  /**
+   * @param {{ get: Function, set: Function }} area chrome.storage.local (or a fake with the same API)
+   * @param {{ key?: string, noun?: string }} [opts] Storage key and item name ('Capsule' / 'Skill') for
+   *   defaults, errors and the export file
+   */
+  constructor(area, { key = CAPSULES_KEY, noun = 'Capsule' } = {}) {
     this.area = area;
+    this.key = key;
+    this.noun = noun;
   }
 
   async list() {
-    const r = await this.area.get(CAPSULES_KEY);
-    const list = r?.[CAPSULES_KEY];
+    const r = await this.area.get(this.key);
+    const list = r?.[this.key];
     return Array.isArray(list) ? list : [];
+  }
+
+  /** Stores `defaults` only if this list was never written (a list the user emptied stays empty). */
+  async seed(defaults, now = Date.now()) {
+    const r = await this.area.get(this.key);
+    if (r && this.key in r) return false;
+    await this.area.set({ [this.key]: defaults.map(d => ({ ...d, createdAt: now, updatedAt: now })) });
+    return true;
   }
 
   /** New when `capsule.id` is not stored yet; otherwise replaces it (keeps createdAt). */
   async save(capsule) {
     const body = String(capsule.body || '').trim();
-    if (!body) throw new Error('Capsule is empty');
+    if (!body) throw new Error(`${this.noun} is empty`);
     const list = await this.list();
     const now = Date.now();
     const i = capsule.id ? list.findIndex(c => c.id === capsule.id) : -1;
     const item = {
       id: i >= 0 ? list[i].id : newCapsuleId(),
-      title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+      title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || `Untitled ${this.noun}`,
       body,
       source: capsule.source || (i >= 0 ? list[i].source : null) || 'AI',
       createdAt: i >= 0 ? list[i].createdAt : now,
       updatedAt: now
     };
     if (i >= 0) list[i] = item; else list.unshift(item);
-    await this.area.set({ [CAPSULES_KEY]: list });
+    await this.area.set({ [this.key]: list });
     return item;
   }
 
   async remove(id) {
     const list = await this.list();
-    await this.area.set({ [CAPSULES_KEY]: list.filter(c => c.id !== id) });
+    await this.area.set({ [this.key]: list.filter(c => c.id !== id) });
   }
 
   /**
@@ -5324,45 +5364,46 @@ class CapsuleStore {
    * (updatedAt). Invalid entries are skipped, never partially saved. One write for the whole file.
    * @param {string} json Text of a file from exportCapsules (or a bare array of Capsules)
    * @returns {Promise<{ added: number, updated: number, skipped: number }>}
-   * @throws {Error} 'Not a Capsules file' when the text is not JSON or holds no Capsule list
+   * @throws {Error} 'Not a Capsules file' (or Skills) when the text is not JSON or holds no such list
    */
   async importMany(json, now = Date.now()) {
     let data;
-    try { data = JSON.parse(json); } catch (e) { throw new Error('Not a Capsules file', { cause: e }); }
-    const items = Array.isArray(data) ? data : data?.capsules;
-    if (!Array.isArray(items)) throw new Error('Not a Capsules file');
+    const wrong = `Not a ${this.noun}s file`;
+    try { data = JSON.parse(json); } catch (e) { throw new Error(wrong, { cause: e }); }
+    const items = Array.isArray(data) ? data : data?.[this.key];
+    if (!Array.isArray(items)) throw new Error(wrong);
     const list = await this.list();
     const byId = new Map(list.map((c, i) => [c.id, i]));
     const counts = { added: 0, updated: 0, skipped: 0 };
     for (const raw of items) {
-      const c = normalizeCapsule(raw, now);
+      const c = normalizeCapsule(raw, now, this.noun);
       const i = c ? byId.get(c.id) : undefined;
       if (!c || (i !== undefined && !(c.updatedAt > list[i].updatedAt))) { counts.skipped++; continue; }
       if (i !== undefined) { list[i] = c; counts.updated++; } else { byId.set(c.id, list.length); list.push(c); counts.added++; }
     }
     list.sort((a, b) => b.createdAt - a.createdAt);
-    if (counts.added || counts.updated) await this.area.set({ [CAPSULES_KEY]: list });
+    if (counts.added || counts.updated) await this.area.set({ [this.key]: list });
     return counts;
   }
 }
 
-/** Export file text: every Capsule, newest first. */
-function exportCapsules(list) {
-  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), capsules: list }, null, 2);
+/** Export file text: every Capsule (or Skill: key 'skills'), newest first. */
+function exportCapsules(list, key = CAPSULES_KEY) {
+  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), [key]: list }, null, 2);
 }
 
 /**
  * A Capsule from an untrusted source (an import file), or null when unusable. Strings are capped,
  * a missing or odd id gets a new one, missing dates become `now`.
  */
-function normalizeCapsule(raw, now = Date.now()) {
+function normalizeCapsule(raw, now = Date.now(), noun = 'Capsule') {
   if (!raw || typeof raw !== 'object' || typeof raw.body !== 'string' || !raw.body.trim()) return null;
   const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
   const time = (v) => (Number.isFinite(v) && v > 0 ? v : now);
   const createdAt = time(raw.createdAt);
   return {
     id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newCapsuleId(),
-    title: str(raw.title, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+    title: str(raw.title, CAPSULE_TITLE_MAX) || `Untitled ${noun}`,
     body: raw.body.trim().slice(0, CAPSULE_MAX_BODY),
     source: str(raw.source, 20) || 'Import',
     createdAt,
@@ -5430,7 +5471,8 @@ function insertText(el, text) {
  * Components build their DOM once; updates write only what changed, and page-derived strings are
  * only ever assigned as text, never HTML.
  *
- * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js).
+ * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js)
+ * | Skills (the same panel with kind 'skill': reusable instructions).
  */
 
 
@@ -5560,6 +5602,7 @@ const STYLES = `
 
   /* Capsules */
   .caps { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .caps > * { flex-shrink: 0; } /* A long list scrolls; it never squeezes the buttons and cards */
   .caps .fine { margin-top: 0; }
   .btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .btn { display: inline-flex; align-items: center; justify-content: center; height: 26px; padding: 0 10px; border-radius: 7px;
@@ -5783,13 +5826,18 @@ function textButton(parent, label, onClick, cls = 'btn') {
  * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
  * a MutationObserver watches for the reply's END marker and opens it in the editor; Save stores it.
  * The saved list (one for all sites) has Insert / Copy / Edit / Delete.
+ * With `kind: 'skill'` the same panel is the Skills tab: reusable instructions written by the user
+ * (＋ New Skill, starter Skills on first open), no AI capture, no Update.
  * @param {HTMLElement} parent
- * @param {{ provider: string, findInput: () => Element|null, replySelector: string|null, storage: Object|null,
- *   toast: (text: string) => void, reveal: () => void }} ctx
+ * @param {{ kind?: 'capsule'|'skill', provider: string, findInput: () => Element|null, replySelector: string|null,
+ *   storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
  */
 function CapsulePanel(parent, ctx) {
+  const isSkill = ctx.kind === 'skill';
+  const noun = isSkill ? 'Skill' : 'Capsule';
+  const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
   const view = h('div', 'body caps hide', parent);
-  const store = ctx.storage ? new CapsuleStore(ctx.storage) : null;
+  const store = ctx.storage ? new CapsuleStore(ctx.storage, isSkill ? { key: SKILLS_KEY, noun } : {}) : null;
 
   // The site's limit is reached: the AI here cannot write the Capsule
   const limitCard = h('div', 'card warn hide', view);
@@ -5811,6 +5859,10 @@ function CapsulePanel(parent, ctx) {
   handoffBtn.dataset.tip = 'Copy this chat with the Capsule prompt; paste it into another AI that still has messages left';
   const hint = h('div', 'fine', view, 'Select part of the chat first to capture only that part.');
 
+  // Skills tab: written by the user
+  const newBtn = textButton(view, '＋ New Skill', () => openDraft({ source: 'You' }), 'btn primary');
+  const skillHint = h('div', 'fine', view, 'Insert adds to what is already in the chat box: insert a Capsule, then a Skill, and send them together.');
+
   const wait = h('div', 'card wait hide', view);
   wait.setAttribute('role', 'status');
   h('div', 't', wait, 'Waiting for the Capsule…');
@@ -5819,29 +5871,33 @@ function CapsulePanel(parent, ctx) {
 
   const draft = h('div', 'card hide', view);
   const titleIn = h('input', 'field', draft);
-  titleIn.placeholder = 'Title';
+  titleIn.placeholder = isSkill ? 'Skill name, e.g. Code reviewer' : 'Title';
   titleIn.maxLength = 80;
-  titleIn.setAttribute('aria-label', 'Capsule title');
+  titleIn.setAttribute('aria-label', `${noun} title`);
   const bodyIn = h('textarea', 'field', draft);
   bodyIn.spellcheck = false;
-  bodyIn.setAttribute('aria-label', 'Capsule text');
+  bodyIn.setAttribute('aria-label', `${noun} text`);
+  if (isSkill) bodyIn.placeholder = 'How the AI should answer, e.g. "Review my code like a senior developer. Bugs first, be short."';
   const draftBtns = h('div', 'btns', draft);
 
   const listHead = h('div', 'caps-h hide', view);
   const list = h('div', 'caps', view);
   list.style.padding = '0';
-  const empty = h('div', 'fine', view, 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
+  const empty = h('div', 'fine', view, isSkill
+    ? 'No Skills yet. A Skill is an instruction you reuse, like "Explain simply". Add one, then insert it into any AI.'
+    : 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
   const io = h('div', 'btns', view);
   const exportBtn = textButton(io, '📤 Export');
-  exportBtn.dataset.tip = 'Download all Capsules as a JSON file (backup, or move to another PC)';
+  exportBtn.dataset.tip = `Download all ${noun}s as a JSON file (backup, or move to another PC)`;
   const importBtn = textButton(io, '📥 Import');
-  importBtn.dataset.tip = 'Add Capsules from an exported file; newer copies replace older ones';
+  importBtn.dataset.tip = `Add ${noun}s from an exported file; newer copies replace older ones`;
   const fileIn = h('input', 'hide', view);
   fileIn.type = 'file';
   fileIn.accept = '.json,application/json';
-  fileIn.setAttribute('aria-label', 'Capsules file to import');
+  fileIn.setAttribute('aria-label', `${noun}s file to import`);
 
-  let items = []; // Saved Capsules, newest first
+  let items = []; // Saved Capsules (or Skills), newest first
+  let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
   let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
   const tokenCache = new Map(); // `${id}:${updatedAt}` -> estimated tokens
 
@@ -5855,11 +5911,14 @@ function CapsulePanel(parent, ctx) {
   const mode = (m) => {
     current = m;
     const idle = m === 'idle';
-    show(limitCard, idle && Boolean(limit));
-    show(handoffCard, idle && Boolean(handoff));
-    show(create, idle);
-    show(alt, idle);
-    show(hint, idle);
+    const capture = idle && !isSkill; // AI capture exists only for Capsules
+    show(limitCard, capture && Boolean(limit));
+    show(handoffCard, capture && Boolean(handoff));
+    show(create, capture);
+    show(alt, capture);
+    show(hint, capture);
+    show(newBtn, idle && isSkill);
+    show(skillHint, idle && isSkill);
     show(wait, m === 'waiting');
     show(draft, m === 'draft');
   };
@@ -5929,7 +5988,7 @@ function CapsulePanel(parent, ctx) {
   }
 
   const chat = () => readTranscript(document, ctx.userSelector, ctx.replySelector);
-  const copy = (capsule, done) => navigator.clipboard.writeText(formatForInsert(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
+  const copy = (capsule, done) => navigator.clipboard.writeText(fmt(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
 
   create.addEventListener('click', () => {
     const selection = takeSelection();
@@ -5981,11 +6040,11 @@ function CapsulePanel(parent, ctx) {
       await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value });
       if (editing?.fromHandoff) await clearHandoff(ctx.storage);
     } catch (e) {
-      return ctx.toast(e?.message === 'Capsule is empty' ? 'Capsule is empty' : 'Save failed');
+      return ctx.toast(e?.message === `${noun} is empty` ? e.message : 'Save failed');
     }
     editing = null;
     mode('idle');
-    ctx.toast('Capsule saved');
+    ctx.toast(`${noun} saved`);
     refresh();
   });
   textButton(draftBtns, 'Discard', () => { editing = null; mode('idle'); });
@@ -5998,7 +6057,7 @@ function CapsulePanel(parent, ctx) {
     const key = `${capsule.id}:${capsule.updatedAt}`;
     if (!tokenCache.has(key)) {
       let n = null;
-      try { n = ctx.countTokens ? ctx.countTokens(formatForInsert(capsule)) : null; } catch (_) {}
+      try { n = ctx.countTokens ? ctx.countTokens(fmt(capsule)) : null; } catch (_) {}
       tokenCache.set(key, n);
     }
     return tokenCache.get(key);
@@ -6018,17 +6077,19 @@ function CapsulePanel(parent, ctx) {
     const btns = h('div', 'btns', card);
     textButton(btns, 'Insert', () => {
       const input = ctx.findInput();
-      if (input && insertText(input, formatForInsert(capsule))) ctx.toast('Inserted: add your question and send');
+      if (input && insertText(input, fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : 'Inserted: add your question and send');
       else copy(capsule, 'Chat box not found: copied instead');
     });
     textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
     // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
-    const upd = textButton(btns, 'Update', () => {
-      if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
-      if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
-      promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
-    });
-    upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
+    if (!isSkill) {
+      const upd = textButton(btns, 'Update', () => {
+        if (limit) return ctx.toast(`${ctx.provider}'s limit is reached: update it later, or edit by hand`);
+        if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open the chat with the new progress first');
+        promptAndWait(buildCapsulePrompt(takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
+      });
+      upd.dataset.tip = `${ctx.provider} rewrites it with this chat's new progress`;
+    }
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
       if (!del.dataset.armed) {
@@ -6062,8 +6123,12 @@ function CapsulePanel(parent, ctx) {
 
   async function refresh() {
     if (!store) return;
+    if (isSkill && !seeded) {
+      seeded = true;
+      try { await store.seed(STARTER_SKILLS); } catch (_) {}
+    }
     try {
-      handoff = await readHandoff(ctx.storage);
+      handoff = isSkill ? null : await readHandoff(ctx.storage);
     } catch (_) { handoff = null; }
     const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
     if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
@@ -6083,14 +6148,14 @@ function CapsulePanel(parent, ctx) {
 
   // Export: one JSON file with every Capsule (a download; no permission needed)
   exportBtn.addEventListener('click', () => {
-    const url = URL.createObjectURL(new Blob([exportCapsules(items)], { type: 'application/json' }));
+    const url = URL.createObjectURL(new Blob([exportCapsules(items, store.key)], { type: 'application/json' }));
     const a = h('a', null, view);
     a.href = url;
-    a.download = `capsules-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${store.key}-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    ctx.toast(`Exported ${items.length} Capsule${items.length === 1 ? '' : 's'}`);
+    ctx.toast(`Exported ${items.length} ${noun}${items.length === 1 ? '' : 's'}`);
   });
 
   // Import: merge a file from Export (newer copies win; invalid entries skipped)
@@ -6104,7 +6169,7 @@ function CapsulePanel(parent, ctx) {
       ctx.toast(`${r.added} added, ${r.updated} updated, ${r.skipped} skipped`);
       refresh();
     } catch (e) {
-      ctx.toast(e?.message === 'Not a Capsules file' ? 'Not a Capsules file' : 'Import failed');
+      ctx.toast(e?.message === `Not a ${noun}s file` ? e.message : 'Import failed');
     }
   });
 
@@ -6169,10 +6234,13 @@ class ContextWidget {
     // A Capsule saved or deleted on another site / tab shows up here too
     try {
       chrome.storage?.onChanged?.addListener((changes, area) => {
-        if (area === 'local' && (changes[CAPSULES_KEY] || changes[CAPSULE_HANDOFF_KEY])) this.parts?.caps.refresh();
+        if (area !== 'local') return;
+        if (changes[CAPSULES_KEY] || changes[CAPSULE_HANDOFF_KEY]) this.parts?.caps.refresh();
+        if (changes[SKILLS_KEY]) this.parts?.skills.refresh();
       });
     } catch (_) {}
     this.parts.caps.refresh();
+    this.parts.skills.refresh();
     this._loadPrefs();
     this.render();
   }
@@ -6209,6 +6277,7 @@ class ContextWidget {
     };
     const tabContext = tab('Context', 'context');
     const tabCaps = tab('Capsules', 'capsules');
+    const tabSkills = tab('Skills', 'skills');
     const themeBtn = iconButton(head, ICONS.auto, 'Theme: auto');
     const collapseBtn = iconButton(head, ICONS.collapse, 'Collapse');
     const closeBtn = iconButton(head, ICONS.close, 'Close (Alt+T to reopen)');
@@ -6268,7 +6337,7 @@ class ContextWidget {
     const evidence = h('ul', 'evidence', diag.body);
     h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not.');
 
-    const caps = CapsulePanel(panel, {
+    const panelCtx = {
       provider,
       findInput: () => this.adapter.findInput(),
       replySelector: this.adapter.replySelector,
@@ -6281,7 +6350,9 @@ class ContextWidget {
         this._setTab('capsules');
         if (!this.isExpanded) this._setExpanded(true);
       }
-    });
+    };
+    const caps = CapsulePanel(panel, panelCtx);
+    const skills = CapsulePanel(panel, { ...panelCtx, kind: 'skill' });
 
     const foot = h('div', 'foot', panel);
     const conf = h('div', 'conf', foot);
@@ -6348,7 +6419,7 @@ class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, body, foot, caps, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
       sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
@@ -6358,6 +6429,7 @@ class ContextWidget {
     this.latestState = viewState;
     if (!this.hostElement) this.mount();
     this.parts?.caps.setView(viewState);
+    this.parts?.skills.setView(viewState);
     // SPA re-renders can drop our node; re-attach instead of rebuilding
     if (!this.hostElement.isConnected) (document.body || document.documentElement).appendChild(this.hostElement);
     this.render();
@@ -6373,12 +6445,14 @@ class ContextWidget {
     show(p.pill, !this.isExpanded);
     show(p.panel, this.isExpanded);
     setAttr(p.pill, 'aria-expanded', String(this.isExpanded));
-    const onCaps = this.tab === 'capsules';
-    show(p.body, !onCaps);
-    show(p.foot, !onCaps);
-    show(p.caps.view, onCaps);
-    setAttr(p.tabContext, 'aria-selected', String(!onCaps));
-    setAttr(p.tabCaps, 'aria-selected', String(onCaps));
+    const onContext = this.tab === 'context';
+    show(p.body, onContext);
+    show(p.foot, onContext);
+    show(p.caps.view, this.tab === 'capsules');
+    show(p.skills.view, this.tab === 'skills');
+    setAttr(p.tabContext, 'aria-selected', String(onContext));
+    setAttr(p.tabCaps, 'aria-selected', String(this.tab === 'capsules'));
+    setAttr(p.tabSkills, 'aria-selected', String(this.tab === 'skills'));
 
     const vm = this.latestState || { ready: false, usedTokens: 0, percentage: null, evidence: [], breakdown: [], hiddenItems: [], limits: [], confidenceLevel: 'LOW', confidence: 0, provider: this.adapter.provider, model: 'Detecting…' };
     const lvl = vm.ready === false ? 'LOW' : vm.confidenceLevel;
@@ -6483,9 +6557,10 @@ class ContextWidget {
     if (open) this.parts.head.focus({ preventScroll: true });
   }
 
-  /** @param {'context'|'capsules'} key */
+  /** @param {'context'|'capsules'|'skills'} key */
   _setTab(key) {
     if (this.tab !== key && key === 'capsules') this.parts.caps.refresh();
+    if (this.tab !== key && key === 'skills') this.parts.skills.refresh();
     this.tab = key;
     this.render();
     this._savePrefs();
@@ -6649,7 +6724,7 @@ class ContextWidget {
         if (!s || typeof s !== 'object') return;
         if (s.pos && ['left', 'right'].includes(s.pos.side) && Number.isFinite(s.pos.dx) && Number.isFinite(s.pos.y)) this.pos = s.pos;
         if (THEMES.includes(s.theme)) this.theme = s.theme;
-        if (s.tab === 'context' || s.tab === 'capsules') this.tab = s.tab;
+        if (['context', 'capsules', 'skills'].includes(s.tab)) this.tab = s.tab;
         this.isExpanded = Boolean(s.expanded);
         this.render();
       }).catch(() => {});
@@ -6667,6 +6742,7 @@ class ContextWidget {
 
   unmount() {
     this.parts?.caps.stop();
+    this.parts?.skills.stop();
     this.hostElement?.remove();
     this.hostElement = null;
     this.shadowRoot = null;
@@ -8266,8 +8342,56 @@ const GEMINI_LIMITS = { free: 32000, plus: 128000, pro: 1000000, ultra: 1000000 
 const GEMINI_SYSTEM_PROMPT_ESTIMATE = 1500;
 // ai.google.dev/gemini-api/docs/tokens: an image (up to 384px each side) is 258 tokens; larger ones are tiled, so this is a floor
 const GEMINI_IMAGE_TOKENS = 258;
-// conversation id -> turn count at which the whole chat was seen loaded
-const geminiCompleteAt = new Map();
+// support.google.com/gemini/answer/14620100 (Business / Enterprise, checked 2026-10-01): 1M on every edition where
+// Gemini is a core service; 32K only where it is an additional service (not detectable from the page)
+const GEMINI_WORKSPACE_SOURCE = 'Gemini Apps Help: work accounts, Business / Enterprise (support.google.com/gemini/answer/14620100)';
+const GEMINI_WORKSPACE_LIMIT = 1000000;
+
+// Gemini's own chat read (batchexecute rpc "hNvQHb", checked live 2026-10-01): newest turn first, 10 per
+// page, continuation token at [1]. Each turn: [[c_id, r_id], _, [[userText]], [candidates, …, chosen id at 3,
+// model name at 21], [epochSeconds]]; a candidate is [rc_id, [replyText], …].
+const GEMINI_RPC_READ = 'hNvQHb';
+const GEMINI_PAGE_SIZE = 10;
+const GEMINI_MAX_PAGES = 100; // 1,000 turns
+
+/** "at" / session / build values from the page's inline WIZ_global_data script (content scripts cannot read window). */
+function geminiSession(doc) {
+  for (const script of doc.querySelectorAll('script')) {
+    const t = script.textContent || '';
+    if (!t.includes('"SNlM0e"')) continue;
+    const get = (k) => t.match(new RegExp(`"${k}":"([^"]+)"`))?.[1] || null;
+    const s = { at: get('SNlM0e'), sid: get('FdrFJe'), bl: get('cfb2h') };
+    return s.at ? s : null;
+  }
+  return null;
+}
+
+/** One batchexecute call; returns the decoded payload, throws on an error row or HTTP error. */
+async function geminiRpc(session, rpcId, payload, path) {
+  const qs = new URLSearchParams({ rpcids: rpcId, 'source-path': path, hl: 'en', _reqid: String(100000 + Math.floor(Math.random() * 900000)), rt: 'c' });
+  if (session.bl) qs.set('bl', session.bl);
+  if (session.sid) qs.set('f.sid', session.sid);
+  const body = new URLSearchParams({ 'f.req': JSON.stringify([[[rpcId, JSON.stringify(payload), null, 'generic']]]), at: session.at });
+  const res = await fetch(`/_/BardChatUi/data/batchexecute?${qs}`, {
+    method: 'POST', body, credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }
+  });
+  if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+  return parseBatchexecute(await res.text(), rpcId);
+}
+
+/** Payload of rpcId from a batchexecute response (")]}'" prefix, then length-prefixed JSON lines). */
+function parseBatchexecute(text, rpcId) {
+  for (const line of String(text).split('\n')) {
+    if (!line.startsWith('[[')) continue;
+    let rows;
+    try { rows = JSON.parse(line); } catch { continue; }
+    const row = rows.find(r => Array.isArray(r) && r[0] === 'wrb.fr' && r[1] === rpcId);
+    if (!row) continue;
+    if (typeof row[2] !== 'string') throw new Error(`Gemini error ${JSON.stringify(row[5]?.[0] ?? 'unknown')}`);
+    return JSON.parse(row[2]);
+  }
+  throw new Error('Gemini response format changed');
+}
 
 const GeminiProvider = {
   name: 'Gemini',
@@ -8275,26 +8399,45 @@ const GeminiProvider = {
   inputSelector: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
   replySelector: 'model-response', // Assistant replies (Capsule reader)
   userSelector: 'user-query', // The user's messages (Capsule transcript)
-  hasApi: false,
+  hasApi: true,
 
   /**
-   * Gemini loads older turns as you scroll up. The page holds the whole chat once its history is
-   * scrolled to the top with nothing loading; that turn count is remembered, so scrolling back down
-   * (or new turns) keeps the chat complete.
+   * The whole saved chat through Gemini's own read call (the page only holds the turns scrolled into
+   * view). Pages until there is no continuation token; one retry on a failed page.
    */
-  pageMayBePartial(doc, conversationId, turnCount) {
-    if (!conversationId) return false;
-    const known = geminiCompleteAt.get(conversationId);
-    if (known !== undefined && turnCount >= known) return false;
-    const first = doc.querySelector('user-query, model-response');
-    if (!first) return true;
-    let scroller = first.parentElement;
-    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
-    const atTop = !scroller || scroller.scrollTop <= 0;
-    const loading = Boolean(doc.querySelector('infinite-scroller mat-progress-spinner, infinite-scroller [role="progressbar"]'));
-    if (!atTop || loading) return true;
-    geminiCompleteAt.set(conversationId, turnCount);
-    return false;
+  async fetchConversation(conversationId) {
+    const session = geminiSession(document);
+    if (!session) return null;
+    const turns = [];
+    let token = null;
+    for (let page = 0; page < GEMINI_MAX_PAGES; page++) {
+      const payload = [`c_${conversationId}`, GEMINI_PAGE_SIZE, token, 1, [0], [4], null, 1];
+      const read = () => geminiRpc(session, GEMINI_RPC_READ, payload, location.pathname);
+      const data = await read().catch(read);
+      if (!Array.isArray(data?.[0])) break;
+      turns.push(...data[0]);
+      token = data[1];
+      if (!token) break;
+    }
+    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits: [] };
+  },
+
+  /** Saved turns (oldest first) as messages; the reply is the chosen candidate. */
+  normalizeConversation(turns, conversationId) {
+    const messages = [];
+    let model = null;
+    for (const t of turns) {
+      const id = Array.isArray(t?.[0]) ? t[0][1] : null;
+      const user = Array.isArray(t?.[2]?.[0]) ? t[2][0].filter(x => typeof x === 'string').join('\n') : '';
+      const reply = t?.[3];
+      const candidates = Array.isArray(reply?.[0]) ? reply[0] : [];
+      const chosen = candidates.find(c => c?.[0] === reply?.[3]) || candidates[0];
+      const text = Array.isArray(chosen?.[1]) ? chosen[1].filter(x => typeof x === 'string').join('\n') : '';
+      if (typeof reply?.[21] === 'string') model = reply[21];
+      if (user) messages.push({ id: `${id}-user`, role: 'user', text: user, parts: [{ type: 'text', text: user }], isStreaming: false });
+      if (text) messages.push({ id: `${id}-model`, role: 'assistant', text, parts: [{ type: 'text', text }], isStreaming: false });
+    }
+    return { conversationId, model, messages, visibleTurns: messages.length, rawMessages: turns.length };
   },
 
   /**
@@ -8318,8 +8461,11 @@ const GeminiProvider = {
     let images = 0;
     let files = 0;
     for (const q of queries) {
-      images += q.querySelectorAll('img:not([role="presentation"]):not(mat-icon img)').length;
-      files += q.querySelectorAll('uploaded-file, [data-test-id*="uploaded-file"], .file-preview-container').length;
+      // Each uploaded file is a <user-query-file-preview>; an image one holds an <img>
+      for (const f of q.querySelectorAll('user-query-file-preview')) {
+        if (f.querySelector('img')) images++;
+        else files++;
+      }
     }
     return { count: images + files, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
   },
@@ -8393,6 +8539,8 @@ const GeminiProvider = {
 
   /** Explicit "Google AI Pro/Ultra/Plus" text is OBSERVED; a bare PRO/ULTRA badge is only a hint. */
   detectPlan(doc) {
+    // Work / school accounts carry a "Work" tier label by the avatar (checked live 2026-10-01)
+    if (doc.querySelector('[class*="tier-enterprise"]')) return { value: 'workspace', source: 'dom', evidenceType: 'OBSERVED' };
     let seenHeader = false;
     for (const el of doc.querySelectorAll('header, top-bar-actions, [data-test-id*="pillbox"], .gds-pillbox, [role="banner"]')) {
       const text = el.textContent || '';
@@ -8406,13 +8554,19 @@ const GeminiProvider = {
     return seenHeader ? { value: 'free', source: 'dom_heuristic', evidenceType: 'ESTIMATED' } : null;
   },
 
-  modelKey: (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim() || null,
+  // The page shows the mode ("Flash", "Fast"), the saved chat the model ("3.6 Flash"): compare by family
+  modelKey: (value) => {
+    const s = String(value || '').toLowerCase();
+    const family = s.match(/flash-lite|flash|pro|thinking|deep think/)?.[0] || (/\bfast\b/.test(s) ? 'flash' : null);
+    return family || s.replace(/\s+/g, ' ').trim() || null;
+  },
 
   displayName(raw) {
     return raw ? (/gemini/i.test(raw) ? raw : `Gemini · ${raw}`) : null;
   },
 
   resolveLimit(rawModel, plan) {
+    if (plan === 'workspace') return { contextWindow: GEMINI_WORKSPACE_LIMIT, status: 'VERIFIED', source: GEMINI_WORKSPACE_SOURCE, recognized: true };
     if (!plan || plan === 'unknown' || !(plan in GEMINI_LIMITS)) {
       return { contextWindow: null, status: 'UNKNOWN', source: 'Plan unknown', recognized: Boolean(rawModel) };
     }
@@ -8643,7 +8797,7 @@ class ProviderCoordinator {
         dataSource = !(conversationId && p.hasApi) ? 'dom' : unsaved ? 'dom_unsaved' : 'dom_fallback';
         messages = dom;
         // A saved chat read only from the page may miss turns (API failed, or lazy-loaded history)
-        completenessSource = !unsaved && conversationId && (p.hasApi || (typeof p.pageMayBePartial === 'function' ? p.pageMayBePartial(document, conversationId, dom.length) : p.pageMayBePartial)) ? 'dom_partial' : 'dom_complete';
+        completenessSource = !unsaved && conversationId && p.hasApi ? 'dom_partial' : 'dom_complete';
       }
       const complete = completenessSource !== 'dom_partial';
       const awaitingData = Boolean(conversationId) && messages.length === 0;

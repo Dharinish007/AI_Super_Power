@@ -211,7 +211,7 @@ export class ProviderCoordinator {
         dataSource = !(conversationId && p.hasApi) ? 'dom' : unsaved ? 'dom_unsaved' : 'dom_fallback';
         messages = dom;
         // A saved chat read only from the page may miss turns (API failed, or lazy-loaded history)
-        completenessSource = !unsaved && conversationId && (p.hasApi || (typeof p.pageMayBePartial === 'function' ? p.pageMayBePartial(document, conversationId, dom.length) : p.pageMayBePartial)) ? 'dom_partial' : 'dom_complete';
+        completenessSource = !unsaved && conversationId && p.hasApi ? 'dom_partial' : 'dom_complete';
       }
       const complete = completenessSource !== 'dom_partial';
       const awaitingData = Boolean(conversationId) && messages.length === 0;

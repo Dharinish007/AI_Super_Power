@@ -7,7 +7,7 @@ import {
   CAPSULE_START, CAPSULE_END, CAPSULE_MAX_SELECTION, CAPSULES_KEY, CAPSULE_HANDOFF_KEY,
   buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
   chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
-  formatCost, exportCapsules, normalizeCapsule
+  formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert
 } from '../../content/capsule.js';
 
 /** chrome.storage.local stand-in */
@@ -223,6 +223,29 @@ export async function runCapsuleTests() {
   assert('Import: non-Capsule files rejected', bad === 3);
   assert('Import: a bare array also works', (await new CapsuleStore(fakeArea()).importMany('[{"body":"x"}]')).added === 1);
   assert('normalizeCapsule: huge body cut to 100K', normalizeCapsule({ body: 'z'.repeat(150000) }).body.length === 100000);
+
+  // Milestone 4: Skills (same store under its own key)
+  const sarea = fakeArea();
+  const skills = new CapsuleStore(sarea, { key: SKILLS_KEY, noun: 'Skill' });
+  assert('Skills: first open seeds the starters with dates', (await skills.seed(STARTER_SKILLS, 500)) === true &&
+    (await skills.list()).length === 3 && (await skills.list()).every(s => s.source === 'Starter' && s.createdAt === 500 && s.title && s.body));
+  for (const s of await skills.list()) await skills.remove(s.id);
+  assert('Skills: a list the user emptied is not re-seeded', (await skills.seed(STARTER_SKILLS)) === false && (await skills.list()).length === 0);
+  const sk = await skills.save({ title: '', body: 'Answer in Tamil', source: 'You' });
+  assert('Skills: own key, own default title, Capsules untouched', sk.title === 'Untitled Skill' && Array.isArray(sarea.data[SKILLS_KEY]) && !(CAPSULES_KEY in sarea.data));
+  let emptyMsg = '';
+  try { await skills.save({ body: ' ' }); } catch (e) { emptyMsg = e.message; }
+  assert('Skills: empty error names a Skill', emptyMsg === 'Skill is empty');
+  const sfile = exportCapsules(await skills.list(), SKILLS_KEY);
+  assert('Skills: export file uses the "skills" field', Array.isArray(JSON.parse(sfile).skills) && !('capsules' in JSON.parse(sfile)));
+  let wrongMsg = '';
+  try { await skills.importMany(file); } catch (e) { wrongMsg = e.message; }
+  assert('Skills: a Capsules file is not a Skills file', wrongMsg === 'Not a Skills file');
+  const fresh = new CapsuleStore(fakeArea(), { key: SKILLS_KEY, noun: 'Skill' });
+  assert('Skills: import a Skills file', (await fresh.importMany(sfile)).added === 1 && (await fresh.list())[0].body === 'Answer in Tamil');
+  assert('Skills: insert text names the Skill and applies to the chat',
+    formatSkillForInsert({ title: 'Tamil', body: 'Answer in Tamil' }) === 'Follow these instructions for the rest of this chat (Skill: Tamil):\n\nAnswer in Tamil');
+  assert('Skills: starter ids are fixed (two tabs seeding write the same list)', STARTER_SKILLS.every(s => s.id.startsWith('starter-')));
 
   return { passed, failed };
 }

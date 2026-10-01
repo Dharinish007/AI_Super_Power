@@ -13,6 +13,7 @@
  *   formatForInsert     what Insert puts in the chat box
  *   CapsuleStore        list / save / remove / importMany in chrome.storage.local (one list shared by all sites)
  *   exportCapsules      export file text; normalizeCapsule checks each imported Capsule
+ *   Skills              the same store under SKILLS_KEY: reusable instructions (formatSkillForInsert, STARTER_SKILLS)
  *   insertText          puts text in a site's chat box (rich editor or textarea)
  */
 
@@ -20,6 +21,7 @@ export const CAPSULE_START = '=== CAPSULE START ===';
 export const CAPSULE_END = '=== CAPSULE END ===';
 export const CAPSULE_MAX_SELECTION = 4000;
 export const CAPSULES_KEY = 'capsules';
+export const SKILLS_KEY = 'skills';
 export const CAPSULE_HANDOFF_KEY = 'capsuleHandoff';
 // Hand-off conversation size: ~15K tokens, fits even Gemini's free 32K window with room for the reply
 export const CAPSULE_MAX_TRANSCRIPT = 60000;
@@ -255,48 +257,86 @@ export function formatForInsert(capsule) {
   return `Context from an earlier AI conversation (Capsule: ${capsule.title}). Use it as background for what I ask next.\n\n${capsule.body}`;
 }
 
+/** A Skill is an instruction for how the AI should answer; it applies to the rest of the chat. */
+export function formatSkillForInsert(skill) {
+  return `Follow these instructions for the rest of this chat (Skill: ${skill.title}):\n\n${skill.body}`;
+}
+
+/** Shown the first time the Skills tab opens; the user can edit or delete them. */
+export const STARTER_SKILLS = [
+  {
+    id: 'starter-code-review',
+    title: 'Code reviewer',
+    body: 'Review my code like a senior developer.\n- List real bugs first, with the line and a fix.\n- Then security and performance problems.\n- Then up to 3 improvements that matter.\nBe short. Do not rewrite the whole file unless I ask.'
+  },
+  {
+    id: 'starter-explain-simply',
+    title: 'Explain simply',
+    body: 'Explain like I am new to this topic.\n- Short sentences, everyday words, no jargon (or explain it in one line).\n- Start with the main idea, then one small example.\n- End with a one-line summary.'
+  },
+  {
+    id: 'starter-step-by-step',
+    title: 'Step-by-step answers',
+    body: 'Answer as numbered steps I can follow one by one.\n- One action per step.\n- Put commands and code in code blocks.\n- Say what I should see after each important step.\n- Keep it as short as possible.'
+  }
+].map(s => ({ ...s, source: 'Starter' }));
+
 const newCapsuleId = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
 
 /**
- * Capsules in a chrome.storage area, newest first: { id, title, body, source, createdAt, updatedAt }.
+ * Capsules (or Skills) in a chrome.storage area, newest first: { id, title, body, source, createdAt, updatedAt }.
  * ponytail: read-modify-write of one list; two tabs saving in the same instant can drop one save.
- * Per-capsule keys if that ever shows up.
+ * Per-item keys if that ever shows up.
  */
 export class CapsuleStore {
-  /** @param {{ get: Function, set: Function }} area chrome.storage.local (or a fake with the same API) */
-  constructor(area) {
+  /**
+   * @param {{ get: Function, set: Function }} area chrome.storage.local (or a fake with the same API)
+   * @param {{ key?: string, noun?: string }} [opts] Storage key and item name ('Capsule' / 'Skill') for
+   *   defaults, errors and the export file
+   */
+  constructor(area, { key = CAPSULES_KEY, noun = 'Capsule' } = {}) {
     this.area = area;
+    this.key = key;
+    this.noun = noun;
   }
 
   async list() {
-    const r = await this.area.get(CAPSULES_KEY);
-    const list = r?.[CAPSULES_KEY];
+    const r = await this.area.get(this.key);
+    const list = r?.[this.key];
     return Array.isArray(list) ? list : [];
+  }
+
+  /** Stores `defaults` only if this list was never written (a list the user emptied stays empty). */
+  async seed(defaults, now = Date.now()) {
+    const r = await this.area.get(this.key);
+    if (r && this.key in r) return false;
+    await this.area.set({ [this.key]: defaults.map(d => ({ ...d, createdAt: now, updatedAt: now })) });
+    return true;
   }
 
   /** New when `capsule.id` is not stored yet; otherwise replaces it (keeps createdAt). */
   async save(capsule) {
     const body = String(capsule.body || '').trim();
-    if (!body) throw new Error('Capsule is empty');
+    if (!body) throw new Error(`${this.noun} is empty`);
     const list = await this.list();
     const now = Date.now();
     const i = capsule.id ? list.findIndex(c => c.id === capsule.id) : -1;
     const item = {
       id: i >= 0 ? list[i].id : newCapsuleId(),
-      title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+      title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || `Untitled ${this.noun}`,
       body,
       source: capsule.source || (i >= 0 ? list[i].source : null) || 'AI',
       createdAt: i >= 0 ? list[i].createdAt : now,
       updatedAt: now
     };
     if (i >= 0) list[i] = item; else list.unshift(item);
-    await this.area.set({ [CAPSULES_KEY]: list });
+    await this.area.set({ [this.key]: list });
     return item;
   }
 
   async remove(id) {
     const list = await this.list();
-    await this.area.set({ [CAPSULES_KEY]: list.filter(c => c.id !== id) });
+    await this.area.set({ [this.key]: list.filter(c => c.id !== id) });
   }
 
   /**
@@ -304,45 +344,46 @@ export class CapsuleStore {
    * (updatedAt). Invalid entries are skipped, never partially saved. One write for the whole file.
    * @param {string} json Text of a file from exportCapsules (or a bare array of Capsules)
    * @returns {Promise<{ added: number, updated: number, skipped: number }>}
-   * @throws {Error} 'Not a Capsules file' when the text is not JSON or holds no Capsule list
+   * @throws {Error} 'Not a Capsules file' (or Skills) when the text is not JSON or holds no such list
    */
   async importMany(json, now = Date.now()) {
     let data;
-    try { data = JSON.parse(json); } catch (e) { throw new Error('Not a Capsules file', { cause: e }); }
-    const items = Array.isArray(data) ? data : data?.capsules;
-    if (!Array.isArray(items)) throw new Error('Not a Capsules file');
+    const wrong = `Not a ${this.noun}s file`;
+    try { data = JSON.parse(json); } catch (e) { throw new Error(wrong, { cause: e }); }
+    const items = Array.isArray(data) ? data : data?.[this.key];
+    if (!Array.isArray(items)) throw new Error(wrong);
     const list = await this.list();
     const byId = new Map(list.map((c, i) => [c.id, i]));
     const counts = { added: 0, updated: 0, skipped: 0 };
     for (const raw of items) {
-      const c = normalizeCapsule(raw, now);
+      const c = normalizeCapsule(raw, now, this.noun);
       const i = c ? byId.get(c.id) : undefined;
       if (!c || (i !== undefined && !(c.updatedAt > list[i].updatedAt))) { counts.skipped++; continue; }
       if (i !== undefined) { list[i] = c; counts.updated++; } else { byId.set(c.id, list.length); list.push(c); counts.added++; }
     }
     list.sort((a, b) => b.createdAt - a.createdAt);
-    if (counts.added || counts.updated) await this.area.set({ [CAPSULES_KEY]: list });
+    if (counts.added || counts.updated) await this.area.set({ [this.key]: list });
     return counts;
   }
 }
 
-/** Export file text: every Capsule, newest first. */
-export function exportCapsules(list) {
-  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), capsules: list }, null, 2);
+/** Export file text: every Capsule (or Skill: key 'skills'), newest first. */
+export function exportCapsules(list, key = CAPSULES_KEY) {
+  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), [key]: list }, null, 2);
 }
 
 /**
  * A Capsule from an untrusted source (an import file), or null when unusable. Strings are capped,
  * a missing or odd id gets a new one, missing dates become `now`.
  */
-export function normalizeCapsule(raw, now = Date.now()) {
+export function normalizeCapsule(raw, now = Date.now(), noun = 'Capsule') {
   if (!raw || typeof raw !== 'object' || typeof raw.body !== 'string' || !raw.body.trim()) return null;
   const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
   const time = (v) => (Number.isFinite(v) && v > 0 ? v : now);
   const createdAt = time(raw.createdAt);
   return {
     id: typeof raw.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : newCapsuleId(),
-    title: str(raw.title, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+    title: str(raw.title, CAPSULE_TITLE_MAX) || `Untitled ${noun}`,
     body: raw.body.trim().slice(0, CAPSULE_MAX_BODY),
     source: str(raw.source, 20) || 'Import',
     createdAt,

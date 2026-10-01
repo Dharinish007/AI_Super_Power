@@ -379,8 +379,56 @@ const GEMINI_LIMITS = { free: 32000, plus: 128000, pro: 1000000, ultra: 1000000 
 const GEMINI_SYSTEM_PROMPT_ESTIMATE = 1500;
 // ai.google.dev/gemini-api/docs/tokens: an image (up to 384px each side) is 258 tokens; larger ones are tiled, so this is a floor
 const GEMINI_IMAGE_TOKENS = 258;
-// conversation id -> turn count at which the whole chat was seen loaded
-const geminiCompleteAt = new Map();
+// support.google.com/gemini/answer/14620100 (Business / Enterprise, checked 2026-10-01): 1M on every edition where
+// Gemini is a core service; 32K only where it is an additional service (not detectable from the page)
+const GEMINI_WORKSPACE_SOURCE = 'Gemini Apps Help: work accounts, Business / Enterprise (support.google.com/gemini/answer/14620100)';
+const GEMINI_WORKSPACE_LIMIT = 1000000;
+
+// Gemini's own chat read (batchexecute rpc "hNvQHb", checked live 2026-10-01): newest turn first, 10 per
+// page, continuation token at [1]. Each turn: [[c_id, r_id], _, [[userText]], [candidates, …, chosen id at 3,
+// model name at 21], [epochSeconds]]; a candidate is [rc_id, [replyText], …].
+const GEMINI_RPC_READ = 'hNvQHb';
+const GEMINI_PAGE_SIZE = 10;
+const GEMINI_MAX_PAGES = 100; // 1,000 turns
+
+/** "at" / session / build values from the page's inline WIZ_global_data script (content scripts cannot read window). */
+function geminiSession(doc) {
+  for (const script of doc.querySelectorAll('script')) {
+    const t = script.textContent || '';
+    if (!t.includes('"SNlM0e"')) continue;
+    const get = (k) => t.match(new RegExp(`"${k}":"([^"]+)"`))?.[1] || null;
+    const s = { at: get('SNlM0e'), sid: get('FdrFJe'), bl: get('cfb2h') };
+    return s.at ? s : null;
+  }
+  return null;
+}
+
+/** One batchexecute call; returns the decoded payload, throws on an error row or HTTP error. */
+async function geminiRpc(session, rpcId, payload, path) {
+  const qs = new URLSearchParams({ rpcids: rpcId, 'source-path': path, hl: 'en', _reqid: String(100000 + Math.floor(Math.random() * 900000)), rt: 'c' });
+  if (session.bl) qs.set('bl', session.bl);
+  if (session.sid) qs.set('f.sid', session.sid);
+  const body = new URLSearchParams({ 'f.req': JSON.stringify([[[rpcId, JSON.stringify(payload), null, 'generic']]]), at: session.at });
+  const res = await fetch(`/_/BardChatUi/data/batchexecute?${qs}`, {
+    method: 'POST', body, credentials: 'include', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }
+  });
+  if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+  return parseBatchexecute(await res.text(), rpcId);
+}
+
+/** Payload of rpcId from a batchexecute response (")]}'" prefix, then length-prefixed JSON lines). */
+export function parseBatchexecute(text, rpcId) {
+  for (const line of String(text).split('\n')) {
+    if (!line.startsWith('[[')) continue;
+    let rows;
+    try { rows = JSON.parse(line); } catch { continue; }
+    const row = rows.find(r => Array.isArray(r) && r[0] === 'wrb.fr' && r[1] === rpcId);
+    if (!row) continue;
+    if (typeof row[2] !== 'string') throw new Error(`Gemini error ${JSON.stringify(row[5]?.[0] ?? 'unknown')}`);
+    return JSON.parse(row[2]);
+  }
+  throw new Error('Gemini response format changed');
+}
 
 export const GeminiProvider = {
   name: 'Gemini',
@@ -388,26 +436,45 @@ export const GeminiProvider = {
   inputSelector: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
   replySelector: 'model-response', // Assistant replies (Capsule reader)
   userSelector: 'user-query', // The user's messages (Capsule transcript)
-  hasApi: false,
+  hasApi: true,
 
   /**
-   * Gemini loads older turns as you scroll up. The page holds the whole chat once its history is
-   * scrolled to the top with nothing loading; that turn count is remembered, so scrolling back down
-   * (or new turns) keeps the chat complete.
+   * The whole saved chat through Gemini's own read call (the page only holds the turns scrolled into
+   * view). Pages until there is no continuation token; one retry on a failed page.
    */
-  pageMayBePartial(doc, conversationId, turnCount) {
-    if (!conversationId) return false;
-    const known = geminiCompleteAt.get(conversationId);
-    if (known !== undefined && turnCount >= known) return false;
-    const first = doc.querySelector('user-query, model-response');
-    if (!first) return true;
-    let scroller = first.parentElement;
-    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
-    const atTop = !scroller || scroller.scrollTop <= 0;
-    const loading = Boolean(doc.querySelector('infinite-scroller mat-progress-spinner, infinite-scroller [role="progressbar"]'));
-    if (!atTop || loading) return true;
-    geminiCompleteAt.set(conversationId, turnCount);
-    return false;
+  async fetchConversation(conversationId) {
+    const session = geminiSession(document);
+    if (!session) return null;
+    const turns = [];
+    let token = null;
+    for (let page = 0; page < GEMINI_MAX_PAGES; page++) {
+      const payload = [`c_${conversationId}`, GEMINI_PAGE_SIZE, token, 1, [0], [4], null, 1];
+      const read = () => geminiRpc(session, GEMINI_RPC_READ, payload, location.pathname);
+      const data = await read().catch(read);
+      if (!Array.isArray(data?.[0])) break;
+      turns.push(...data[0]);
+      token = data[1];
+      if (!token) break;
+    }
+    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits: [] };
+  },
+
+  /** Saved turns (oldest first) as messages; the reply is the chosen candidate. */
+  normalizeConversation(turns, conversationId) {
+    const messages = [];
+    let model = null;
+    for (const t of turns) {
+      const id = Array.isArray(t?.[0]) ? t[0][1] : null;
+      const user = Array.isArray(t?.[2]?.[0]) ? t[2][0].filter(x => typeof x === 'string').join('\n') : '';
+      const reply = t?.[3];
+      const candidates = Array.isArray(reply?.[0]) ? reply[0] : [];
+      const chosen = candidates.find(c => c?.[0] === reply?.[3]) || candidates[0];
+      const text = Array.isArray(chosen?.[1]) ? chosen[1].filter(x => typeof x === 'string').join('\n') : '';
+      if (typeof reply?.[21] === 'string') model = reply[21];
+      if (user) messages.push({ id: `${id}-user`, role: 'user', text: user, parts: [{ type: 'text', text: user }], isStreaming: false });
+      if (text) messages.push({ id: `${id}-model`, role: 'assistant', text, parts: [{ type: 'text', text }], isStreaming: false });
+    }
+    return { conversationId, model, messages, visibleTurns: messages.length, rawMessages: turns.length };
   },
 
   /**
@@ -431,8 +498,11 @@ export const GeminiProvider = {
     let images = 0;
     let files = 0;
     for (const q of queries) {
-      images += q.querySelectorAll('img:not([role="presentation"]):not(mat-icon img)').length;
-      files += q.querySelectorAll('uploaded-file, [data-test-id*="uploaded-file"], .file-preview-container').length;
+      // Each uploaded file is a <user-query-file-preview>; an image one holds an <img>
+      for (const f of q.querySelectorAll('user-query-file-preview')) {
+        if (f.querySelector('img')) images++;
+        else files++;
+      }
     }
     return { count: images + files, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
   },
@@ -506,6 +576,8 @@ export const GeminiProvider = {
 
   /** Explicit "Google AI Pro/Ultra/Plus" text is OBSERVED; a bare PRO/ULTRA badge is only a hint. */
   detectPlan(doc) {
+    // Work / school accounts carry a "Work" tier label by the avatar (checked live 2026-10-01)
+    if (doc.querySelector('[class*="tier-enterprise"]')) return { value: 'workspace', source: 'dom', evidenceType: 'OBSERVED' };
     let seenHeader = false;
     for (const el of doc.querySelectorAll('header, top-bar-actions, [data-test-id*="pillbox"], .gds-pillbox, [role="banner"]')) {
       const text = el.textContent || '';
@@ -519,13 +591,19 @@ export const GeminiProvider = {
     return seenHeader ? { value: 'free', source: 'dom_heuristic', evidenceType: 'ESTIMATED' } : null;
   },
 
-  modelKey: (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim() || null,
+  // The page shows the mode ("Flash", "Fast"), the saved chat the model ("3.6 Flash"): compare by family
+  modelKey: (value) => {
+    const s = String(value || '').toLowerCase();
+    const family = s.match(/flash-lite|flash|pro|thinking|deep think/)?.[0] || (/\bfast\b/.test(s) ? 'flash' : null);
+    return family || s.replace(/\s+/g, ' ').trim() || null;
+  },
 
   displayName(raw) {
     return raw ? (/gemini/i.test(raw) ? raw : `Gemini · ${raw}`) : null;
   },
 
   resolveLimit(rawModel, plan) {
+    if (plan === 'workspace') return { contextWindow: GEMINI_WORKSPACE_LIMIT, status: 'VERIFIED', source: GEMINI_WORKSPACE_SOURCE, recognized: true };
     if (!plan || plan === 'unknown' || !(plan in GEMINI_LIMITS)) {
       return { contextWindow: null, status: 'UNKNOWN', source: 'Plan unknown', recognized: Boolean(rawModel) };
     }

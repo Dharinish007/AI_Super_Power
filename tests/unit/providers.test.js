@@ -7,7 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ClaudeProvider, GeminiProvider, claudeModelKey, providerForHost } from '../../content/providers.js';
+import { ClaudeProvider, GeminiProvider, claudeModelKey, providerForHost, parseBatchexecute } from '../../content/providers.js';
 import { ProviderCoordinator } from '../../content/provider-coordinator.js';
 import { ConfidenceEngine } from '../../engine/confidence-engine.js';
 import { Tokenizer } from '../../engine/tokenizer.js';
@@ -293,13 +293,23 @@ export async function runProvidersTests() {
 
     globalThis.location = { href: 'https://gemini.google.com/app/8f2c1a9b3d4e', hostname: 'gemini.google.com', pathname: '/app/8f2c1a9b3d4e' };
     {
-      const env = { domModel: 'Pro', domPlan: { value: 'pro', source: 'dom', evidenceType: 'OBSERVED' }, dom: gMsgs };
+      // Saved turns in Gemini's own shape (oldest first after paging): [[c_id, r_id], _, [[user]], [candidates, …, chosen at 3, model at 21]]
+      const reply = (rc, text) => [rc, [text]];
+      const gTurn = (r, user, cands, chosen, model) => { const m = [cands, null, null, chosen]; m[21] = model; return [['c_8f2c1a9b3d4e', r], null, [[user], 4], m, [1790843112, 0]]; };
+      const env = {
+        domModel: 'Pro', domPlan: { value: 'pro', source: 'dom', evidenceType: 'OBSERVED' }, dom: gMsgs,
+        api: [gTurn('r_1', 'Explain tokens', [reply('rc_a', 'A discarded draft.'), reply('rc_b', 'Tokens are pieces of text.')], 'rc_b', '3.6 Pro')]
+      };
       const { run } = harness(GeminiProvider, env);
       const s = await run();
-      assert('Gemini: read from the page; saved chat marked as possibly incomplete', s.observables.dataSource === 'dom' && s.completeness.isLowerBound === true);
-      assert('Gemini: 1M window on Google AI Pro; tokens estimated, plus the system prompt estimate', s.model.contextWindow === 1000000 && s.tokens.totalMeasurable === count('Explain tokens') + count('Tokens are pieces of text.') + 1500);
-      assert('Gemini: no conversation API calls; never HIGH', env.apiCalls === undefined && s.confidence.level !== 'HIGH');
-      assert('Gemini: widget shows Gemini and the detected mode', toWidgetState(s, { provider: 'Gemini' }).model === 'Gemini · Pro');
+      assert('Gemini: whole chat read from its own saved data, not a lower bound', s.observables.dataSource === 'authoritative' && s.completeness.isLowerBound === false && env.apiCalls === 1);
+      assert('Gemini: reply is the chosen candidate; 1M window on Google AI Pro; + system prompt estimate', s.model.contextWindow === 1000000 && s.tokens.totalMeasurable === count('Explain tokens') + count('Tokens are pieces of text.') + 1500);
+      assert('Gemini: page mode "Pro" and saved model "3.6 Pro" agree (no conflict)', s.conflicts.length === 0 && s.confidence.level !== 'LOW');
+      assert('Gemini: widget shows Gemini and the saved model', toWidgetState(s, { provider: 'Gemini' }).model === 'Gemini · 3.6 Pro');
+
+      const failing = { ...env, api: null, apiError: 'HTTP error 500' };
+      const sf = await harness(GeminiProvider, failing).run();
+      assert('Gemini: read failure falls back to the page, flagged as a lower bound', sf.observables.dataSource === 'dom_fallback' && sf.completeness.isLowerBound === true);
 
       env.domPlan = null;
       const s2 = await run();
@@ -308,33 +318,34 @@ export async function runProvidersTests() {
       // Long chat: at/over half the window, a note (no invented number); below it, none
       env.domPlan = { value: 'free', source: 'dom_heuristic', evidenceType: 'ESTIMATED' };
       const long = 'word '.repeat(20000);
-      env.dom = [{ id: 'g0', role: 'user', text: long, parts: [{ type: 'text', text: long }] }];
-      const s3 = await run();
+      const shortChat = env.api;
+      env.api = [gTurn('r_2', long, [reply('rc_c', 'ok')], 'rc_c', '3.6 Flash')];
+      const s3 = await run({ forceApi: true });
+      env.api = shortChat;
+      await run({ forceApi: true });
       assert('Gemini: long chat (>=50% of the window) gets the note', s3.limits.some(l => l.key === 'long_chat' && /new chat is lighter/.test(l.note)));
       env.dom = gMsgs;
       assert('Gemini: short chat, no note', !(await run()).limits.some(l => l.key === 'long_chat'));
     }
 
-    // ------------------------------------------------------------------ Gemini: completeness + page attachments
+    // ------------------------------------------------------------------ Gemini: saved-data parsing, plan, page attachments
     {
-      const turn = { parentElement: null };
-      const page = (scrollTop, spinner) => ({
-        querySelector: (s) => (s.includes('progress') ? (spinner ? {} : null) : s.startsWith('user-query') ? turn : null)
-      });
-      globalThis.getComputedStyle = () => ({ overflowY: 'auto' });
-      turn.parentElement = { scrollHeight: 2000, clientHeight: 500, scrollTop: 300, parentElement: null };
-      assert('Gemini: history scrolled down -> partial', GeminiProvider.pageMayBePartial(page(), 'c1', 6) === true);
-      turn.parentElement.scrollTop = 0;
-      assert('Gemini: at the top but still loading -> partial', GeminiProvider.pageMayBePartial(page(0, true), 'c1', 6) === true);
-      assert('Gemini: at the top, nothing loading -> complete', GeminiProvider.pageMayBePartial(page(), 'c1', 6) === false);
-      turn.parentElement.scrollTop = 900;
-      assert('Gemini: once seen complete, scrolling back down / new turns stay complete', GeminiProvider.pageMayBePartial(page(), 'c1', 8) === false);
-      assert('Gemini: another chat is judged on its own', GeminiProvider.pageMayBePartial(page(), 'c2', 8) === true);
-      delete globalThis.getComputedStyle;
+      const live = ")]}'\n\n711\n" + JSON.stringify([['wrb.fr', 'hNvQHb', JSON.stringify([[['x']], null]), null, null, null, 'generic'], ['di', 642]]) + '\n25\n[["e",4,null,null,747]]';
+      assert('batchexecute: payload of the rpc decoded from the length-prefixed response', JSON.stringify(parseBatchexecute(live, 'hNvQHb')) === '[[["x"]],null]');
+      const errRow = ")]}'\n" + JSON.stringify([['wrb.fr', 'hNvQHb', null, null, null, [3, null, []], 'generic']]);
+      let threw = '';
+      try { parseBatchexecute(errRow, 'hNvQHb'); } catch (e) { threw = e.message; }
+      assert('batchexecute: an error row throws (page fallback), never an empty chat', /Gemini error 3/.test(threw));
+      assert('Gemini model family: "Flash" (page) = "3.6 Flash" (saved), Fast -> flash',
+        GeminiProvider.modelKey('Flash') === GeminiProvider.modelKey('3.6 Flash') && GeminiProvider.modelKey('Fast') === 'flash' && GeminiProvider.modelKey('3.5 Flash-Lite') === 'flash-lite');
+      const work = GeminiProvider.detectPlan({ querySelector: (sel) => (sel.includes('tier-enterprise') ? {} : null), querySelectorAll: () => [] });
+      assert('Gemini: "Work" account label -> workspace plan (OBSERVED), 1M per the Business / Enterprise page',
+        work.value === 'workspace' && work.evidenceType === 'OBSERVED' && GeminiProvider.resolveLimit('3.6 Flash', 'workspace').contextWindow === 1000000);
 
-      const q = { querySelectorAll: (s) => (s.startsWith('img') ? [{}, {}] : [{}]) };
+      const preview = (isImage) => ({ querySelector: () => (isImage ? {} : null) });
+      const q = { querySelectorAll: () => [preview(true), preview(true), preview(false)] };
       const a = GeminiProvider.pageAttachments({ querySelectorAll: () => [q] });
-      assert('Gemini attachments: images 258 tokens each, other files counted with unknown size',
+      assert('Gemini attachments: image previews 258 tokens each, other files counted with unknown size',
         a.count === 3 && a.estimatedTokens === 516 && a.hasUnknown === true);
     }
 
