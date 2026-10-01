@@ -39,7 +39,7 @@ const MODULES = [
   'engine/confidence-engine.js', 'engine/context-calculator.js', 'engine/context-advisor.js',
   'network/request-observer.js',
   'content/conversation-client.js', 'content/message-extractor.js', 'content/plan-detector.js', 'content/model-detector.js',
-  'content/attachment-detector.js', 'content/tool-detector.js', 'content/widget-state.js', 'content/capsule.js', 'content/page-actions.js',
+  'content/attachment-detector.js', 'content/tool-detector.js', 'content/widget-state.js', 'content/capsule.js', 'content/page-actions.js', 'content/panel-channel.js',
   'ui/dom.js', 'ui/styles.js', 'ui/capsule-panel.js', 'content/overlay-ui.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
   'content/providers.js', 'content/provider-coordinator.js'
 ];

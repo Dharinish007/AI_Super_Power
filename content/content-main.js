@@ -15,6 +15,7 @@ import { AttachmentDetector } from './attachment-detector.js';
 import { ToolDetector } from './tool-detector.js';
 import { ContextWidget } from './overlay-ui.js';
 import { toWidgetState } from './widget-state.js';
+import { servePanel } from './panel-channel.js';
 import { mergeLiveTurns } from './turn-merger.js';
 import { ConversationClient } from './conversation-client.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
@@ -179,6 +180,15 @@ export class ContentScriptCoordinator {
     this.tokenizer.warm();
 
     listenForToggle(this.overlayUI);
+    // The side panel reads this tab through one port: view state is pushed, Page calls come back
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
+      this.panel = servePanel({
+        runtime: chrome.runtime,
+        page: this.overlayUI.page,
+        getState: () => this._lastViewState || toWidgetState(null, { provider: 'ChatGPT' }),
+        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
+      });
+    }
   }
 
   /**
@@ -324,7 +334,7 @@ export class ContentScriptCoordinator {
       // state until this one is read. (A new chat receiving its id from its own stream is the same
       // conversation and keeps its live counts.)
       if (isNewConversation && conversationId && conversationId !== this.requestObserver.getActiveConversationId()) {
-        this.overlayUI.update(toWidgetState(null, { provider: 'ChatGPT' }));
+        this.showState(toWidgetState(null, { provider: 'ChatGPT' }));
       }
 
       // (The token cache is kept across conversations: entries are keyed by message id + text hash,
@@ -778,7 +788,7 @@ export class ContentScriptCoordinator {
 
       // 10. Update in-page floating HUD
       const tRender = now();
-      this.overlayUI.update(toWidgetState(contextState, { provider: 'ChatGPT' }));
+      this.showState(toWidgetState(contextState, { provider: 'ChatGPT' }));
       this.perf.record('renderMs', now() - tRender);
       this.perf.record('passMs', now() - tPass);
       // Update latency: from the change on the page / stream chunk to the widget showing it
@@ -791,6 +801,13 @@ export class ContentScriptCoordinator {
     } catch (err) {
       console.error('[ChatGPT Context Monitor] Extraction error:', err);
     }
+  }
+
+  /** Shows the view state in the in-page widget and pushes it to an open side panel. */
+  showState(viewState) {
+    this._lastViewState = viewState;
+    this.overlayUI.update(viewState);
+    this.panel?.push(viewState);
   }
 
   /** Toolbar badge (service worker); see badgeSender. */

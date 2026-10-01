@@ -13,6 +13,7 @@ import { ContextCalculator } from '../engine/context-calculator.js';
 import { EvidenceMerger, EvidenceType } from '../engine/evidence-merger.js';
 import { ContextWidget } from './overlay-ui.js';
 import { toWidgetState } from './widget-state.js';
+import { servePanel } from './panel-channel.js';
 import { mergeLiveTurns } from './turn-merger.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { invalidateText, trustTextCache } from './providers.js';
@@ -90,6 +91,15 @@ export class ProviderCoordinator {
     this._loadSiteTokenizer();
     this._listenForLimits();
     listenForToggle(this.overlayUI);
+    // The side panel reads this tab through one port: view state is pushed, Page calls come back
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
+      this.panel = servePanel({
+        runtime: chrome.runtime,
+        page: this.overlayUI.page,
+        getState: () => this._lastViewState || toWidgetState(null, { provider: this.provider.name }),
+        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
+      });
+    }
   }
 
   /**
@@ -232,7 +242,7 @@ export class ProviderCoordinator {
       const conversationId = p.conversationId(location.href);
       if (conversationId !== this.activeConversationId) {
         // Another saved conversation: show loading, never the previous one's numbers
-        if (conversationId) this.overlayUI.update(toWidgetState(null, { provider: p.name }));
+        if (conversationId) this.showState(toWidgetState(null, { provider: p.name }));
         this.activeConversationId = conversationId;
         this._wasStreaming = false;
       }
@@ -374,11 +384,18 @@ export class ProviderCoordinator {
         intelligence: { health: state.intelligence.health.level, advice: state.intelligence.advice.title }
       };
       this.latestState = state;
-      this.overlayUI.update(toWidgetState(state, { provider: p.name }));
+      this.showState(toWidgetState(state, { provider: p.name }));
       this.syncState(state);
     } catch (err) {
       console.error(`[Context Monitor] ${p.name} extraction error:`, err);
     }
+  }
+
+  /** Shows the view state in the in-page widget and pushes it to an open side panel. */
+  showState(viewState) {
+    this._lastViewState = viewState;
+    this.overlayUI.update(viewState);
+    this.panel?.push(viewState);
   }
 
   /** Toolbar badge (service worker); see badgeSender. */
