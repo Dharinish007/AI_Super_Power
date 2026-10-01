@@ -20,6 +20,7 @@ import { runFinalFixesTests } from './unit/final-fixes.test.js';
 import { runConfidenceDiagnosticsTests } from './unit/confidence-diagnostics.test.js';
 import { runProvidersTests } from './unit/providers.test.js';
 import { runPerformanceTests } from './unit/performance.test.js';
+import { runCapsuleTests } from './unit/capsule.test.js';
 
 console.log('========================================================');
 console.log('  ChatGPT Context Monitor - Production Test Suite');
@@ -136,6 +137,12 @@ console.log('');
 const r18 = runPerformanceTests();
 totalPassed += r18.passed;
 totalFailed += r18.failed;
+console.log('');
+
+// 19. Capsule: prompt, reply parsing, local store, chat-box insertion
+const r19 = await runCapsuleTests();
+totalPassed += r19.passed;
+totalFailed += r19.failed;
 console.log('');
 
 const t1 = performance.now();

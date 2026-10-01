@@ -118,6 +118,7 @@ export class ContentScriptCoordinator {
     this.overlayUI = new ContextWidget({
       provider: 'ChatGPT',
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
+      replySelector: "[data-message-author-role='assistant']",
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

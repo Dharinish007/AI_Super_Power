@@ -18,6 +18,7 @@ All notable changes to AI Context Monitor. Versions follow `manifest.json`; bump
 - Unparseable ChatGPT API responses are logged in diagnostics (`RESPONSE_PARSE_ERROR`) instead of being dropped silently.
 
 ### Added
+- **Capsules** (widget → Capsules tab): the current AI writes a Capsule of the conversation (or the selected part), the extension detects the reply, the user edits and saves it locally, and Insert puts it in the chat box of ChatGPT, Claude or Gemini. `content/capsule.js`, `tests/unit/capsule.test.js`; privacy policy and store listing updated (saved Capsules are stored text).
 - `PRIVACY.md` (privacy policy for the store listing) and this changelog.
 - Tests: bundle up to date with its sources, sliced table build, API parse errors.
 - GitHub Actions CI (`.github/workflows/ci.yml`): lint, tests, manifest validation, packaging, and the store zip as a downloadable artifact.

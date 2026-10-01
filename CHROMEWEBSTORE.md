@@ -27,6 +27,7 @@ Key Features:
 - Truth-in-measurement: every value is labelled EXACT, OBSERVED, ESTIMATED or UNKNOWN. Hidden system instructions, tool schemas and retrieved memory text are never guessed.
 - Plan usage limits (Claude): session and weekly usage percentages as claude.ai reports them.
 - Itemized breakdown: user messages, assistant replies, attachments, tool activity and hidden context the page exposes.
+- Capsules: ask the AI you are using to summarize the conversation into a Capsule, edit and save it, then insert it into ChatGPT, Claude or Gemini so you never re-explain your context. Saved only in your browser.
 - Non-intrusive widget: a draggable in-page meter that updates during streaming without slowing the page. The toolbar icon shows or hides it.
 - Local and private: all reading, tokenizing and calculating happens in your browser. Nothing is sent to the developer or any third party, and there is no analytics.
 
@@ -37,7 +38,7 @@ Key Features:
 Every declared permission serves a single necessary purpose.
 
 ### `storage`
-- **Justification:** Saves widget preferences (position, expanded state and theme, per site) and the last plan-usage percentages in `chrome.storage.local`. Nothing else is stored: no message text and no conversation IDs.
+- **Justification:** Saves widget preferences (position, expanded state, theme and tab, per site), the last plan-usage percentages, and the Capsules the user explicitly saves (title and text) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
 
 ### Host Permission: `https://chatgpt.com/*` and `https://chat.openai.com/*`
 - **Justification:** Runs the content script on ChatGPT to read the open conversation, detect the model and plan, and draw the context meter. It reads the conversation through ChatGPT's own same-origin endpoints (`/api/auth/session`, `/backend-api/conversation/{id}`, `/backend-api/memories`). Those are the same requests the page itself makes, sent only to ChatGPT.

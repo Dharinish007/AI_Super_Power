@@ -5019,6 +5019,202 @@ function toWidgetState(s, opts = {}) {
 
 
   /**
+ * Context Monitor - Capsule
+ *
+ * A Capsule is the useful context of one conversation, written by the AI the user is already in, saved
+ * locally and inserted into any supported AI so the user never re-explains it.
+ *
+ *   buildCapsulePrompt  text placed in the chat box (the user presses Enter; nothing is sent for them)
+ *   parseCapsule        Capsule between the START / END markers of a reply (or a whole reply, loose)
+ *   readLatestCapsule   newest Capsule among the latest assistant replies on the page
+ *   formatForInsert     what Insert puts in the chat box
+ *   CapsuleStore        list / save / remove in chrome.storage.local (one list shared by all sites)
+ *   insertText          puts text in a site's chat box (rich editor or textarea)
+ */
+
+const CAPSULE_START = '=== CAPSULE START ===';
+const CAPSULE_END = '=== CAPSULE END ===';
+const CAPSULE_MAX_SELECTION = 4000;
+const CAPSULES_KEY = 'capsules';
+const CAPSULE_TITLE_MAX = 80;
+// Only the newest replies can hold the Capsule just asked for
+const CAPSULE_REPLIES_SCANNED = 3;
+
+/**
+ * Prompt asking the current AI to write the Capsule. Four-backtick fence: the Capsule may contain
+ * ``` code, and text inside a code block keeps its headings and line breaks on every site.
+ * @param {string} [selection] Chat text the user selected: the Capsule then focuses on it
+ * @returns {string}
+ */
+function buildCapsulePrompt(selection = '') {
+  let focus = String(selection || '').trim();
+  if (focus.length > CAPSULE_MAX_SELECTION) focus = `${focus.slice(0, CAPSULE_MAX_SELECTION)} […]`;
+  return [
+    'Create a Capsule of this conversation: a compact, self-contained brief that lets a different AI continue this work without seeing our chat.',
+    ...(focus ? ['', 'Focus only on this part of our conversation (use the rest only to understand it):', '"""', focus, '"""'] : []),
+    '',
+    'Rules:',
+    '- Keep exact names, numbers, file paths, commands, code and decisions. Do not invent anything.',
+    '- Skip small talk and dead ends (unless a dead end is worth avoiding).',
+    '- Leave out a section if it would be empty.',
+    '- Reply with only one code block fenced with four backticks (````), in exactly this format:',
+    '',
+    '````',
+    CAPSULE_START,
+    'Title: <up to 8 words>',
+    '## Goal',
+    '## Key decisions',
+    '## Constraints & preferences',
+    '## Current state',
+    '## Open questions / next step',
+    '## Key snippets',
+    CAPSULE_END,
+    '````'
+  ].join('\n');
+}
+
+/**
+ * @param {string} text Reply text
+ * @param {{ loose?: boolean }} [opts] loose: no markers needed (the whole reply is the Capsule)
+ * @returns {{ title: string, body: string }|null} null when there is no complete Capsule
+ */
+function parseCapsule(text, { loose = false } = {}) {
+  const src = String(text || '').replace(/\r\n?/g, '\n');
+  const start = src.indexOf(CAPSULE_START);
+  const end = start < 0 ? -1 : src.indexOf(CAPSULE_END, start + CAPSULE_START.length);
+  if (!loose && end < 0) return null; // No START, or the reply is still streaming
+  let body = src.slice(start < 0 ? 0 : start + CAPSULE_START.length, end < 0 ? undefined : end).trim();
+  // A fence the AI put inside the markers (opening and closing pair); fences in Key snippets stay
+  const fence = body.match(/^(`{3,})[\w-]*\n/);
+  if (fence && body.endsWith(`\n${fence[1]}`)) body = body.slice(fence[0].length, -fence[1].length - 1).trim();
+
+  let title = '';
+  const m = body.match(/^[ \t]*\**title\**:\**[ \t]*(.+)$/im); // "Title: x", "**Title:** x"
+  if (m) {
+    title = m[1];
+    body = (body.slice(0, m.index) + body.slice(m.index + m[0].length)).replace(/^\n+/, '').trim();
+  }
+  if (!body) return null;
+  title = (title || body.split('\n').find(l => l.trim()) || '').replace(/^[#\s*"'`]+|[*"'`\s]+$/g, '');
+  return { title: title.slice(0, CAPSULE_TITLE_MAX) || 'Untitled Capsule', body };
+}
+
+/** Text of the newest assistant reply ('' when none). */
+function latestReplyText(doc, replySelector) {
+  if (!doc || !replySelector) return '';
+  const replies = doc.querySelectorAll(replySelector);
+  const last = replies[replies.length - 1];
+  return last ? String(last.innerText || last.textContent || '').trim() : '';
+}
+
+/**
+ * Newest Capsule in the latest assistant replies. Live innerText (not a detached clone) keeps the
+ * reply's line breaks.
+ * @param {Document} doc
+ * @param {string} replySelector Matches assistant replies (never the user's prompt, which holds the markers too)
+ * @param {string|null} [ignoreBody] Body of a Capsule already on the page before this one was asked for
+ */
+function readLatestCapsule(doc, replySelector, ignoreBody = null) {
+  if (!doc || !replySelector) return null;
+  const replies = doc.querySelectorAll(replySelector);
+  for (let i = replies.length - 1; i >= Math.max(0, replies.length - CAPSULE_REPLIES_SCANNED); i--) {
+    const capsule = parseCapsule(replies[i].innerText || replies[i].textContent);
+    if (capsule) return capsule.body === ignoreBody ? null : capsule;
+  }
+  return null;
+}
+
+/** @param {{ title: string, body: string }} capsule */
+function formatForInsert(capsule) {
+  return `Context from an earlier AI conversation (Capsule: ${capsule.title}). Use it as background for what I ask next.\n\n${capsule.body}`;
+}
+
+const newCapsuleId = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
+
+/**
+ * Capsules in a chrome.storage area, newest first: { id, title, body, source, createdAt, updatedAt }.
+ * ponytail: read-modify-write of one list; two tabs saving in the same instant can drop one save.
+ * Per-capsule keys if that ever shows up.
+ */
+class CapsuleStore {
+  /** @param {{ get: Function, set: Function }} area chrome.storage.local (or a fake with the same API) */
+  constructor(area) {
+    this.area = area;
+  }
+
+  async list() {
+    const r = await this.area.get(CAPSULES_KEY);
+    const list = r?.[CAPSULES_KEY];
+    return Array.isArray(list) ? list : [];
+  }
+
+  /** New when `capsule.id` is not stored yet; otherwise replaces it (keeps createdAt). */
+  async save(capsule) {
+    const body = String(capsule.body || '').trim();
+    if (!body) throw new Error('Capsule is empty');
+    const list = await this.list();
+    const now = Date.now();
+    const i = capsule.id ? list.findIndex(c => c.id === capsule.id) : -1;
+    const item = {
+      id: i >= 0 ? list[i].id : newCapsuleId(),
+      title: String(capsule.title || '').trim().slice(0, CAPSULE_TITLE_MAX) || 'Untitled Capsule',
+      body,
+      source: capsule.source || (i >= 0 ? list[i].source : null) || 'AI',
+      createdAt: i >= 0 ? list[i].createdAt : now,
+      updatedAt: now
+    };
+    if (i >= 0) list[i] = item; else list.unshift(item);
+    await this.area.set({ [CAPSULES_KEY]: list });
+    return item;
+  }
+
+  async remove(id) {
+    const list = await this.list();
+    await this.area.set({ [CAPSULES_KEY]: list.filter(c => c.id !== id) });
+  }
+}
+
+/**
+ * Appends text to a chat box. Rich editors (ProseMirror on ChatGPT / Claude, Quill on Gemini) take a
+ * plain-text paste as typed paragraphs and cancel the event when they handle it; otherwise
+ * execCommand('insertText'); a <textarea> gets its value set the way React notices.
+ * @param {HTMLElement|null} el
+ * @param {string} text
+ * @returns {boolean} false when nothing took the text (the caller copies it instead)
+ */
+function insertText(el, text) {
+  if (!el) return false;
+  el.focus?.();
+  const tag = String(el.tagName || '').toUpperCase();
+  if (tag === 'TEXTAREA' || tag === 'INPUT') {
+    const next = el.value ? `${el.value}\n\n${text}` : text;
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+    if (setter) setter.call(el, next); else el.value = next;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  const doc = el.ownerDocument || (typeof document !== 'undefined' ? document : null);
+  // Caret to the end, so a draft the user already typed stays first
+  try {
+    const sel = doc?.defaultView?.getSelection?.();
+    if (sel && doc.createRange) {
+      const range = doc.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  } catch (_) {}
+  try {
+    const data = new DataTransfer();
+    data.setData('text/plain', text);
+    if (!el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }))) return true;
+  } catch (_) {}
+  try { return Boolean(doc?.execCommand?.('insertText', false, text)); } catch (_) { return false; }
+}
+
+
+  /**
  * Context Monitor - Context Widget (provider-neutral UI)
  *
  * Renders the view state from widget-state.js (toWidgetState). It knows nothing about any AI site:
@@ -5037,7 +5233,11 @@ function toWidgetState(s, opts = {}) {
  * Position, expanded state and theme persist per site in chrome.storage.local.
  * Components build their DOM once; updates write only what changed, and page-derived strings are
  * only ever assigned as text, never HTML.
+ *
+ * Header tabs: Context (above) | Capsules (CapsulePanel: create, edit, save, insert; see capsule.js).
  */
+
+
 
 const STYLES = `
   :host { all: initial; }
@@ -5046,7 +5246,7 @@ const STYLES = `
     --bg: #0F1115; --surface: #171A21; --glass: rgba(23, 26, 33, .85); --border: #262A33; --text: #E6E8EC; --muted: #8A91A0;
     --accent: #D97757; --good: #4ADE80; --warn: #FBBF24; --warn-text: #FBBF24; --danger: #F87171; --track: #262A33; --hover: rgba(255, 255, 255, .06);
     --s1: #D97757; --s2: #60A5FA; --s3: #A78BFA; --s4: #34D399; --s5: #F472B6; --s6: #FBBF24; --s7: #22D3EE; --s8: #94A3B8;
-    --shadow: 0 8px 30px rgba(0, 0, 0, .25);
+    --shadow: 0 8px 30px rgba(0, 0, 0, .25); --on-accent: #0F1115;
     --ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     position: relative; font: 12.5px/1.45 var(--ui); color: var(--text); color-scheme: dark;
@@ -5056,7 +5256,7 @@ const STYLES = `
     --bg: #FAF9F6; --surface: #FFFFFF; --glass: rgba(255, 255, 255, .85); --border: #E7E4DD; --text: #1F2328; --muted: #6B7280;
     --accent: #C15F3C; --good: #16A34A; --warn: #D97706; --warn-text: #B45309; --danger: #DC2626; --track: #EFECE6; --hover: rgba(0, 0, 0, .04);
     --s1: #C15F3C; --s2: #2563EB; --s3: #7C3AED; --s4: #059669; --s5: #DB2777; --s6: #D97706; --s7: #0891B2; --s8: #64748B;
-    --shadow: 0 8px 30px rgba(0, 0, 0, .12); color-scheme: light;
+    --shadow: 0 8px 30px rgba(0, 0, 0, .12); --on-accent: #FFFFFF; color-scheme: light;
   }
   button { all: unset; box-sizing: border-box; cursor: pointer; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
@@ -5080,8 +5280,6 @@ const STYLES = `
   @keyframes in { from { opacity: 0; transform: translateY(-4px); } }
   .head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border);
     cursor: grab; touch-action: none; user-select: none; }
-  .head .title { flex: 1; min-width: 0; font-weight: 600; font-size: 12px; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .head .title span { color: var(--muted); font-weight: 500; }
   .dragging .pill, .dragging .head { cursor: grabbing; }
   .ib { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); flex: none; }
   .ib:hover { background: var(--hover); color: var(--text); }
@@ -5157,6 +5355,31 @@ const STYLES = `
   .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
     font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
   .tip.show { opacity: 1; }
+
+  /* Tabs (header) */
+  .tabs { flex: 1; min-width: 0; display: flex; gap: 2px; margin-left: -8px; }
+  .tab { padding: 4px 8px; border-radius: 6px; font-weight: 600; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .tab:hover, .tab[aria-selected="true"] { background: var(--hover); color: var(--text); }
+
+  /* Capsules */
+  .caps { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .caps .fine { margin-top: 0; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; height: 26px; padding: 0 10px; border-radius: 7px;
+    border: 1px solid var(--border); font-weight: 600; font-size: 11.5px; white-space: nowrap; }
+  .btn:hover { background: var(--hover); }
+  .btn.primary { width: 100%; height: 34px; font-size: 12.5px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.danger { color: var(--danger); }
+  .field { display: block; width: 100%; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font: inherit; outline: none; }
+  .field:focus { border-color: var(--accent); }
+  textarea.field { min-height: 220px; resize: vertical; font: 11px/1.5 var(--mono); scrollbar-width: thin; }
+  .card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .card.wait { border-style: dashed; border-color: var(--accent); }
+  .card .t { font-weight: 600; overflow-wrap: anywhere; }
+  .card .m { color: var(--muted); font-size: 11px; }
+  .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 
   .hide { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -5349,14 +5572,187 @@ function HiddenStack(parent) {
   };
 }
 
+function textButton(parent, label, onClick, cls = 'btn') {
+  const b = h('button', cls, parent, label);
+  b.type = 'button';
+  if (onClick) b.addEventListener('click', onClick);
+  return b;
+}
+
+/**
+ * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
+ * a MutationObserver watches for the reply's END marker and opens it in the editor; Save stores it.
+ * The saved list (one for all sites) has Insert / Copy / Edit / Delete.
+ * @param {HTMLElement} parent
+ * @param {{ provider: string, findInput: () => Element|null, replySelector: string|null, storage: Object|null,
+ *   toast: (text: string) => void, reveal: () => void }} ctx
+ */
+function CapsulePanel(parent, ctx) {
+  const view = h('div', 'body caps hide', parent);
+  const store = ctx.storage ? new CapsuleStore(ctx.storage) : null;
+
+  const create = textButton(view, '📦 Create Capsule', null, 'btn primary');
+  const hint = h('div', 'fine', view, 'Select part of the chat first to capture only that part.');
+
+  const wait = h('div', 'card wait hide', view);
+  wait.setAttribute('role', 'status');
+  h('div', 't', wait, 'Waiting for the Capsule…');
+  h('div', 'm', wait, `Press Enter in the chat to send the prompt. The Capsule opens here when ${ctx.provider} has written it.`);
+  const waitBtns = h('div', 'btns', wait);
+
+  const draft = h('div', 'card hide', view);
+  const titleIn = h('input', 'field', draft);
+  titleIn.placeholder = 'Title';
+  titleIn.maxLength = 80;
+  titleIn.setAttribute('aria-label', 'Capsule title');
+  const bodyIn = h('textarea', 'field', draft);
+  bodyIn.spellcheck = false;
+  bodyIn.setAttribute('aria-label', 'Capsule text');
+  const draftBtns = h('div', 'btns', draft);
+
+  const listHead = h('div', 'caps-h hide', view);
+  const list = h('div', 'caps', view);
+  list.style.padding = '0';
+  const empty = h('div', 'fine', view, 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
+
+  let pendingSelection = '';
+  let editing = null; // { id, source } of the Capsule in the editor
+  let watcher = null; // { observer, timer } while waiting for the reply
+
+  const mode = (m) => {
+    show(create, m === 'idle');
+    show(hint, m === 'idle');
+    show(wait, m === 'waiting');
+    show(draft, m === 'draft');
+  };
+
+  function stopWaiting() {
+    if (!watcher) return;
+    watcher.observer.disconnect();
+    clearTimeout(watcher.timer);
+    watcher = null;
+    mode('idle');
+  }
+
+  function openDraft(capsule) {
+    stopWaiting();
+    editing = { id: capsule.id || null, source: capsule.source || ctx.provider };
+    titleIn.value = capsule.title || '';
+    bodyIn.value = capsule.body || '';
+    mode('draft');
+    bodyIn.scrollTop = 0;
+    titleIn.focus({ preventScroll: true });
+  }
+
+  /** @param {string|null} ignoreBody Capsule already on the page before this one was asked for */
+  function startWaiting(ignoreBody) {
+    stopWaiting();
+    const check = () => {
+      if (!watcher) return;
+      watcher.timer = null;
+      const capsule = readLatestCapsule(document, ctx.replySelector, ignoreBody);
+      if (!capsule) return;
+      openDraft({ ...capsule, source: ctx.provider });
+      ctx.reveal();
+      ctx.toast('Capsule ready: review and save');
+    };
+    // At most one read per 500 ms while the reply streams; nothing runs when not waiting
+    const observer = new MutationObserver(() => { if (watcher && !watcher.timer) watcher.timer = setTimeout(check, 500); });
+    watcher = { observer, timer: null };
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    mode('waiting');
+  }
+
+  const copy = (capsule, done) => navigator.clipboard.writeText(formatForInsert(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
+
+  // Selection is read on press: the click itself may move focus away from the chat
+  create.addEventListener('pointerdown', () => { pendingSelection = String(window.getSelection?.() || ''); });
+  create.addEventListener('click', () => {
+    const selection = (pendingSelection || String(window.getSelection?.() || '')).trim();
+    pendingSelection = '';
+    if (!ctx.replySelector || !document.querySelector(ctx.replySelector)) return ctx.toast('Open a conversation first');
+    const input = ctx.findInput();
+    if (!input) return ctx.toast('Chat box not found');
+    const ignoreBody = readLatestCapsule(document, ctx.replySelector)?.body ?? null;
+    if (!insertText(input, buildCapsulePrompt(selection))) return ctx.toast('Could not fill the chat box');
+    startWaiting(ignoreBody);
+    ctx.toast('Prompt ready: press Enter to send');
+  });
+
+  textButton(waitBtns, 'Use last reply', () => {
+    const capsule = parseCapsule(latestReplyText(document, ctx.replySelector), { loose: true });
+    if (!capsule) return ctx.toast('No reply yet');
+    openDraft({ ...capsule, source: ctx.provider });
+  });
+  textButton(waitBtns, 'Cancel', stopWaiting);
+
+  textButton(draftBtns, 'Save', async () => {
+    if (!store) return ctx.toast('Storage unavailable');
+    try {
+      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value });
+    } catch (e) {
+      return ctx.toast(e?.message === 'Capsule is empty' ? 'Capsule is empty' : 'Save failed');
+    }
+    editing = null;
+    mode('idle');
+    ctx.toast('Capsule saved');
+    refresh();
+  });
+  textButton(draftBtns, 'Discard', () => { editing = null; mode('idle'); });
+
+  // Keys typed in the editor stay in it: the sites move focus to their chat box on stray keystrokes
+  for (const type of ['keydown', 'keypress', 'keyup']) draft.addEventListener(type, (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
+
+  function renderItem(capsule) {
+    const card = h('div', 'card', list);
+    h('div', 't', card, capsule.title);
+    const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    h('div', 'm', card, `${capsule.source} · ${date}`);
+    const btns = h('div', 'btns', card);
+    textButton(btns, 'Insert', () => {
+      const input = ctx.findInput();
+      if (input && insertText(input, formatForInsert(capsule))) ctx.toast('Inserted: add your question and send');
+      else copy(capsule, 'Chat box not found: copied instead');
+    });
+    textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
+    textButton(btns, 'Edit', () => openDraft(capsule));
+    const del = textButton(btns, 'Delete', async () => {
+      if (!del.dataset.armed) {
+        del.dataset.armed = '1';
+        del.textContent = 'Sure?';
+        setTimeout(() => { delete del.dataset.armed; del.textContent = 'Delete'; }, 3000);
+        return;
+      }
+      try { await store.remove(capsule.id); } catch (_) { return ctx.toast('Delete failed'); }
+      ctx.toast('Deleted');
+      refresh();
+    }, 'btn danger');
+  }
+
+  async function refresh() {
+    if (!store) return;
+    let items;
+    try { items = await store.list(); } catch (_) { return; }
+    list.textContent = '';
+    setText(listHead, `Saved (${items.length})`);
+    show(listHead, items.length > 0);
+    show(empty, items.length === 0);
+    for (const c of items) renderItem(c);
+  }
+
+  return { view, refresh, stop: stopWaiting };
+}
+
 class ContextWidget {
   /**
-   * @param {{ provider?: string, findInput?: () => Element|null, onRefresh?: () => any, getDiagnostics?: () => Object }} [adapter]
-   *   `findInput` is accepted for compatibility; the widget no longer positions itself by the chat input.
+   * @param {{ provider?: string, findInput?: () => Element|null, replySelector?: string, onRefresh?: () => any, getDiagnostics?: () => Object }} [adapter]
+   *   `findInput` finds the site's chat box and `replySelector` matches assistant replies (Capsules).
    */
   constructor(adapter = {}) {
     this.adapter = {
       provider: adapter.provider || 'AI',
+      findInput: adapter.findInput || (() => null),
+      replySelector: adapter.replySelector || null,
       onRefresh: adapter.onRefresh || (() => {}),
       getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
     };
@@ -5364,6 +5760,7 @@ class ContextWidget {
     this.shadowRoot = null;
     this.isExpanded = false;
     this.isVisible = true;
+    this.tab = 'context';
     this.theme = 'auto';
     this.pos = { ...DEFAULT_POS };
     this.latestState = null;
@@ -5399,6 +5796,13 @@ class ContextWidget {
         this.render();
       }
     }, true);
+    // A Capsule saved or deleted on another site / tab shows up here too
+    try {
+      chrome.storage?.onChanged?.addListener((changes, area) => {
+        if (area === 'local' && changes[CAPSULES_KEY]) this.parts?.caps.refresh();
+      });
+    } catch (_) {}
+    this.parts.caps.refresh();
     this._loadPrefs();
     this.render();
   }
@@ -5426,8 +5830,15 @@ class ContextWidget {
     const head = h('div', 'head', panel);
     head.tabIndex = 0;
     head.setAttribute('aria-label', 'Move panel: drag, or use arrow keys. Double-click to reset position.');
-    const title = h('div', 'title', head, 'Context ');
-    h('span', null, title, `· ${provider}`);
+    const tabs = h('div', 'tabs', head);
+    tabs.setAttribute('role', 'tablist');
+    const tab = (label, key) => {
+      const b = textButton(tabs, label, () => this._setTab(key), 'tab');
+      b.setAttribute('role', 'tab');
+      return b;
+    };
+    const tabContext = tab('Context', 'context');
+    const tabCaps = tab('Capsules', 'capsules');
     const themeBtn = iconButton(head, ICONS.auto, 'Theme: auto');
     const collapseBtn = iconButton(head, ICONS.collapse, 'Collapse');
     const closeBtn = iconButton(head, ICONS.close, 'Close (Alt+T to reopen)');
@@ -5486,6 +5897,19 @@ class ContextWidget {
     const diagRows = RowList(diag.body);
     const evidence = h('ul', 'evidence', diag.body);
     h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not.');
+
+    const caps = CapsulePanel(panel, {
+      provider,
+      findInput: () => this.adapter.findInput(),
+      replySelector: this.adapter.replySelector,
+      storage: this._storage(),
+      toast: (text) => this._toast(text),
+      reveal: () => {
+        this.isVisible = true;
+        this._setTab('capsules');
+        if (!this.isExpanded) this._setExpanded(true);
+      }
+    });
 
     const foot = h('div', 'foot', panel);
     const conf = h('div', 'conf', foot);
@@ -5552,7 +5976,7 @@ class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, head, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
+      pill, pillDot, pillNum, pillLvl, panel, head, tabContext, tabCaps, body, foot, caps, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
       sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
     };
   }
@@ -5576,6 +6000,12 @@ class ContextWidget {
     show(p.pill, !this.isExpanded);
     show(p.panel, this.isExpanded);
     setAttr(p.pill, 'aria-expanded', String(this.isExpanded));
+    const onCaps = this.tab === 'capsules';
+    show(p.body, !onCaps);
+    show(p.foot, !onCaps);
+    show(p.caps.view, onCaps);
+    setAttr(p.tabContext, 'aria-selected', String(!onCaps));
+    setAttr(p.tabCaps, 'aria-selected', String(onCaps));
 
     const vm = this.latestState || { ready: false, usedTokens: 0, percentage: null, evidence: [], breakdown: [], hiddenItems: [], limits: [], confidenceLevel: 'LOW', confidence: 0, provider: this.adapter.provider, model: 'Detecting…' };
     const lvl = vm.ready === false ? 'LOW' : vm.confidenceLevel;
@@ -5678,6 +6108,14 @@ class ContextWidget {
     this.render();
     this._savePrefs();
     if (open) this.parts.head.focus({ preventScroll: true });
+  }
+
+  /** @param {'context'|'capsules'} key */
+  _setTab(key) {
+    if (this.tab !== key && key === 'capsules') this.parts.caps.refresh();
+    this.tab = key;
+    this.render();
+    this._savePrefs();
   }
 
   _toast(text) {
@@ -5838,6 +6276,7 @@ class ContextWidget {
         if (!s || typeof s !== 'object') return;
         if (s.pos && ['left', 'right'].includes(s.pos.side) && Number.isFinite(s.pos.dx) && Number.isFinite(s.pos.y)) this.pos = s.pos;
         if (THEMES.includes(s.theme)) this.theme = s.theme;
+        if (s.tab === 'context' || s.tab === 'capsules') this.tab = s.tab;
         this.isExpanded = Boolean(s.expanded);
         this.render();
       }).catch(() => {});
@@ -5849,11 +6288,12 @@ class ContextWidget {
     if (!store) return;
     clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
-      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme } }).catch(() => {}); } catch (_) {}
+      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme, tab: this.tab } }).catch(() => {}); } catch (_) {}
     }, 200);
   }
 
   unmount() {
+    this.parts?.caps.stop();
     this.hostElement?.remove();
     this.hostElement = null;
     this.shadowRoot = null;
@@ -6250,6 +6690,7 @@ class ContentScriptCoordinator {
     this.overlayUI = new ContextWidget({
       provider: 'ChatGPT',
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
+      replySelector: "[data-message-author-role='assistant']",
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });
@@ -7188,6 +7629,7 @@ const ClaudeProvider = {
   name: 'Claude',
   hosts: ['claude.ai'],
   inputSelector: 'div.ProseMirror[contenteditable="true"], [data-testid="chat-input"], fieldset [contenteditable="true"]',
+  replySelector: '.font-claude-response, .font-claude-message', // Assistant replies (Capsule reader)
   hasApi: true,
 
   conversationId(url) {
@@ -7455,6 +7897,7 @@ const GeminiProvider = {
   name: 'Gemini',
   hosts: ['gemini.google.com'],
   inputSelector: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]',
+  replySelector: 'model-response', // Assistant replies (Capsule reader)
   hasApi: false,
 
   /**
@@ -7642,6 +8085,7 @@ class ProviderCoordinator {
     this.overlayUI = new ContextWidget({
       provider: provider.name,
       findInput: () => provider.findInput(document),
+      replySelector: provider.replySelector,
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

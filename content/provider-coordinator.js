@@ -30,6 +30,7 @@ export class ProviderCoordinator {
     this.overlayUI = new ContextWidget({
       provider: provider.name,
       findInput: () => provider.findInput(document),
+      replySelector: provider.replySelector,
       onRefresh: () => this.refresh(),
       getDiagnostics: () => this.getDiagnostics()
     });

@@ -77,6 +77,7 @@ const conversationClientCode = readCleanModule(path.join(rootDir, 'content', 'co
 const attachmentCode = readCleanModule(path.join(rootDir, 'content', 'attachment-detector.js'));
 const toolCode = readCleanModule(path.join(rootDir, 'content', 'tool-detector.js'));
 const widgetStateCode = readCleanModule(path.join(rootDir, 'content', 'widget-state.js'));
+const capsuleCode = readCleanModule(path.join(rootDir, 'content', 'capsule.js'));
 const overlayCode = readCleanModule(path.join(rootDir, 'content', 'overlay-ui.js'));
 const domObserverCode = readCleanModule(path.join(rootDir, 'content', 'chatgpt-dom.js'));
 const requestObserverCode = readCleanModule(path.join(rootDir, 'network', 'request-observer.js'));
@@ -134,6 +135,8 @@ export const bundledContentScript = `/**
   ${toolCode}
 
   ${widgetStateCode}
+
+  ${capsuleCode}
 
   ${overlayCode}
 

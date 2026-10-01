@@ -63,6 +63,7 @@ ChatGPT Web Page
 | **In-Page Floating HUD**| ✅ Completed | `ESTIMATED` | Non-intrusive Shadow DOM overlay with mini popover |
 | **Refresh Button** | ✅ Completed | `OBSERVED` | Re-reads the current conversation on demand; the toolbar icon shows / hides the widget (there is no popup) |
 | **Toolbar Badge** | ✅ Completed | `ESTIMATED` | Displays percentage utilization (`24%`) with alert colors |
+| **Capsules** | ✅ Completed | n/a | Save a conversation's context and insert it into another AI (see below) |
 
 ---
 
@@ -82,6 +83,12 @@ ChatGPT Web Page
 **Session token (ChatGPT):** `/backend-api` rejects cookie-only requests, so the content script reads `accessToken` from same-origin `/api/auth/session` (exactly what ChatGPT's own page does). It lives only in a private in-memory field, is sent only to `chatgpt.com`, and is never logged, stored, or included in extension state or diagnostics.
 
 **Widget:** a small draggable pill in the top-right corner (`39.3K • Medium`). Click it for the full panel (usage bar, model, plan, breakdown, hidden context, usage limits); the toolbar icon shows or hides it. **Copy diagnostics** copies a structure-only JSON snapshot (source statuses, selector counts, candidates; no message text, no token) for troubleshooting.
+
+**Capsules** (widget → **Capsules** tab, `content/capsule.js`): a portable summary of one conversation for use in another AI.
+1. **Create Capsule** fills the chat box with a prompt asking the current AI to write the Capsule (select chat text first to focus on that part). You press Enter; nothing is sent for you.
+2. When the reply's `=== CAPSULE END ===` marker appears, the Capsule opens in an editor. A MutationObserver runs only while waiting. **Use last reply** saves the newest reply as-is if the markers are missing.
+3. **Save** stores it in `chrome.storage.local`, one list shared by ChatGPT, Claude and Gemini.
+4. **Insert** puts it in the chat box of any of the three sites (copied to the clipboard if the box is not found); **Copy**, **Edit** and **Delete** (click twice) manage it.
 
 ---
 

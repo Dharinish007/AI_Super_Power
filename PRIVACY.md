@@ -14,15 +14,17 @@ AI Context Monitor is a browser extension that shows how much of the AI model's 
 
 ## What it does with that data
 
-- All text is processed locally to count tokens. Text is never stored and never leaves the page.
+- All text is processed locally to count tokens. It never leaves the page, and it is stored only when you save a Capsule (below).
+- **Capsules:** when you click Create Capsule, the extension puts a prompt in the site's chat box; you choose whether to send it. When you click Save, that Capsule's title and text are stored in your browser. Insert puts a saved Capsule in the chat box of the site you are on, and only you send it.
 - Network requests go only to the site you are using, the same requests the site makes itself. Nothing is sent to the developer or any third party.
 - The ChatGPT session token is kept only in memory while the page is open. It is never saved, logged, or included in diagnostics.
 
 ## What it stores
 
-- `chrome.storage.local`: widget position, expanded state and theme for each site, and your last Claude usage-limit percentages and reset times.
+- `chrome.storage.local`: widget position, expanded state, theme and open tab for each site, and your last Claude usage-limit percentages and reset times.
+- `chrome.storage.local`: Capsules you saved (title, text, site name, dates). You can edit or delete each one in the Capsules tab.
 
-Nothing else is stored: no message text, memory text, conversation IDs, tokens or cookies. The toolbar badge receives only the current percentage.
+Nothing else is stored: no other message text, no memory text, conversation IDs, tokens or cookies. The toolbar badge receives only the current percentage.
 
 ## What it does not do
 
