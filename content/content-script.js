@@ -8498,7 +8498,7 @@ class ProviderCoordinator {
   _retryLater(conversationId, ms) {
     clearTimeout(this._retryTimer);
     this._retryTimer = setTimeout(() => {
-      if (this.provider.conversationId(location.href) === conversationId) this.handleDOMChange();
+      if (globalThis.location && this.provider.conversationId(location.href) === conversationId) this.handleDOMChange();
     }, ms);
     this._retryTimer?.unref?.(); // Node (tests) only: a pending retry never keeps the process alive
   }
