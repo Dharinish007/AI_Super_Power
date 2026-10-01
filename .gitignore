@@ -18,3 +18,6 @@ yarn-error.log*
 # Editor directories
 .vscode/
 .idea/
+
+# Tokenizer source (32 MB); scripts/build-gemma-tokenizer.js downloads and checks it
+vendor/

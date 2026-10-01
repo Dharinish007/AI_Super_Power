@@ -303,9 +303,31 @@ export async function runProvidersTests() {
       const { run } = harness(GeminiProvider, env);
       const s = await run();
       assert('Gemini: whole chat read from its own saved data, not a lower bound', s.observables.dataSource === 'authoritative' && s.completeness.isLowerBound === false && env.apiCalls === 1);
-      assert('Gemini: reply is the chosen candidate; 1M window on Google AI Pro; + system prompt estimate', s.model.contextWindow === 1000000 && s.tokens.totalMeasurable === count('Explain tokens') + count('Tokens are pieces of text.') + 1500);
+      assert('Gemini: reply is the chosen candidate; 1M window on Google AI Pro; + system prompt estimate', s.model.contextWindow === 1000000 && s.tokens.totalMeasurable === count('Explain tokens') + count('Tokens are pieces of text.') + GeminiProvider.systemPromptEstimate('3.6 Pro').tokens);
       assert('Gemini: page mode "Pro" and saved model "3.6 Pro" agree (no conflict)', s.conflicts.length === 0 && s.confidence.level !== 'LOW');
       assert('Gemini: widget shows Gemini and the saved model', toWidgetState(s, { provider: 'Gemini' }).model === 'Gemini · 3.6 Pro');
+
+      // Gemini's own tokenizer (Gemma 4) loaded: counts switch to it, exact, no approximate-tokenizer penalty
+      {
+        const g = harness(GeminiProvider, { ...env });
+        const bin = fs.readFileSync(path.join(root, GeminiProvider.tokenizer.file));
+        const gemma = GeminiProvider.tokenizer.create(bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.length));
+        g.c.tokenizer.useCounter('gemma4', gemma);
+        const se = await g.run();
+        assert('Gemini + Gemma 4 loaded: text counted with Gemini\'s tokenizer, marked exact',
+          se.tokens.totalMeasurable === gemma.count('Explain tokens') + gemma.count('Tokens are pieces of text.') + GeminiProvider.systemPromptEstimate('3.6 Pro').tokens &&
+          se.confidence.factors.some(f => f.text === 'Exact tokenizer') && !(se.confidence.highBlockers || []).includes('approximate tokenizer'));
+        assert('Gemini + Gemma 4: confidence above the approximate cap', se.confidence.percentage > s.confidence.percentage);
+      }
+
+      // System prompt: sized from the closest public leak of the same family, at or below the model's version
+      const est = (m) => GeminiProvider.systemPromptEstimate(m);
+      assert('Gemini system prompt: 3.6 Pro -> 3.1 Pro leak, 3.6 Flash -> 3.5 Flash, 3.8 Flash -> 3.8, Flash-Lite counts as Flash, 2.5 -> oldest',
+        est('3.6 Pro').basis === '3.1 Pro' && est('3.6 Flash').tokens === 3900 && est('3.8 Flash').tokens === 13800 &&
+        est('3.5 Flash-Lite').basis === '3.5 Flash' && est('2.5 Flash').basis === '3 Flash');
+      assert("Gemini system prompt: no version shown -> the family's latest leak", est('Flash').basis === '3.8 Flash' && est(null).basis === '3.8 Flash');
+      const sp = s.tokens.hiddenItems?.find(i => i.kind === 'system_prompt') || s.tokens.hidden;
+      assert('Gemini hidden context names the leak it is sized from', JSON.stringify(sp).includes('3.1 Pro'));
 
       const failing = { ...env, api: null, apiError: 'HTTP error 500' };
       const sf = await harness(GeminiProvider, failing).run();
@@ -342,11 +364,25 @@ export async function runProvidersTests() {
       assert('Gemini: "Work" account label -> workspace plan (OBSERVED), 1M per the Business / Enterprise page',
         work.value === 'workspace' && work.evidenceType === 'OBSERVED' && GeminiProvider.resolveLimit('3.6 Flash', 'workspace').contextWindow === 1000000);
 
+      // Usage RPC as returned live (2026-10-01): tier 1, 5h and weekly windows unused
+      const usage = GeminiProvider.parseUsage(parseBatchexecute(")]}'\n\n189\n" + JSON.stringify([['wrb.fr', 'jSf9Qc', '[1,[[600,0,1,[[1790880148,801040000]]],[12096,0,2,[[1791466948,801043000]]]],false]', null, null, null, 'generic']]), 'jSf9Qc'));
+      assert('Gemini usage: tier 1 -> free (reported, OBSERVED); 5h + weekly limits with reset times',
+        usage.plan.value === 'free' && usage.plan.evidenceType === 'OBSERVED' && usage.limits.length === 2 &&
+        usage.limits[0].key === 'session' && usage.limits[0].percent === 0 && usage.limits[0].resetsAt === 1790880148000 && usage.limits[1].key === 'weekly');
+      const tiers = [2, 3, 4, 6].map(t => GeminiProvider.parseUsage([t, [[10, 0.42, 1, [[1, 0]]], [5, 0.9, 3, []]]]));
+      assert('Gemini usage: tiers 2 Pro, 3/6 Ultra, 4 Plus; used fraction -> percent; AI-credit window skipped',
+        tiers.map(u => u.plan.value).join() === 'pro,ultra,plus,ultra' && tiers[0].limits.length === 1 && tiers[0].limits[0].percent === 42);
+      assert('Gemini usage: unknown tier or bad shape -> no plan, no limits',
+        GeminiProvider.parseUsage([99, []]).plan === null && GeminiProvider.parseUsage(null).limits.length === 0);
+
       const preview = (isImage) => ({ querySelector: () => (isImage ? {} : null) });
       const q = { querySelectorAll: () => [preview(true), preview(true), preview(false)] };
-      const a = GeminiProvider.pageAttachments({ querySelectorAll: () => [q] });
-      assert('Gemini attachments: image previews 258 tokens each, other files counted with unknown size',
-        a.count === 3 && a.estimatedTokens === 516 && a.hasUnknown === true);
+      const a = GeminiProvider.pageAttachments({ querySelectorAll: () => [q] }, '3.6 Flash');
+      assert('Gemini attachments: images 1,120 tokens each on Gemini 3+ (default resolution), other files counted with unknown size',
+        a.count === 3 && a.estimatedTokens === 2240 && a.hasUnknown === true);
+      assert('Gemini attachments: 258 per image on 2.x; current model when no version is shown',
+        GeminiProvider.pageAttachments({ querySelectorAll: () => [q] }, '2.5 Flash').estimatedTokens === 516 &&
+        GeminiProvider.pageAttachments({ querySelectorAll: () => [q] }, 'Flash').estimatedTokens === 2240);
     }
 
     // ------------------------------------------------------------------ Gemini: layout, free plan, limit notice

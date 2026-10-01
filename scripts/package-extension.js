@@ -30,7 +30,8 @@ const filesToInclude = [...new Set([
   manifest.background.service_worker,
   ...manifest.content_scripts.flatMap(cs => cs.js || []),
   ...Object.values(manifest.icons),
-  ...Object.values(manifest.action?.default_icon || {})
+  ...Object.values(manifest.action?.default_icon || {}),
+  ...(manifest.web_accessible_resources || []).flatMap(w => w.resources)
 ])];
 
 // Verify all files exist

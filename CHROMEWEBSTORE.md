@@ -28,8 +28,7 @@ Key Features:
 - Plan usage limits (Claude): session and weekly usage percentages as claude.ai reports them.
 - Itemized breakdown: user messages, assistant replies, attachments, tool activity and hidden context the page exposes.
 - Skills: save instructions you reuse ("Explain simply", "Review my code") and insert them into any of the three AIs.
-- Library: search, tag, group by project and pin your Capsules and Skills; tick several to insert them together and see what they cost before sending.
-- Capsules: ask the AI you are using to summarize the conversation into a Capsule, edit and save it, then insert it into ChatGPT, Claude or Gemini so you never re-explain your context. Saved only in your browser.
+\- Capsules: ask the AI you are using to summarize the conversation into a Capsule, edit and save it, then insert it into ChatGPT, Claude or Gemini so you never re-explain your context. Saved only in your browser.
 - Non-intrusive widget: a draggable in-page meter that updates during streaming without slowing the page. The toolbar icon shows or hides it.
 - Local and private: all reading, tokenizing and calculating happens in your browser. Nothing is sent to the developer or any third party, and there is no analytics.
 

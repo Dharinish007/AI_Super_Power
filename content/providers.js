@@ -10,6 +10,8 @@
  * the o200k BPE tokenizer and confidence can never be HIGH for these sites.
  */
 
+import { GemmaCounter } from '../engine/gemma-tokenizer.js';
+
 // element -> { raw, text }: cleaning clones the node, so unchanged elements reuse the last result
 const textCache = new WeakMap();
 // Set while a MutationObserver reports every page change through invalidateText(): cached text is
@@ -379,10 +381,21 @@ export const ClaudeProvider = {
 // plan, not the model: no AI plan 32K, Google AI Plus 128K, Google AI Pro and Ultra 1M.
 const GEMINI_LIMIT_SOURCE = 'Gemini Apps Help: limits by plan (support.google.com/gemini/answer/16275805)';
 const GEMINI_LIMITS = { free: 32000, plus: 128000, pro: 1000000, ultra: 1000000 };
-// ponytail: unpublished, a rough guess; replace with a measured value when one exists
-const GEMINI_SYSTEM_PROMPT_ESTIMATE = 1500;
-// ai.google.dev/gemini-api/docs/tokens: an image (up to 384px each side) is 258 tokens; larger ones are tiled, so this is a floor
-const GEMINI_IMAGE_TOKENS = 258;
+// Gemini's system prompt is never sent to the page. Sizes are the public leaks in
+// github.com/asgeirtj/system_prompts_leaks (Google/gemini-*.md), counted with Gemma 4 and rounded to 100
+// (measured 2026-10-01; the date is the leak's commit). Each includes that account's tools and features,
+// so a prompt with other features enabled differs: these stay estimates.
+const GEMINI_SYSTEM_PROMPTS = [
+  { family: 'flash', version: 3, tokens: 3400, date: '2026-09' },
+  { family: 'flash', version: 3.5, tokens: 3900, date: '2026-07' },
+  { family: 'flash', version: 3.7, tokens: 7900, date: '2026-08' },
+  { family: 'flash', version: 3.8, tokens: 13800, date: '2026-09' },
+  { family: 'pro', version: 3, tokens: 3000, date: '2025-12' },
+  { family: 'pro', version: 3.1, tokens: 6100, date: '2026-09' }
+];
+// Tokens per image at the default resolution. Gemini 3+: 1120 (ai.google.dev/gemini-api/docs/media-resolution,
+// checked 2026-10-01); 2.x: 258 per 768px tile (docs/tokens), so 258 is a floor there
+const geminiImageTokens = (model) => (Number(String(model || '').match(/(\d+(?:\.\d+)?)/)?.[1] ?? Infinity) >= 3 ? 1120 : 258);
 // support.google.com/gemini/answer/14620100 (Business / Enterprise, checked 2026-10-01): 1M on every edition where
 // Gemini is a core service; 32K only where it is an additional service (not detectable from the page)
 const GEMINI_WORKSPACE_SOURCE = 'Gemini Apps Help: work accounts, Business / Enterprise (support.google.com/gemini/answer/14620100)';
@@ -392,6 +405,10 @@ const GEMINI_WORKSPACE_LIMIT = 1000000;
 // page, continuation token at [1]. Each turn: [[c_id, r_id], _, [[userText]], [candidates, …, chosen id at 3,
 // model name at 21], [epochSeconds]]; a candidate is [rc_id, [replyText], …].
 const GEMINI_RPC_READ = 'hNvQHb';
+// Plan tier + usage windows (rpc "jSf9Qc", source path /usage). Tier ids from HanaokaYuzu/Gemini-API
+// (client.py _fetch_usage_info, 2026-08): 1 free, 2 Pro, 3 / 6 Ultra, 4 Plus
+const GEMINI_RPC_USAGE = 'jSf9Qc';
+const GEMINI_TIERS = { 1: 'free', 2: 'pro', 3: 'ultra', 4: 'plus', 6: 'ultra' };
 const GEMINI_PAGE_SIZE = 10;
 const GEMINI_MAX_PAGES = 100; // 1,000 turns
 
@@ -443,12 +460,29 @@ export const GeminiProvider = {
   hasApi: true,
 
   /**
+   * Gemini's own tokenizer: Google's SDK counts gemini-3.1 and later (3.5 Flash, 3.1 Pro, …) with Gemma 4
+   * (googleapis/python-genai _local_tokenizer_loader.py). Older models used Gemma 3, so counts for them
+   * stay approximate. A model with no version shown is the app's current one.
+   */
+  tokenizer: {
+    name: 'gemma4',
+    file: 'assets/gemma4-tokenizer.bin',
+    create: (buffer) => new GemmaCounter(buffer),
+    exactFor(model) {
+      const v = String(model || '').match(/(\d+(?:\.\d+)?)/);
+      return !v || Number(v[1]) >= 3.1;
+    }
+  },
+
+  /**
    * The whole saved chat through Gemini's own read call (the page only holds the turns scrolled into
    * view). Pages until there is no continuation token; one retry on a failed page.
    */
   async fetchConversation(conversationId) {
     const session = geminiSession(document);
     if (!session) return null;
+    // Plan and usage limits come with every read; best effort, never blocks the conversation
+    const usage = geminiRpc(session, GEMINI_RPC_USAGE, [], '/usage').catch(() => null);
     const turns = [];
     let token = null;
     for (let page = 0; page < GEMINI_MAX_PAGES; page++) {
@@ -460,7 +494,30 @@ export const GeminiProvider = {
       token = data[1];
       if (!token) break;
     }
-    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits: [] };
+    const { plan, limits } = this.parseUsage(await usage);
+    // A work account's window follows its Workspace edition, not this tier (the page's "Work" label decides)
+    const workAccount = Boolean(document.querySelector('[class*="tier-enterprise"]'));
+    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: workAccount ? null : plan, hidden: null, attachments: null, limits };
+  },
+
+  /**
+   * Gemini's usage RPC (checked live 2026-10-01): [tierId, [[remainingCredits, usedFraction, window, [[resetSeconds, nanos]]], …], overage].
+   * Window 1 = 5 hours, 2 = weekly, 3 = AI credits (skipped).
+   * @returns {{ plan: Object|null, limits: Array<{ key: string, label: string, percent: number, resetsAt: number|null }> }}
+   */
+  parseUsage(data) {
+    if (!Array.isArray(data)) return { plan: null, limits: [] };
+    const value = GEMINI_TIERS[data[0]];
+    const plan = value ? { value, evidenceType: 'OBSERVED' } : null;
+    const names = { 1: ['session', 'Session (5h)'], 2: ['weekly', 'Weekly'] };
+    const limits = [];
+    for (const item of Array.isArray(data[1]) ? data[1] : []) {
+      const name = names[item?.[2]];
+      if (!name || typeof item[1] !== 'number') continue;
+      const reset = item[3]?.[0]?.[0];
+      limits.push({ key: name[0], label: name[1], percent: Math.round(item[1] * 100), resetsAt: typeof reset === 'number' ? reset * 1000 : null });
+    }
+    return { plan, limits };
   },
 
   /** Saved turns (oldest first) as messages; the reply is the chosen candidate. */
@@ -486,10 +543,11 @@ export const GeminiProvider = {
    * Gem instructions are not readable: the prompt is a fixed estimate. Images use Google's published
    * 258 tokens per image; other files have no readable size and stay unknown.
    */
-  pageHiddenContext() {
+  pageHiddenContext(model) {
+    const p = this.systemPromptEstimate(model);
     const items = [{
-      kind: 'system_prompt', label: 'Gemini system prompt (estimate)', tokens: GEMINI_SYSTEM_PROMPT_ESTIMATE, estimated: true,
-      text: `Not readable from the page. Estimated at ~${GEMINI_SYSTEM_PROMPT_ESTIMATE.toLocaleString()} tokens.`
+      kind: 'system_prompt', label: `Gemini system prompt (estimate, ${p.basis})`, tokens: p.tokens, estimated: true,
+      text: `Not readable from the page. Sized from the public ${p.basis} system prompt leak (${p.date}), ~${p.tokens.toLocaleString()} tokens; enabled tools change it.`
     }];
     if (/\/gem\//.test(location.pathname)) {
       items.push({ kind: 'project', label: 'Gem instructions (not readable)', tokens: 0, estimated: true, text: 'This chat uses a Gem; its instructions are sent but cannot be read from the page.' });
@@ -497,19 +555,34 @@ export const GeminiProvider = {
     return items;
   },
 
-  pageAttachments(doc) {
+  /**
+   * Leaked prompt closest to the model: same family (Flash-Lite and Thinking count as Flash), the highest
+   * leaked version at or below the model's, else the lowest above; no version -> the family's latest.
+   * @returns {{ tokens: number, basis: string, date: string }}
+   */
+  systemPromptEstimate(model) {
+    const s = String(model || '').toLowerCase();
+    const family = /\bpro\b/.test(s) ? 'pro' : 'flash';
+    const version = Number(s.match(/(\d+(?:\.\d+)?)/)?.[1]) || Infinity;
+    const leaks = GEMINI_SYSTEM_PROMPTS.filter(l => l.family === family);
+    const pick = leaks.filter(l => l.version <= version).pop() || leaks[0];
+    return { tokens: pick.tokens, basis: `${pick.version} ${family === 'pro' ? 'Pro' : 'Flash'}`, date: pick.date };
+  },
+
+  pageAttachments(doc, model) {
     const queries = doc.querySelectorAll('user-query');
     let images = 0;
     let files = 0;
     const list = [];
+    const perImage = geminiImageTokens(model);
     for (const q of queries) {
       // Each uploaded file is a <user-query-file-preview>; an image one holds an <img>
       for (const f of q.querySelectorAll('user-query-file-preview')) {
-        if (f.querySelector('img')) { images++; list.push({ name: 'Image ' + images, type: 'image', tokens: GEMINI_IMAGE_TOKENS }); }
+        if (f.querySelector('img')) { images++; list.push({ name: 'Image ' + images, type: 'image', tokens: perImage }); }
         else { files++; list.push({ name: 'File ' + files, type: 'file' }); }
       }
     }
-    return { count: images + files, files: list, estimatedTokens: images * GEMINI_IMAGE_TOKENS, hasUnknown: files > 0, source: 'dom' };
+    return { count: images + files, files: list, estimatedTokens: images * perImage, hasUnknown: files > 0, source: 'dom' };
   },
 
   conversationId(url) {

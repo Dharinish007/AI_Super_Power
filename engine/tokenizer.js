@@ -195,6 +195,13 @@ export class Tokenizer {
     this.encoders = new Map();
     // Count-only BPE (what countTokens uses), created by warm() or the first count
     this.counter = null;
+    // Other providers' tokenizers, registered once loaded (e.g. 'gemma4' on Gemini): name -> { count(text) }
+    this.extraCounters = new Map();
+  }
+
+  /** Counts for `name` use this counter from now on (resolveEncoding / isExact report it). */
+  useCounter(name, counter) {
+    this.extraCounters.set(name, counter);
   }
 
   /**
@@ -203,7 +210,9 @@ export class Tokenizer {
    * The argument is accepted for callers that name an encoding; there is only one table.
    * @returns {BpeCounter}
    */
-  getCounter() {
+  getCounter(encodingOrModel) {
+    const extra = this.extraCounters.get(encodingOrModel);
+    if (extra) return extra;
     if (!this.counter) this.counter = new BpeCounter(o200kData, { deferred: true });
     if (!this.counter.built) {
       this.counter.build(Infinity);
@@ -234,16 +243,17 @@ export class Tokenizer {
    * @returns {boolean}
    */
   isExact(encodingOrModel) {
+    if (this.extraCounters.has(encodingOrModel)) return true;
     return this.getEncodingForModel(encodingOrModel) === BUNDLED_ENCODING;
   }
 
   /**
-   * The encoding counts are made with. Only BUNDLED_ENCODING ships, so this is always o200k_base;
-   * isExact() tells whether that matches the model's own tokenizer.
+   * The encoding counts are made with: a registered extra counter when one was asked for and has
+   * loaded (useCounter), otherwise BUNDLED_ENCODING; isExact() tells whether that matches the model's own tokenizer.
    * @returns {string}
    */
-  resolveEncoding() {
-    return BUNDLED_ENCODING;
+  resolveEncoding(encoding) {
+    return this.extraCounters.has(encoding) ? encoding : BUNDLED_ENCODING;
   }
 
   /**
@@ -333,7 +343,7 @@ export class Tokenizer {
       return 0;
     }
     try {
-      return this.getCounter(encodingOrModel).count(text);
+      return this.getCounter(this.resolveEncoding(encodingOrModel)).count(text);
     } catch (_) {
       // Unexpected input for the fast path: fall back to the reference encoder
       const tokens = this.encodeSafely(this.getEncoder(encodingOrModel), text);

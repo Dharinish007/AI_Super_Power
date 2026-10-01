@@ -65,6 +65,7 @@ function readCleanModule(filePath) {
 
 // Read modules
 const tokenizerCode = readCleanModule(path.join(rootDir, 'engine', 'tokenizer.js'));
+const gemmaTokenizerCode = readCleanModule(path.join(rootDir, 'engine', 'gemma-tokenizer.js'));
 const classifierCode = readCleanModule(path.join(rootDir, 'engine', 'context-classifier.js'));
 const mergerCode = readCleanModule(path.join(rootDir, 'engine', 'evidence-merger.js'));
 const confidenceCode = readCleanModule(path.join(rootDir, 'engine', 'confidence-engine.js'));
@@ -107,6 +108,8 @@ export const bundledContentScript = `/**
 
   // --- Engine Layer ---
   ${tokenizerCode}
+
+  ${gemmaTokenizerCode}
 
   ${classifierCode}
 
