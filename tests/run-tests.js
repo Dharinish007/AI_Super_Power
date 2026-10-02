@@ -25,6 +25,7 @@ import { runGemmaTokenizerTests } from './unit/gemma-tokenizer.test.js';
 import { runSettingsTests } from './unit/settings.test.js';
 import { runPageActionsTests } from './unit/page-actions.test.js';
 import { runPanelChannelTests } from './unit/panel-channel.test.js';
+import { runMemoryTests } from './unit/memory.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -49,7 +50,8 @@ const SUITES = [
   runGemmaTokenizerTests, // Gemma 4 tokenizer (Gemini) == reference implementation
   runSettingsTests, // Settings defaults, normalize, read/write with repair
   runPageActionsTests, // The in-page Page: read the chat, fill the box, wait for a Capsule
-  runPanelChannelTests // Port protocol between the tab and the side panel
+  runPanelChannelTests, // Port protocol between the tab and the side panel
+  runMemoryTests // Memory: secret guard, Learn parsing, inbox, approve-by-key
 ];
 
 console.log('========================================================');

@@ -85,7 +85,7 @@ ${MODULES.map(m => `  // --- ${m} ---\n  ${readCleanModule(m)}`).join('\n\n')}
 
 // Side panel: an extension page, so no tokenizer and no site adapters; only the views and the channel
 const PANEL_MODULES = [
-  'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/panel-channel.js',
+  'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/memory.js', 'content/panel-channel.js',
   'ui/dom.js', 'ui/styles.js', 'ui/capsule-panel.js', 'ui/context-view.js', 'ui/settings-view.js', 'sidepanel/main.js'
 ];
 
