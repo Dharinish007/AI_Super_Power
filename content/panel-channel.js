@@ -7,7 +7,7 @@
  */
 
 export const PANEL_PORT = 'panel';
-const PAGE_CALLS = ['hasConversation', 'takeSelection', 'fill', 'latestReply', 'transcript', 'countTokens', 'limitReached'];
+export const PAGE_CALLS = ['hasConversation', 'takeSelection', 'fill', 'latestReply', 'transcript', 'countTokens', 'limitReached'];
 const ACTION_CALLS = ['refresh', 'diagnostics'];
 // Same hosts as manifest host_permissions (a plain list: providers.js would pull the Gemma tokenizer into the panel bundle)
 const SUPPORTED_HOSTS = ['chatgpt.com', 'chat.openai.com', 'claude.ai', 'gemini.google.com'];

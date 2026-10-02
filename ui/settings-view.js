@@ -15,7 +15,9 @@ import { CONTEXT_FIELDS, writeSettings } from '../content/settings.js';
 export function SettingsView(parent, { storage }) {
   const el = h('div', 'body settings', parent);
   const inputs = [];
-  const save = (patch) => writeSettings(storage, patch).catch((e) => console.warn('[Context Monitor] Settings not saved', e));
+  // One write at a time: each read-modify-write starts from the previous one's result
+  let queue = Promise.resolve();
+  const save = (patch) => { queue = queue.then(() => writeSettings(storage, patch)).catch((e) => console.warn('[Context Monitor] Settings not saved', e)); };
 
   const group = (title) => { const g = h('fieldset', 'group', el); h('legend', null, g, title); return g; };
   const input = (g, type, label, get, onChange) => {

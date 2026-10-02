@@ -5581,11 +5581,13 @@ function CapsulePanel(parent, ctx) {
   };
   for (const b of [create, quickBtn, handoffBtn]) b.addEventListener('pointerdown', () => { pendingSelection = ctx.page.takeSelection().catch(() => ''); });
 
+  /** @returns {boolean} whether a wait was running */
   function stopWaiting() {
-    if (!watcher) return;
+    if (!watcher) return false;
     watcher.stop();
     watcher = null;
     mode('idle');
+    return true;
   }
 
   /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */

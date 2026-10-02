@@ -10,7 +10,7 @@ import { h, textButton, show, setText, download } from '../ui/dom.js';
 import { ContextView } from '../ui/context-view.js';
 import { CapsulePanel } from '../ui/capsule-panel.js';
 import { SettingsView } from '../ui/settings-view.js';
-import { connectPanel, panelStatus, isSupportedUrl } from '../content/panel-channel.js';
+import { connectPanel, panelStatus, isSupportedUrl, PAGE_CALLS } from '../content/panel-channel.js';
 import { readSettings, SETTINGS_KEY } from '../content/settings.js';
 import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, SKILLS_KEY } from '../content/capsule.js';
 import { formatChatExport } from '../content/widget-state.js';
@@ -27,7 +27,6 @@ import { formatChatExport } from '../content/widget-state.js';
     reload: 'Reload this page to start.',
     reading: 'Reading the conversation…'
   };
-  const PAGE_METHODS = ['hasConversation', 'takeSelection', 'fill', 'latestReply', 'transcript', 'countTokens', 'limitReached', 'watchCapsule'];
 
   const storage = chrome.storage.local;
   document.head.appendChild(h('style', null, null, STYLES));
@@ -53,7 +52,7 @@ import { formatChatExport } from '../content/widget-state.js';
   // The Page the Capsule panels use: always the current tab's; with no tab link every call rejects ("Page not reachable")
   const page = {
     get provider() { return link?.page.provider || 'AI'; },
-    ...Object.fromEntries(PAGE_METHODS.map(n => [n, (...args) => (link ? link.page[n](...args) : Promise.reject(new Error('No chat in this tab')))]))
+    ...Object.fromEntries([...PAGE_CALLS, 'watchCapsule'].map(n => [n, (...args) => (link ? link.page[n](...args) : Promise.reject(new Error('No chat in this tab')))]))
   };
 
   const nav = h('div', 'tabs', root);
@@ -112,6 +111,13 @@ import { formatChatExport } from '../content/widget-state.js';
     root.classList.toggle('light', theme === 'light' || (theme === 'auto' && !matchMedia('(prefers-color-scheme: dark)').matches));
   }
 
+  // A Capsule wait belongs to the tab it started in: end it when that tab's link goes
+  function endWaits() {
+    const stopped = caps.stop();
+    skills.stop();
+    if (stopped) toast('Capsule wait stopped: the tab changed');
+  }
+
   function setState(s) {
     vm = s;
     if (s) ctxView.update(s);
@@ -126,6 +132,7 @@ import { formatChatExport } from '../content/widget-state.js';
     tabInfo = { id: tab.id, url: tab.url, loading: tab.status === 'loading' };
     // Same tab, still linked: the content script follows its own in-page navigation (a full navigation drops the port)
     if (same && link) return render();
+    if (link) endWaits();
     link?.disconnect();
     link = null;
     vm = null;
@@ -134,7 +141,7 @@ import { formatChatExport } from '../content/widget-state.js';
       try {
         // No content script in the tab (opened before install / update): Chrome drops the port at once -> 'reload'
         const l = connectPanel({ tabs: chrome.tabs, tabId: tab.id, onState: (s) => { if (link === l) setState(s); },
-          onDisconnect: () => { void chrome.runtime.lastError; if (link === l) { link = null; setState(null); } } });
+          onDisconnect: () => { void chrome.runtime.lastError; if (link === l) { link = null; endWaits(); setState(null); } } });
         link = l;
       } catch (_) { link = null; }
     }
