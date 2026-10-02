@@ -7,10 +7,8 @@
  *
  *   Collapsed (default)  pill "39.3K • Medium" — click expands, drag moves
  *   Expanded             header (drag handle: theme / collapse / close)
- *                        hero: token count, usage bar, window, model, limit line, warning
- *                        stats: You / <Site> + tools / Hidden
- *                        sections (closed by default): Breakdown, Hidden context, Usage limits, Diagnostics
- *                        footer: confidence, Copy diagnostics, Refresh
+ *                        Context tab: ContextView (ui/context-view.js: hero, stats, sections, Diagnostics,
+ *                        footer) plus the Display section
  *
  * Position: free drag (pointer events, translate3d), clamped to the viewport, snapped to the nearest
  * side on release (hold Alt to skip), anchored to that side so expanding never pushes it off screen.
@@ -26,8 +24,9 @@ import { CAPSULES_KEY, CAPSULE_HANDOFF_KEY, readTranscript, SKILLS_KEY } from '.
 import { createPage } from './page-actions.js';
 import { CapsulePanel } from '../ui/capsule-panel.js';
 import { alertLevel, formatChatExport, chatIdFromHref, recordUsage } from './widget-state.js';
+import { ContextView } from '../ui/context-view.js';
 import { STYLES } from '../ui/styles.js';
-import { h, iconButton, approx, TAG_TIPS, Section, RowList, HiddenStack, textButton, download, setText, setAttr, setClass, show, fmtK, fmtInt, tone, levelName, reducedMotion, limitText, headlineLimit, ICONS } from '../ui/dom.js';
+import { h, iconButton, Section, textButton, download, setText, setAttr, setClass, show, fmtK, fmtInt, levelName, reducedMotion, ICONS } from '../ui/dom.js';
 
 const MARGIN = 8; // Viewport clamp
 const TOP_SAFE = 72; // Default/snap top: below the sites' top bars (Share, account buttons)
@@ -63,8 +62,6 @@ export class ContextWidget {
     this.latestState = null;
     this._alerted = new Map();
     this.parts = null;
-    this._shownTokens = null;
-    this._countRaf = null;
     this._posRaf = null;
     this._drag = null;
     this._justDragged = false;
@@ -157,92 +154,21 @@ export class ContextWidget {
     collapseBtn.b.addEventListener('click', () => this._setExpanded(false));
     closeBtn.b.addEventListener('click', () => { this.isVisible = false; this.render(); });
 
-    const body = h('div', 'body', panel);
-    const hero = h('div', 'hero', body);
-    const top = h('div', 'top', hero);
-    const big = h('span', 'big', top, '—');
-    h('span', 'unit', top, 'tokens');
-    const pct = h('span', 'pct', top);
-    const bar = h('div', 'bar', hero);
-    bar.setAttribute('role', 'progressbar');
-    bar.setAttribute('aria-label', 'Context window used');
-    bar.setAttribute('aria-valuemin', '0');
-    bar.setAttribute('aria-valuemax', '100');
-    const fill = h('b', null, bar);
-    const meta = h('div', 'meta', hero);
-    const windowText = h('span', null, meta);
-    const windowBadge = approx(meta, 'Window size is not known for this model/plan');
-    const modelText = h('span', 'model', meta);
-    const limitLine = h('div', 'line', hero);
-    const warnLine = h('div', 'line warn', hero);
-    warnLine.setAttribute('role', 'status');
-    // At 80% full: save the chat as a Capsule now, and continue in a new chat with it
-    const saveCard = h('div', 'card warn hide', hero);
-    const saveText = h('div', 't', saveCard);
-    h('div', 'm', saveCard, 'Save it as a Capsule, then insert it in a new chat to keep going.');
-    textButton(h('div', 'btns', saveCard), '📦 Save as Capsule', () => {
-      this._setTab('capsules');
-      this.parts.caps.capture();
-    });
+    const ctxView = ContextView(panel, { settings: { display: { compact: this.compact } }, actions: {
+      refresh: () => this.adapter.onRefresh(),
+      copyDiagnostics: async () => {
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(this.adapter.getDiagnostics() || { note: 'no state yet' }, null, 2));
+          this._toast('Diagnostics copied');
+        } catch (_) {
+          this._toast('Copy failed');
+        }
+      },
+      exportChat: (f) => this._exportChat(f),
+      saveAsCapsule: () => { this._setTab('capsules'); this.parts.caps.capture(); }
+    } });
 
-    const stats = h('div', 'stats', body);
-    const stat = (label) => {
-      const c = h('div', 'stat', stats);
-      const k = h('div', 'k', c, label);
-      return { k, v: h('div', 'v', c, '—') };
-    };
-    const sUser = stat('You');
-    const sAsst = stat(`${provider} + tools`);
-    const sHidden = stat('Hidden');
-
-    const brk = Section(body, 'Breakdown');
-    const brkRows = RowList(brk.body);
-    h('div', 'divider', brk.body);
-    const totals = RowList(brk.body);
-
-    const bigSec = Section(body, 'Biggest messages');
-    const bigRows = RowList(bigSec.body);
-    h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
-    const exportBtns = h('div', 'btns', bigSec.body);
-    const exportChat = (format) => {
-      const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
-      if (!msgs.length) return this._toast('Open a conversation first');
-      download(bigSec.body, 'chat', format, formatChatExport(msgs, format, { provider }), format === 'json' ? 'application/json' : 'text/plain');
-      this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
-    };
-    for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
-      textButton(exportBtns, label).addEventListener('click', () => exportChat(format));
-    }
-
-    const growth = Section(body, 'Growth');
-    const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    spark.setAttribute('viewBox', '0 0 200 40');
-    spark.setAttribute('preserveAspectRatio', 'none');
-    spark.setAttribute('class', 'spark');
-    spark.setAttribute('role', 'img');
-    const sparkLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-    spark.appendChild(sparkLine);
-    growth.body.appendChild(spark);
-    const growthText = h('div', 'fine', growth.body);
-
-    const att = Section(body, 'Attachments');
-    const attRows = RowList(att.body);
-    h('div', 'fine', att.body, 'Images use an estimate; documents the site reads server-side have no known cost here.');
-
-    const hid = Section(body, 'Hidden context');
-    const hidStack = HiddenStack(hid.body);
-    h('div', 'fine', hid.body, `Read from ${provider}'s own data. ≈ marks estimates; anything else ${provider} adds on its servers is not visible.`);
-
-    const lim = Section(body, 'Usage limits');
-    const limRows = RowList(lim.body);
-
-    const diag = Section(body, 'Diagnostics');
-    const diagWarn = h('div', 'line warn', diag.body);
-    const diagRows = RowList(diag.body);
-    const evidence = h('ul', 'evidence', diag.body);
-    h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not. Everything runs in your browser: nothing is sent anywhere.');
-
-    const display = Section(body, 'Display');
+    const display = Section(ctxView.el, 'Display');
     const displayBtns = h('div', 'btns', display.body);
     const compactBtn = textButton(displayBtns, '', () => { this.compact = !this.compact; this._savePrefs(); this.render(); });
     const badgesBtn = textButton(displayBtns, '', () => { this.badges = !this.badges; this._savePrefs(); this._paintBadges(); this.render(); });
@@ -259,30 +185,6 @@ export class ContextWidget {
     };
     const caps = CapsulePanel(panel, panelCtx);
     const skills = CapsulePanel(panel, { ...panelCtx, kind: 'skill' });
-
-    const foot = h('div', 'foot', panel);
-    const conf = h('div', 'conf', foot);
-    const confDot = h('span', 'dot', conf);
-    const confText = h('span', null, conf);
-    const copyBtn = iconButton(foot, ICONS.copy, 'Copy diagnostics');
-    const refreshBtn = iconButton(foot, ICONS.refresh, 'Refresh');
-    copyBtn.b.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(JSON.stringify(this.adapter.getDiagnostics() || { note: 'no state yet' }, null, 2));
-        this._toast('Diagnostics copied');
-      } catch (_) {
-        this._toast('Copy failed');
-      }
-    });
-    refreshBtn.b.addEventListener('click', async () => {
-      if (refreshBtn.b.disabled) return;
-      refreshBtn.b.disabled = true;
-      refreshBtn.b.classList.add('spin');
-      try { await this.adapter.onRefresh(); } catch (_) { /* the next automatic pass still updates */ } finally {
-        refreshBtn.b.disabled = false;
-        refreshBtn.b.classList.remove('spin');
-      }
-    });
 
     const toast = h('div', 'toast', root);
     toast.setAttribute('role', 'status');
@@ -325,8 +227,7 @@ export class ContextWidget {
     });
 
     return {
-      pill, pillDot, pillNum, pillLvl, panel, bigRows, spark, sparkLine, growthText, attRows, att, compactBtn, badgesBtn, head, tabContext, tabCaps, tabSkills, body, foot, caps, skills, themeBtn, big, pct, bar, fill, windowText, windowBadge, modelText, limitLine, warnLine,
-      saveCard, saveText, sUser, sAsst, sHidden, brkRows, totals, hid, hidStack, lim, limRows, diagWarn, diagRows, evidence, confDot, confText, toast, tip
+      pill, pillDot, pillNum, pillLvl, panel, ctxView, body: ctxView.el, foot: ctxView.foot, compactBtn, badgesBtn, head, tabContext, tabCaps, tabSkills, caps, skills, themeBtn, toast, tip
     };
   }
 
@@ -371,103 +272,13 @@ export class ContextWidget {
       ? 'Context usage: reading conversation. Expand panel.'
       : `Context usage ${fmtInt(vm.usedTokens)} tokens${vm.percentage !== null ? `, ${vm.percentage}% of window` : ''}, confidence ${levelName(vm.confidenceLevel)}. Expand panel.`);
 
-    if (this.isExpanded) this._renderPanel(vm);
+    if (this.isExpanded) {
+      p.ctxView.setSettings({ display: { compact: this.compact } });
+      p.ctxView.update(vm);
+      setText(p.compactBtn, `Exact numbers: ${this.compact ? 'off' : 'on'}`);
+      setText(p.badgesBtn, `Sidebar badges: ${this.badges ? 'on' : 'off'}`);
+    }
     this._schedulePosition();
-  }
-
-  _renderPanel(vm) {
-    const p = this.parts;
-    const ready = vm.ready !== false;
-    this._countTo(ready ? vm.usedTokens : null);
-    setText(p.pct, ready && vm.percentage !== null ? `${vm.percentage === 0 && vm.usedTokens > 0 ? '<0.1' : vm.percentage}%` : '');
-    const known = ready && vm.percentage !== null;
-    setClass(p.bar, `bar ${known ? tone(vm.percentage) : 'unknown'}`.trim());
-    const width = known ? `${Math.min(100, vm.percentage)}%` : '';
-    if (p.fill.style.width !== width) p.fill.style.width = width;
-    if (known) setAttr(p.bar, 'aria-valuenow', String(vm.percentage)); else p.bar.removeAttribute('aria-valuenow');
-    setText(p.windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
-    show(p.windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
-    p.windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
-    const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
-    setText(p.modelText, model);
-    setAttr(p.modelText, 'title', `${vm.provider}: ${model}`);
-    const head = headlineLimit(vm.limits);
-    setText(p.limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
-    setText(p.warnLine, vm.warning || '');
-    const full = ready && vm.percentage !== null && alertLevel(vm.percentage) >= 80;
-    show(p.saveCard, full);
-    if (full) setText(p.saveText, `💡 This chat is ${vm.percentage}% full`);
-
-    const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
-    setText(p.sUser.v, ready ? fmtK(st.user) : '—');
-    setText(p.sAsst.v, ready ? fmtK(st.assistant) : '—');
-    setText(p.sHidden.v, ready ? fmtK(st.hidden) : '—');
-
-    const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    p.brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
-    p.bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
-    this._renderSpark(vm, ready);
-    show(p.att.el, (vm.attachmentFiles || []).length > 0);
-    p.attRows.update((vm.attachmentFiles || []).map(f => ({
-      label: f.name,
-      value: f.tokens !== null ? `~${f.tokens.toLocaleString()}` : f.inText ? 'in message text' : 'cost unknown'
-    })));
-    setText(p.compactBtn, `Exact numbers: ${this.compact ? 'off' : 'on'}`);
-    setText(p.badgesBtn, `Sidebar badges: ${this.badges ? 'on' : 'off'}`);
-    p.totals.update([
-      { label: 'Used', value: tokens(vm.usedTokens) },
-      { label: 'Remaining', value: tokens(vm.remainingTokens) },
-      { label: 'Window', value: vm.contextLimit ? vm.contextLimit.toLocaleString() : 'Unknown', tip: vm.contextLimit && vm.limitStatus === 'VERIFIED' ? null : (vm.contextLimit ? TAG_TIPS.UNVERIFIED : TAG_TIPS.UNKNOWN) }
-    ]);
-
-    const items = vm.hiddenItems || [];
-    show(p.hid.el, items.length > 0);
-    p.hidStack.update(items);
-    show(p.lim.el, (vm.limits || []).length > 0);
-    p.limRows.update((vm.limits || []).map(l => ({ label: l.label, value: limitText(l) })));
-
-    setText(p.diagWarn, vm.warning || '');
-    p.diagRows.update([
-      { label: 'Provider', value: vm.provider },
-      { label: 'Model', value: model || '—' },
-      { label: 'Plan', value: vm.plan || 'Unknown' },
-      { label: 'Source', value: vm.source || '—' },
-      { label: 'Turns', value: ready ? String(vm.turns) : '—' }
-    ]);
-    const evSig = JSON.stringify(vm.evidence || []);
-    if (p.evidence.dataset.sig !== evSig) {
-      p.evidence.dataset.sig = evSig;
-      p.evidence.textContent = '';
-      for (const e of vm.evidence || []) {
-        const li = h('li', null, p.evidence);
-        h('span', e.ok ? 'y' : 'n', li, e.ok ? '✓' : '!');
-        h('span', null, li, e.text);
-      }
-    }
-    setClass(p.confDot, `dot ${ready ? vm.confidenceLevel : 'LOW'}`);
-    setText(p.confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
-  }
-
-  /** Token count animates from the last shown value (instant with reduced motion). */
-  _countTo(target) {
-    const el = this.parts.big;
-    if (this._countRaf) cancelAnimationFrame(this._countRaf);
-    if (target === null) { setText(el, '—'); this._shownTokens = null; return; }
-    const from = this._shownTokens;
-    if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
-      this._shownTokens = target;
-      setText(el, this._num(target));
-      return;
-    }
-    const start = performance.now();
-    const step = (t) => {
-      const k = Math.min(1, (t - start) / 400);
-      const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
-      setText(el, this._num(v));
-      this._shownTokens = k < 1 ? v : target;
-      this._countRaf = k < 1 ? requestAnimationFrame(step) : null;
-    };
-    this._countRaf = requestAnimationFrame(step);
   }
 
   _setExpanded(open) {
@@ -486,30 +297,20 @@ export class ContextWidget {
     this._savePrefs();
   }
 
+  /** Saves the chat as shown on the page (md / txt / json). */
+  _exportChat(format) {
+    const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
+    if (!msgs.length) return this._toast('Open a conversation first');
+    download(this.parts.body, 'chat', format, formatChatExport(msgs, format, { provider: this.adapter.provider }), format === 'json' ? 'application/json' : 'text/plain');
+    this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
+  }
+
   _toast(text, ms = 1500) {
     const t = this.parts.toast;
     t.textContent = text;
     t.classList.add('show');
     clearTimeout(this._toastTimer);
     this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
-  }
-
-  _num(n) { return this.compact ? fmtK(Math.round(n)) : fmtInt(n); }
-
-  /** Tokens by turn as a line, scaled to the window when known (so the slope reads as "how fast it fills"). */
-  _renderSpark(vm, ready) {
-    const { spark, sparkLine, growthText } = this.parts;
-    const g = ready ? vm.growth : null;
-    if (!g || g.points.length < 2) {
-      sparkLine.setAttribute('points', '');
-      setText(growthText, 'Appears after a few messages.');
-      return;
-    }
-    const top = Math.max(vm.contextLimit || 0, g.total) || 1;
-    const pts = g.points.map((v, i) => `${((i / (g.points.length - 1)) * 200).toFixed(1)},${(38 - (v / top) * 36).toFixed(1)}`).join(' ');
-    if (sparkLine.getAttribute('points') !== pts) sparkLine.setAttribute('points', pts);
-    spark.setAttribute('aria-label', `Message tokens by turn: ${fmtInt(g.total)} over ${g.turns} turns`);
-    setText(growthText, `${g.turns} turns · ${fmtInt(g.total)} message tokens${vm.contextLimit ? ` of ${fmtK(vm.contextLimit)}` : ''}`);
   }
 
   /** Remembers this chat's usage and shows it next to the chat in the sidebar. */
@@ -570,7 +371,7 @@ export class ContextWidget {
     this._toast(lvl === 95
       ? `Context ${vm.percentage}% full: start a new chat soon`
       : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
-    if (!reducedMotion()) this.parts.bar.animate?.([{ transform: 'scaleY(1)' }, { transform: 'scaleY(2.2)' }, { transform: 'scaleY(1)' }], { duration: 700, iterations: 2 });
+    if (!reducedMotion()) this.parts.ctxView.bar.animate?.([{ transform: 'scaleY(1)' }, { transform: 'scaleY(2.2)' }, { transform: 'scaleY(1)' }], { duration: 700, iterations: 2 });
   }
 
   _showTip(target) {

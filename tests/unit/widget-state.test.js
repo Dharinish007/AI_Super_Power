@@ -36,6 +36,8 @@ export function runWidgetStateTests() {
   assert('Provider name comes from the adapter', vm.provider === 'ChatGPT' && vm.breakdown[1].label === 'ChatGPT + tools');
   assert('No "count may be low" warning when the full conversation came from the API', vm.warning === null);
   assert('Diagnostics carried through for the copy button', vm.diagnostics?.session?.ok === true);
+  const vsFull = toWidgetState(engine, { provider: 'ChatGPT' });
+  assert('View state is plain data (survives the panel port)', JSON.stringify(structuredClone(vsFull)) === JSON.stringify(vsFull));
 
   const domOnly = toWidgetState({ ...engine, observables: { dataSource: 'dom_fallback', messagesCount: 4 }, model: { id: 'unknown' } });
   assert('Unknown model -> no limit, no percentage', domOnly.contextLimit === null && domOnly.percentage === null && domOnly.model === 'Model unknown');
