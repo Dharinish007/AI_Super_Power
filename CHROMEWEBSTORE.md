@@ -4,7 +4,7 @@
 
 - **Name:** AI Super Powers
 - **Short Name:** Super Powers
-- **Version:** 1.1.0
+- **Version:** 1.2.0
 - **Primary Category:** Productivity
 - **Secondary Category:** Developer Tools
 - **Default Language:** English
@@ -28,8 +28,9 @@ Key Features:
 - Plan usage limits (Claude): session and weekly usage percentages as claude.ai reports them.
 - Itemized breakdown: user messages, assistant replies, attachments, tool activity and hidden context the page exposes.
 - Skills: save instructions you reuse ("Explain simply", "Review my code") and insert them into any of the three AIs.
+- Memory: short facts about you, shared by ChatGPT, Claude and Gemini. Add by hand, or **🧠 Learn from this chat** (the AI lists facts; you approve each one in the inbox). A fact with the same key updates the saved one. **💉 Inject memory** fills the chat box, with its token cost. Memories that look like keys, tokens, passwords or card numbers are never saved (also on import and Learn).
 - Capsules: ask the AI you are using to summarize the conversation into a Capsule, edit and save it, then insert it into ChatGPT, Claude or Gemini so you never re-explain your context. Saved only in your browser.
-- Side panel: the toolbar icon opens Context, Capsules, Skills and Settings next to the chat. Two small draggable on-page pills (Context and Capsule) stay visible and update during streaming without slowing the page.
+- Side panel: the toolbar icon opens Context · Brain (Memory · Capsules · Skills) · Settings next to the chat. Two small draggable on-page pills (Context and Capsule) stay visible and update during streaming without slowing the page.
 - Local and private: all reading, tokenizing and calculating happens in your browser. Nothing is sent to the developer or any third party, and there is no analytics.
 
 ---
@@ -39,10 +40,10 @@ Key Features:
 Every declared permission serves a single necessary purpose.
 
 ### `storage`
-- **Justification:** Saves settings (widget choices, Capsule method, display options), widget positions per site, the last plan-usage percentages, the Capsules and Skills the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. For the sidebar badges it also stores the usage percentage of up to 200 recent chats per site, keyed by the site's own chat ID. Nothing else is stored: no other message text.
+- **Justification:** Saves settings (widget choices, Capsule method, display options), widget positions per site, the last plan-usage percentages, the Memories (facts and the review inbox of learned facts, at most 50), Capsules and Skills the user explicitly saves, and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. For the sidebar badges it also stores the usage percentage of up to 200 recent chats per site, keyed by the site's own chat ID. Nothing else is stored: no other message text.
 
 ### `sidePanel`
-- **Justification:** Shows the extension's main view (context, Capsules, Skills, settings) next to the chat. No data leaves the browser.
+- **Justification:** Shows the extension's main view (Context · Brain (Memory · Capsules · Skills) · Settings) next to the chat. No data leaves the browser.
 
 ### `unlimitedStorage`
 - **Justification:** Lets the Capsules and Skills the user saves grow past the 10 MB `chrome.storage.local` quota (a Capsule can be up to 100,000 characters). Data stays on the device; the permission shows no install warning.

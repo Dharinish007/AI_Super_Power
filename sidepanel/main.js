@@ -1,7 +1,7 @@
 /**
  * AI Context Monitor - Side panel. Shows the active tab of this window: Context | Brain (Memory · Capsules · Skills) |
  * Settings. The engine runs in the tab; this page renders its view state and calls back through the
- * panel channel. Capsules, Skills and Settings are read from chrome.storage.local directly.
+ * panel channel. Memory, Capsules, Skills and Settings are read from chrome.storage.local directly.
  * Built into sidepanel/sidepanel.js by scripts/build.js (one IIFE: no top-level await, hence the wrapper).
  */
 
@@ -108,7 +108,7 @@ import { formatChatExport } from '../content/widget-state.js';
 
   function render() {
     const status = panelStatus({ url: tabInfo.url, connected: Boolean(link) || tabInfo.loading, ready: Boolean(vm) && vm.ready !== false });
-    // Context needs a live tab; Capsules / Skills lists work without one (Insert etc. toast when no tab answers)
+    // Context needs a live tab; Memory / Capsules / Skills lists work without one (Insert etc. toast when no tab answers)
     const blocked = active === 'context' && status !== 'live';
     show(empty, blocked);
     setText(empty, MESSAGES[status] || '');

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Super Powers",
   "short_name": "Super Powers",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shows context-window usage for ChatGPT, Claude and Gemini conversations, computed locally in your browser.",
   "minimum_chrome_version": "116",
   "icons": {

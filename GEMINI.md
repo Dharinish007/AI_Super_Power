@@ -1,6 +1,6 @@
-# ChatGPT Context Monitor — Agent Engineering Guidelines (GEMINI.md)
+# AI Super Powers — Agent Engineering Guidelines (GEMINI.md)
 
-This document establishes the project-specific operational rules, architectural boundaries, and engineering disciplines for AI agents modifying the **ChatGPT Context Monitor** Chrome Extension.
+This document establishes the project-specific operational rules, architectural boundaries, and engineering disciplines for AI agents modifying the **AI Super Powers** Chrome Extension.
 
 ---
 

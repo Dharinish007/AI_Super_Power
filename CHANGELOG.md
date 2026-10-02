@@ -4,6 +4,16 @@ All notable changes to AI Context Monitor. Versions follow `manifest.json`; bump
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-02
+
+### Changed
+- Renamed to **AI Super Powers**.
+- Side panel: **Context · 🧠 Brain · ⚙**. Brain holds **Memory**, **Capsules** and **Skills**.
+
+### Added
+- **Memory**: short facts about you, shared by ChatGPT, Claude and Gemini. Add by hand, or **🧠 Learn from this chat** (the AI lists facts; you approve each one in the inbox). A fact with the same key updates the saved one. **💉 Inject memory** fills the chat box, with its token cost. `content/memory.js`, `tests/unit/memory.test.js`.
+- Secret guard: memories that look like keys, tokens, passwords or card numbers are never saved (also on import and Learn).
+
 ## [1.1.0] - 2026-10-02
 
 ### Changed

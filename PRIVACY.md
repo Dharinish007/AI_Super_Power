@@ -1,6 +1,6 @@
 # AI Super Powers: Privacy Policy
 
-_Last updated: 2026-10-01_
+_Last updated: 2026-10-02_
 
 AI Super Powers is a browser extension that shows how much of the AI model's context window your current conversation uses on ChatGPT, Claude and Gemini. All of its work happens inside your browser.
 
@@ -15,6 +15,7 @@ AI Super Powers is a browser extension that shows how much of the AI model's con
 ## What it does with that data
 
 - All text is processed locally to count tokens. It never leaves the page, and it is stored only when you save a Capsule (below).
+- **Memory:** facts you save (or approve after **Learn from this chat**) are stored in your browser. Learn only puts a prompt in the chat box; you choose whether to send it. Facts that look like passwords, keys, tokens or card numbers are never stored.
 - **Capsules:** when you click Create Capsule, the extension puts a prompt in the site's chat box; you choose whether to send it. When you click Save, that Capsule's title and text are stored in your browser. Insert puts a saved Capsule in the chat box of the site you are on, and only you send it. **Make in another AI** stores the Capsule prompt with the visible conversation in your browser (and copies it) until you paste it into another AI, save the result or dismiss it; it is deleted after a day.
 - Network requests go only to the site you are using, the same requests the site makes itself. Nothing is sent to the developer or any third party.
 - The ChatGPT session token and the Gemini request token are kept only in memory while the page is open. They are never saved, logged, or included in diagnostics.
@@ -23,13 +24,14 @@ AI Super Powers is a browser extension that shows how much of the AI model's con
 
 - `chrome.storage.local`: Settings (widget choices, Capsule method, display options), widget positions for each site, and your last Claude usage-limit percentages and reset times.
 - `chrome.storage.local`: Capsules you saved (title, text, site name, dates). You can edit or delete each one in the Capsules tab.
+- `chrome.storage.local`: Memories (fact, category, topic key, project, tags, site name, dates) and the review inbox of learned facts (at most 50). You can edit or delete each one in Brain → Memory.
 - `chrome.storage.local`: Skills (instructions you write, plus three starter Skills you can edit or delete).
 - A Capsules or Skills file, only when you click Export: it is downloaded to your device by your browser and goes nowhere else. Import reads a file you pick.
 - `chrome.storage.local`: at most one pending hand-off (Capsule prompt plus the conversation you chose to hand off), removed when used, dismissed, or after a day.
 
 - `chrome.storage.local`: for the sidebar badges, the usage percentage of up to 200 recent chats per site, keyed by the site's own chat ID (no titles or text).
 
-Nothing else is stored: no other message text, no memory text, tokens or cookies. The toolbar badge receives only the current percentage.
+Nothing else is stored: no other message text, no ChatGPT saved-memory text, tokens or cookies. The toolbar badge receives only the current percentage.
 
 ## What it does not do
 
