@@ -1611,6 +1611,7 @@ const STYLES = `
 
 
 
+
 /**
  * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
  * page.watchCapsule watches for the reply's END marker and opens it in the editor; Save stores it.
@@ -1618,16 +1619,20 @@ const STYLES = `
  * With `kind: 'skill'` the same panel is the Skills tab: reusable instructions written by the user
  * (＋ New Skill, starter Skills on first open), no AI capture, no Update.
  * @param {HTMLElement} parent
- * @param {{ kind?: 'capsule'|'skill', page: Object, storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
+ * @param {{ kind?: 'capsule'|'skill'|'memory', page: Object, storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
  *   `page`: the Page interface (content/page-actions.js); every call is async
  */
 function CapsulePanel(parent, ctx) {
   const isSkill = ctx.kind === 'skill';
+  const isMemory = ctx.kind === 'memory';
   const provider = ctx.page.provider; // Fixed texts only: the side panel's page follows the active tab, so live uses read ctx.page.provider
-  const noun = isSkill ? 'Skill' : 'Capsule';
-  const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
+  const noun = isSkill ? 'Skill' : isMemory ? 'Memory' : 'Capsule';
+  const plural = isMemory ? 'Memories' : `${noun}s`;
+  // Text that Insert / Copy / the cost use, for one item and for several ticked ones
+  const fmt = isSkill ? formatSkillForInsert : isMemory ? (m) => formatMemoriesForInsert([m]) : formatForInsert;
+  const fmtMany = (list) => (isMemory ? formatMemoriesForInsert(list) : formatManyForInsert(list, ctx.kind));
   const view = h('div', 'body caps hide', parent);
-  const store = ctx.storage ? new CapsuleStore(ctx.storage, isSkill ? { key: SKILLS_KEY, noun } : {}) : null;
+  const store = !ctx.storage ? null : isMemory ? memoryStore(ctx.storage) : new CapsuleStore(ctx.storage, isSkill ? { key: SKILLS_KEY, noun } : {});
 
   // The site's limit is reached: the AI here cannot write the Capsule
   const limitCard = h('div', 'card warn hide', view);
@@ -1652,11 +1657,27 @@ function CapsulePanel(parent, ctx) {
   // Skills tab: written by the user
   const newBtn = textButton(view, '＋ New Skill', () => openDraft({ source: 'You' }), 'btn primary');
   const skillHint = h('div', 'fine', view, 'Insert adds to what is already in the chat box: insert a Capsule, then a Skill, and send them together.');
+  newBtn.textContent = isMemory ? '＋ New memory' : '＋ New Skill';
+  // Memory: learn facts from this chat (the AI lists them, the user approves each one)
+  const learnBtn = textButton(view, '🧠 Learn from this chat');
+  learnBtn.dataset.tip = 'This AI lists facts about you worth remembering; you approve each one';
+  const memoryHint = h('div', 'fine', view, 'Memory is shared by ChatGPT, Claude and Gemini. Select part of the chat first to learn only from that part.');
+  const inboxCard = h('div', 'card hide', view);
+  inboxCard.setAttribute('role', 'status');
+  const inboxHead = h('div', 't', inboxCard);
+  const inboxList = h('div', null, inboxCard);
+  const inboxBtns = h('div', 'btns', inboxCard);
+  const injectRow = h('div', 'card hide', view);
+  const injectBtn = textButton(injectRow, '💉 Inject memory', null, 'btn primary');
+  injectBtn.dataset.tip = 'Put the memories shown below (search and project apply) in the chat box';
+  const injectCost = h('div', 'm', injectRow);
+  let inbox = []; // Learned facts waiting for ✅ / ❌
+  let injectSeq = 0; // Latest cost count wins
 
   const wait = h('div', 'card wait hide', view);
   wait.setAttribute('role', 'status');
-  h('div', 't', wait, 'Waiting for the Capsule…');
-  h('div', 'm', wait, `Press Enter in the chat to send the prompt. The Capsule opens here when ${provider} has written it.`);
+  h('div', 't', wait, isMemory ? 'Waiting for the facts…' : 'Waiting for the Capsule…');
+  h('div', 'm', wait, `Press Enter in the chat to send the prompt. ${isMemory ? 'New facts appear here for review' : 'The Capsule opens here'} when ${provider} has written ${isMemory ? 'them' : 'it'}.`);
   const waitBtns = h('div', 'btns', wait);
 
   const draft = h('div', 'card hide', view);
@@ -1664,6 +1685,9 @@ function CapsulePanel(parent, ctx) {
   titleIn.placeholder = isSkill ? 'Skill name, e.g. Code reviewer' : 'Title';
   titleIn.maxLength = 80;
   titleIn.setAttribute('aria-label', `${noun} title`);
+  const categorySel = h('select', 'field', draft);
+  categorySel.setAttribute('aria-label', 'Memory category');
+  for (const c of MEMORY_CATEGORIES) h('option', null, categorySel, c).value = c;
   const metaRow = h('div', 'two', draft);
   const projectIn = h('input', 'field', metaRow);
   projectIn.placeholder = '📁 Project';
@@ -1679,14 +1703,18 @@ function CapsulePanel(parent, ctx) {
   bodyIn.spellcheck = false;
   bodyIn.setAttribute('aria-label', `${noun} text`);
   if (isSkill) bodyIn.placeholder = 'How the AI should answer, e.g. "Review my code like a senior developer. Bugs first, be short."';
+  if (isMemory) {
+    bodyIn.placeholder = 'One fact about you, e.g. "Prefers short answers"';
+    bodyIn.maxLength = MEMORY_MAX;
+  }
   const draftBtns = h('div', 'btns', draft);
 
   // Library: search (every word must match; #tag = tags only) and a project filter
   const searchRow = h('div', 'two hide', view);
   const searchIn = h('input', 'field', searchRow);
   searchIn.type = 'search';
-  searchIn.placeholder = `🔍 Search ${noun}s… (#tag)`;
-  searchIn.setAttribute('aria-label', `Search ${noun}s`);
+  searchIn.placeholder = `🔍 Search ${plural}… (#tag)`;
+  searchIn.setAttribute('aria-label', `Search ${plural}`);
   const projectSel = h('select', 'field', searchRow);
   projectSel.setAttribute('aria-label', 'Show one project');
 
@@ -1696,16 +1724,17 @@ function CapsulePanel(parent, ctx) {
   const noMatch = h('div', 'fine hide', view, 'No matches. Try fewer words, or "All projects".');
   const empty = h('div', 'fine', view, isSkill
     ? 'No Skills yet. A Skill is an instruction you reuse, like "Explain simply". Add one, then insert it into any AI.'
+    : isMemory ? 'No memories yet. Add one, or 🧠 Learn from a chat; then inject them into any AI.'
     : 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
   const io = h('div', 'btns', view);
   const exportBtn = textButton(io, '📤 Export');
-  exportBtn.dataset.tip = `Download all ${noun}s as a JSON file (backup, or move to another PC)`;
+  exportBtn.dataset.tip = `Download all ${plural} as a JSON file (backup, or move to another PC)`;
   const importBtn = textButton(io, '📥 Import');
-  importBtn.dataset.tip = `Add ${noun}s from an exported file; newer copies replace older ones`;
+  importBtn.dataset.tip = `Add ${plural} from an exported file; newer copies replace older ones`;
   const fileIn = h('input', 'hide', view);
   fileIn.type = 'file';
   fileIn.accept = '.json,application/json';
-  fileIn.setAttribute('aria-label', `${noun}s file to import`);
+  fileIn.setAttribute('aria-label', `${plural} file to import`);
 
   // Ticked items: one insert for all of them, with what it costs here
   const pick = h('div', 'card pick hide', view);
@@ -1733,14 +1762,19 @@ function CapsulePanel(parent, ctx) {
   const mode = (m) => {
     current = m;
     const idle = m === 'idle';
-    const capture = idle && !isSkill; // AI capture exists only for Capsules
+    const capture = idle && !isSkill && !isMemory; // AI capture exists only for Capsules
     show(limitCard, capture && Boolean(limit));
     show(handoffCard, capture && Boolean(handoff));
     show(create, capture);
     show(alt, capture);
     show(hint, capture);
-    show(newBtn, idle && isSkill);
+    show(newBtn, idle && (isSkill || isMemory));
     show(skillHint, idle && isSkill);
+    show(learnBtn, idle && isMemory);
+    show(memoryHint, idle && isMemory);
+    show(inboxCard, idle && isMemory && inbox.length > 0);
+    show(titleIn, !isMemory);
+    show(categorySel, isMemory);
     show(wait, m === 'waiting');
     show(draft, m === 'draft');
   };
@@ -1756,7 +1790,7 @@ function CapsulePanel(parent, ctx) {
     pendingSelection = null;
     return (await pending) || ctx.page.takeSelection();
   };
-  for (const b of [create, quickBtn, handoffBtn]) b.addEventListener('pointerdown', () => { pendingSelection = ctx.page.takeSelection().catch(() => ''); });
+  for (const b of [create, quickBtn, handoffBtn, learnBtn]) b.addEventListener('pointerdown', () => { pendingSelection = ctx.page.takeSelection().catch(() => ''); });
 
   /** @returns {boolean} whether a wait was running */
   function stopWaiting() {
@@ -1776,6 +1810,7 @@ function CapsulePanel(parent, ctx) {
     editing = { id: capsule.id || null, source: capsule.source || ctx.page.provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
+    categorySel.value = (capsule.id && items.find(c => c.id === capsule.id)?.category) || capsule.category || 'other';
     // An Update's new text has no tags or project: the saved item's win. A new one starts in the
     // project being shown.
     const stored = capsule.id ? items.find(c => c.id === capsule.id) : null;
@@ -1785,7 +1820,7 @@ function CapsulePanel(parent, ctx) {
     for (const p of projectsOf(items)) h('option', null, projectList).value = p;
     mode('draft');
     bodyIn.scrollTop = 0;
-    titleIn.focus({ preventScroll: true });
+    (isMemory ? bodyIn : titleIn).focus({ preventScroll: true });
   }
 
   /**
@@ -1801,10 +1836,11 @@ function CapsulePanel(parent, ctx) {
     try {
       stop = await ctx.page.watchCapsule((capsule) => {
         if (watcher !== w) return;
+        if (isMemory) { learned(capsule); return; }
         draftFrom(capsule, from);
         ctx.reveal();
         ctx.toast('Capsule ready: review and save');
-      });
+      }, isMemory ? { markers: MEMORY_MARKERS } : undefined);
     } catch (e) {
       if (watcher === w) { watcher = null; mode('idle'); }
       throw e;
@@ -1818,6 +1854,64 @@ function CapsulePanel(parent, ctx) {
     await startWaiting(from);
     ctx.toast('Prompt ready: press Enter to send');
   }
+
+  learnBtn.addEventListener('click', onPage(async () => {
+    const selection = await takeSelection();
+    if (!(await ctx.page.hasConversation())) return ctx.toast('Open a conversation first');
+    if (limit) return ctx.toast(`${ctx.page.provider}'s limit is reached: learn later, or add a memory by hand`);
+    await promptAndWait(buildMemoryPrompt(selection, items.map(m => m.key).filter(Boolean)));
+  }));
+
+  /** A Learn reply arrived: its facts go to the inbox for review. */
+  async function learned(capsule) {
+    watcher = null;
+    mode('idle');
+    const facts = parseMemories(capsule.body);
+    if (!facts.length) return ctx.toast('Nothing new to remember in this chat');
+    try { await addToInbox(ctx.storage, facts, ctx.page.provider); } catch (_) { return ctx.toast('Save failed'); }
+    ctx.reveal();
+    ctx.toast(`${facts.length} new ${facts.length === 1 ? 'memory' : 'memories'} to review`);
+    refresh();
+  }
+
+  function renderInbox() {
+    if (!isMemory) return;
+    setText(inboxHead, `📥 ${inbox.length} new ${inbox.length === 1 ? 'memory' : 'memories'} to review`);
+    inboxList.textContent = '';
+    for (const f of inbox) {
+      const row = h('div', 'card', inboxList);
+      h('div', 't', row, f.text);
+      const replaces = f.key && items.some(m => m.key === f.key);
+      h('div', 'm', row, `${f.category} · from ${f.source}${replaces ? ' · updates a saved memory' : ''}`);
+      const b = h('div', 'btns', row);
+      textButton(b, '✅ Save', () => approve([f]));
+      textButton(b, '❌ Ignore', () => ignore([f]));
+    }
+    mode(current);
+  }
+
+  async function approve(facts) {
+    let saved = 0;
+    let updated = 0;
+    const done = [];
+    for (const f of facts) {
+      try {
+        const r = await approveMemory(store, f);
+        done.push(f.id);
+        if (r.updated) updated++; else saved++;
+      } catch (e) { ctx.toast(e?.message || 'Save failed'); }
+    }
+    try { await removeFromInbox(ctx.storage, done); } catch (_) {}
+    if (done.length) ctx.toast(updated ? `Saved ${saved}, updated ${updated}` : `Saved ${saved}`);
+    refresh();
+  }
+
+  async function ignore(facts) {
+    try { await removeFromInbox(ctx.storage, facts.map(f => f.id)); } catch (_) { return ctx.toast('Ignore failed'); }
+    refresh();
+  }
+  textButton(inboxBtns, 'Save all', () => approve(inbox));
+  textButton(inboxBtns, 'Ignore all', () => ignore(inbox));
 
   const copy = (capsule, done) => navigator.clipboard.writeText(fmt(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
 
@@ -1857,9 +1951,10 @@ function CapsulePanel(parent, ctx) {
 
   textButton(waitBtns, 'Use last reply', onPage(async () => {
     const w = watcher;
-    const capsule = parseCapsule(await ctx.page.latestReply(), { loose: true });
-    if (watcher !== w) return; // Cancelled, or the Capsule arrived, meanwhile
+    const capsule = parseCapsule(await ctx.page.latestReply(), { loose: true, ...(isMemory ? { markers: MEMORY_MARKERS } : {}) });
+    if (watcher !== w) return; // Cancelled, or the reply arrived, meanwhile
     if (!capsule) return ctx.toast('No reply yet');
+    if (isMemory) return learned(capsule);
     draftFrom(capsule, w?.from);
   }));
   textButton(waitBtns, 'Cancel', stopWaiting);
@@ -1867,10 +1962,11 @@ function CapsulePanel(parent, ctx) {
   textButton(draftBtns, 'Save', async () => {
     if (!store) return ctx.toast('Storage unavailable');
     try {
-      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value, tags: tagsIn.value, project: projectIn.value });
+      await store.save({ id: editing?.id, source: editing?.source, title: isMemory ? bodyIn.value : titleIn.value, body: bodyIn.value, tags: tagsIn.value, project: projectIn.value, ...(isMemory ? { category: categorySel.value } : {}) });
       if (editing?.fromHandoff) await clearHandoff(ctx.storage);
     } catch (e) {
-      return ctx.toast(e?.message === `${noun} is empty` ? e.message : 'Save failed');
+      const shown = [`${noun} is empty`, 'Looks like a secret: not saved', `Memory is too long (${MEMORY_MAX} characters max)`];
+      return ctx.toast(shown.includes(e?.message) ? e.message : 'Save failed');
     }
     editing = null;
     mode('idle');
@@ -1905,7 +2001,7 @@ function CapsulePanel(parent, ctx) {
       card.classList.toggle('on', box.checked);
       updatePick();
     });
-    h('div', 't', th, capsule.title);
+    h('div', 't', th, isMemory ? capsule.body : capsule.title);
     const pinLabel = capsule.pinned ? 'Unpin' : 'Pin to the top';
     const pin = textButton(th, '📌', async () => {
       try { await store.setPinned(capsule.id, !capsule.pinned); } catch (_) { return ctx.toast('Pin failed'); }
@@ -1915,7 +2011,7 @@ function CapsulePanel(parent, ctx) {
     pin.setAttribute('aria-label', pinLabel);
     pin.dataset.tip = pinLabel;
     const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    h('div', 'm', card, `${capsule.source} · ${date}${capsule.project ? ` · 📁 ${capsule.project}` : ''}`);
+    h('div', 'm', card, `${isMemory ? `${capsule.category || 'other'} · ` : ''}${capsule.source} · ${date}${capsule.project ? ` · 📁 ${capsule.project}` : ''}`);
     if (capsule.tags?.length) {
       const tagRow = h('div', 'tags', card);
       for (const t of capsule.tags) {
@@ -1934,12 +2030,12 @@ function CapsulePanel(parent, ctx) {
     });
     const btns = h('div', 'btns', card);
     textButton(btns, 'Insert', onPage(async () => {
-      if (await ctx.page.fill(fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : 'Inserted: add your question and send');
+      if (await ctx.page.fill(fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : isMemory ? 'Memory added: write your question and send' : 'Inserted: add your question and send');
       else copy(capsule, 'Chat box not found: copied instead');
     }));
     textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
     // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
-    if (!isSkill) {
+    if (!isSkill && !isMemory) {
       const upd = textButton(btns, 'Update', onPage(async () => {
         if (limit) return ctx.toast(`${ctx.page.provider}'s limit is reached: update it later, or edit by hand`);
         if (!(await ctx.page.hasConversation())) return ctx.toast('Open the chat with the new progress first');
@@ -1990,9 +2086,11 @@ function CapsulePanel(parent, ctx) {
     } catch (_) { handoff = null; }
     const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
     if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
+    if (isMemory) { try { inbox = await readInbox(ctx.storage); } catch (_) { inbox = []; } }
     mode(current);
     try { items = await store.list(); } catch (_) { return; }
     renderList();
+    renderInbox();
   }
 
   function renderList() {
@@ -2017,11 +2115,28 @@ function CapsulePanel(parent, ctx) {
     show(noMatch, items.length > 0 && shown.length === 0);
     show(exportBtn, items.length > 0);
     for (const c of shown) renderItem(c);
+    if (isMemory) {
+      show(injectRow, shown.length > 0);
+      const seq = ++injectSeq;
+      countOne(() => formatMemoriesForInsert(shown)).then((tokens) => {
+        if (seq !== injectSeq || tokens === null) return;
+        const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
+        setText(injectCost, `${shown.length} ${shown.length === 1 ? 'memory' : 'memories'} · ${cost.text}${cost.tooBig ? ' · too big for this chat' : ''}`);
+        injectCost.classList.toggle('bad', cost.tooBig);
+      }).catch(() => {});
+    }
     updatePick();
   }
 
   searchIn.addEventListener('input', () => { query = searchIn.value; renderList(); });
   projectSel.addEventListener('change', () => { projectFilter = projectSel.value; renderList(); });
+  injectBtn.addEventListener('click', onPage(async () => {
+    const shown = searchItems(items, query, { project: projectFilter || null });
+    if (!shown.length) return ctx.toast('No memories to inject');
+    const text = formatMemoriesForInsert(shown);
+    if (await ctx.page.fill(text)) ctx.toast(`Injected ${shown.length} ${shown.length === 1 ? 'memory' : 'memories'}: write your question and send`);
+    else navigator.clipboard.writeText(text).then(() => ctx.toast('Chat box not found: copied instead'), () => ctx.toast('Copy failed'));
+  }));
 
   /** Footer for the ticked items: count, cost of inserting them together, room left. */
   async function updatePick() {
@@ -2029,15 +2144,15 @@ function CapsulePanel(parent, ctx) {
     const picked = items.filter(c => selected.has(c.id));
     show(pick, picked.length > 0);
     if (!picked.length) return;
-    setText(pickText, `☑️ ${picked.length} ${noun}${picked.length === 1 ? '' : 's'} picked`);
-    const tokens = await countOne(() => formatManyForInsert(picked, ctx.kind)).catch(() => null);
+    setText(pickText, `☑️ ${picked.length} ${picked.length === 1 ? noun : plural} picked`);
+    const tokens = await countOne(() => fmtMany(picked)).catch(() => null);
     const cost = tokens === null ? null : formatCost(tokens, view_.contextLimit, view_.remaining);
     setText(pickCost, !cost ? '' : cost.tooBig ? `${cost.text} · too big for this chat`
       : `${cost.text}${view_.remaining !== null ? ` · ${fmtK(view_.remaining)} left` : ''}`);
     pickCost.classList.toggle('bad', Boolean(cost?.tooBig));
   }
 
-  const pickedText = () => formatManyForInsert(items.filter(c => selected.has(c.id)), ctx.kind);
+  const pickedText = () => fmtMany(items.filter(c => selected.has(c.id)));
   textButton(pickBtns, 'Insert all', onPage(async () => {
     const text = pickedText();
     if (await ctx.page.fill(text)) {
@@ -2054,7 +2169,7 @@ function CapsulePanel(parent, ctx) {
   // Export: one JSON file with every Capsule
   exportBtn.addEventListener('click', () => {
     download(view, store.key, 'json', exportCapsules(items, store.key), 'application/json');
-    ctx.toast(`Exported ${items.length} ${noun}${items.length === 1 ? '' : 's'}`);
+    ctx.toast(`Exported ${items.length} ${items.length === 1 ? noun : plural}`);
   });
 
   // Import: merge a file from Export (newer copies win; invalid entries skipped)
@@ -2068,7 +2183,7 @@ function CapsulePanel(parent, ctx) {
       ctx.toast(`${r.added} added, ${r.updated} updated, ${r.skipped} skipped`);
       refresh();
     } catch (e) {
-      ctx.toast(e?.message === `Not a ${noun}s file` ? e.message : 'Import failed');
+      ctx.toast(e?.message === `Not a ${plural} file` ? e.message : 'Import failed');
     }
   });
 
