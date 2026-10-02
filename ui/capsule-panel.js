@@ -304,7 +304,7 @@ export function CapsulePanel(parent, ctx) {
       }
       try { await removeFromInbox(ctx.storage, done); } catch (_) {}
       if (done.length) ctx.toast(updated ? `Saved ${saved}, updated ${updated}` : `Saved ${saved}`);
-    refresh();
+      refresh();
     } finally { busy = false; }
   }
 
