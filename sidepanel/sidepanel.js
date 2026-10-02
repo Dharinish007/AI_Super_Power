@@ -1586,6 +1586,7 @@ const STYLES = `
   /* Side panel page: the document itself is the .root (":host" above matches nothing outside a shadow root) */
   .panelpage { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--bg); }
   .panelpage > .tabs { flex: none; margin: 0; padding: 8px; border-bottom: 1px solid var(--border); }
+  .panelpage > .tabs.sub { padding: 4px 8px; }
   .panelpage > .body { flex: 1; min-height: 0; }
   .panelpage > .empty { margin: 24px 16px; text-align: center; color: var(--muted); }
   .settings { padding: 4px 16px 16px; }
@@ -2491,7 +2492,7 @@ function SettingsView(parent, { storage }) {
 
   // --- sidepanel/main.js ---
   /**
- * AI Context Monitor - Side panel. Shows the active tab of this window: Context | Capsules | Skills |
+ * AI Context Monitor - Side panel. Shows the active tab of this window: Context | Brain (Memory · Capsules · Skills) |
  * Settings. The engine runs in the tab; this page renders its view state and calls back through the
  * panel channel. Capsules, Skills and Settings are read from chrome.storage.local directly.
  * Built into sidepanel/sidepanel.js by scripts/build.js (one IIFE: no top-level await, hence the wrapper).
@@ -2507,13 +2508,14 @@ function SettingsView(parent, { storage }) {
 
 
 
+
 (async () => {
   const TABS = [ // Adding a feature = one entry here (+ a Settings section)
     { id: 'context', label: 'Context' },
-    { id: 'capsules', label: 'Capsules' },
-    { id: 'skills', label: 'Skills' },
+    { id: 'brain', label: '🧠 Brain' },
     { id: 'settings', label: '⚙', title: 'Settings' }
   ];
+  const BRAIN_TABS = [{ id: 'memory', label: 'Memory' }, { id: 'capsules', label: 'Capsules' }, { id: 'skills', label: 'Skills' }];
   const MESSAGES = {
     unsupported: 'Open ChatGPT, Claude or Gemini to see this chat\'s context.',
     reload: 'Reload this page to start.',
@@ -2531,6 +2533,7 @@ function SettingsView(parent, { storage }) {
   let vm = null;
   let settings = await readSettings(storage);
   let active = 'context';
+  let brainTab = 'memory';
 
   const toastEl = h('div', 'toast', root);
   toastEl.setAttribute('role', 'status');
@@ -2555,6 +2558,14 @@ function SettingsView(parent, { storage }) {
     if (t.title) { b.title = t.title; b.setAttribute('aria-label', t.title); }
     return [t.id, b];
   }));
+  const subnav = h('div', 'tabs sub', root);
+  subnav.setAttribute('role', 'tablist');
+  subnav.setAttribute('aria-label', 'Brain');
+  const subBtns = Object.fromEntries(BRAIN_TABS.map(t => {
+    const b = textButton(subnav, t.label, () => select('brain', t.id), 'tab');
+    b.setAttribute('role', 'tab');
+    return [t.id, b];
+  }));
   const empty = h('div', 'empty', root);
   const ctxView = ContextView(root, { settings, actions: {
     refresh: () => link?.call('refresh'),
@@ -2572,10 +2583,11 @@ function SettingsView(parent, { storage }) {
       download(root, 'chat', format, formatChatExport(msgs, format, { provider: page.provider }), format === 'json' ? 'application/json' : 'text/plain');
       toast(`Exported ${msgs.length} messages shown on the page`, 2500);
     },
-    saveAsCapsule: () => { select('capsules'); caps.capture(); }
+    saveAsCapsule: () => { select('brain', 'capsules'); caps.capture(); }
   } });
-  const caps = CapsulePanel(root, { kind: 'capsule', storage, page, toast, reveal: () => select('capsules') });
-  const skills = CapsulePanel(root, { kind: 'skill', storage, page, toast, reveal: () => select('skills') });
+  const memory = CapsulePanel(root, { kind: 'memory', storage, page, toast, reveal: () => select('brain', 'memory') });
+  const caps = CapsulePanel(root, { kind: 'capsule', storage, page, toast, reveal: () => select('brain', 'capsules') });
+  const skills = CapsulePanel(root, { kind: 'skill', storage, page, toast, reveal: () => select('brain', 'skills') });
   const settingsView = SettingsView(root, { storage });
 
   render(); // Until the active tab is known
@@ -2585,7 +2597,7 @@ function SettingsView(parent, { storage }) {
   root.addEventListener('pointerover', tipFor);
   root.addEventListener('focusin', tipFor);
 
-  function select(id) { active = id; render(); }
+  function select(id, sub) { active = id; if (sub) brainTab = sub; render(); }
 
   function render() {
     const status = panelStatus({ url: tabInfo.url, connected: Boolean(link) || tabInfo.loading, ready: Boolean(vm) && vm.ready !== false });
@@ -2595,24 +2607,28 @@ function SettingsView(parent, { storage }) {
     setText(empty, MESSAGES[status] || '');
     show(ctxView.el, !blocked && active === 'context');
     show(ctxView.foot, !blocked && active === 'context');
-    show(caps.view, active === 'capsules');
-    show(skills.view, active === 'skills');
+    show(subnav, active === 'brain');
+    show(memory.view, active === 'brain' && brainTab === 'memory');
+    show(caps.view, active === 'brain' && brainTab === 'capsules');
+    show(skills.view, active === 'brain' && brainTab === 'skills');
     show(settingsView.el, active === 'settings');
     for (const [id, b] of Object.entries(tabBtns)) b.setAttribute('aria-selected', String(id === active));
+    for (const [id, b] of Object.entries(subBtns)) b.setAttribute('aria-selected', String(id === brainTab));
     const theme = settings.display.theme;
     root.classList.toggle('light', theme === 'light' || (theme === 'auto' && !matchMedia('(prefers-color-scheme: dark)').matches));
   }
 
   // A Capsule wait belongs to the tab it started in: end it when that tab's link goes
   function endWaits() {
-    const stopped = caps.stop();
+    const stopped = [caps.stop(), memory.stop()].some(Boolean);
     skills.stop();
-    if (stopped) toast('Capsule wait stopped: the tab changed');
+    if (stopped) toast('Wait stopped: the tab changed');
   }
 
   function setState(s) {
     vm = s;
     if (s) ctxView.update(s);
+    memory.setView(s);
     caps.setView(s);
     skills.setView(s);
     render();
@@ -2657,10 +2673,12 @@ function SettingsView(parent, { storage }) {
     }
     if (ch[CAPSULES_KEY] || ch[CAPSULE_HANDOFF_KEY]) caps.refresh();
     if (ch[SKILLS_KEY]) skills.refresh();
+    if (ch[MEMORIES_KEY] || ch[MEMORY_INBOX_KEY]) memory.refresh();
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
 
   settingsView.update(settings);
+  memory.refresh();
   caps.refresh();
   skills.refresh();
   follow(await activeTab());

@@ -159,6 +159,7 @@ export const STYLES = `
   /* Side panel page: the document itself is the .root (":host" above matches nothing outside a shadow root) */
   .panelpage { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--bg); }
   .panelpage > .tabs { flex: none; margin: 0; padding: 8px; border-bottom: 1px solid var(--border); }
+  .panelpage > .tabs.sub { padding: 4px 8px; }
   .panelpage > .body { flex: 1; min-height: 0; }
   .panelpage > .empty { margin: 24px 16px; text-align: center; color: var(--muted); }
   .settings { padding: 4px 16px 16px; }
