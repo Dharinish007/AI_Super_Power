@@ -1,6 +1,6 @@
 /**
  * Context Monitor - pieces shared by the ChatGPT coordinator (content-main.js) and the Claude / Gemini
- * coordinator (provider-coordinator.js): toolbar badge, toolbar-icon toggle, diagnostics envelope,
+ * coordinator (provider-coordinator.js): toolbar badge, diagnostics envelope,
  * limit provenance and context intelligence.
  */
 
@@ -31,18 +31,6 @@ export function badgeSender(counters = {}, ms = 250) {
     if (timer) counters.syncsCoalesced = (counters.syncsCoalesced || 0) + 1;
     else flush();
   };
-}
-
-/** The toolbar icon (background service worker) shows / hides the widget. */
-export function listenForToggle(widget) {
-  if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request?.type !== 'TOGGLE_OVERLAY') return false;
-    widget.isVisible = !widget.isVisible;
-    widget.render();
-    sendResponse({ success: true, isVisible: widget.isVisible });
-    return true;
-  });
 }
 
 /** Short hash identifying a conversation in diagnostics without exposing its id. */

@@ -116,14 +116,14 @@ export class ChatGPTDOMObserver {
 
   /**
    * False for mutations inside regions that never hold conversation content: the chat input's form
-   * (unless it is the model switcher), the sidebar <nav>, and the extension's own widget.
+   * (unless it is the model switcher), the sidebar <nav>, and the extension's own widgets.
    * @param {MutationRecord} m
    * @returns {boolean}
    */
   _isRelevant(m) {
     const node = m.target && (m.target.nodeType === 1 ? m.target : m.target.parentElement);
     if (!node || !node.closest) return true;
-    if (node.closest('#chatgpt-context-monitor-host, nav')) return false;
+    if (node.closest('[id^="chatgpt-context-monitor-"], nav')) return false;
     if (!this._composer || !this._composer.isConnected) {
       const input = document.querySelector(this.composerSelector);
       this._composer = input ? (input.closest('form, fieldset') || input) : null;

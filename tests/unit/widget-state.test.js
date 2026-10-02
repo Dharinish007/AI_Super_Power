@@ -4,7 +4,8 @@
  */
 
 import { ClaudeProvider } from '../../content/providers.js';
-import { toWidgetState, formatModelName, alertLevel, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage } from '../../content/widget-state.js';
+import { toWidgetState, formatModelName, alertLevel, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage, widgetFields } from '../../content/widget-state.js';
+import { widgetPositions } from '../../content/widgets.js';
 
 export function runWidgetStateTests() {
   console.log('--- Running Widget View-State Tests ---');
@@ -128,6 +129,29 @@ export function runWidgetStateTests() {
   assert('formatModelName: gpt-5-5-thinking', formatModelName('gpt-5-5-thinking') === 'GPT-5.5 Thinking');
   assert('formatModelName: gpt-4o-mini', formatModelName('gpt-4o-mini') === 'GPT-4o Mini');
   assert('formatModelName: non-GPT names pass through', formatModelName('claude-sonnet-4') === 'claude-sonnet-4');
+
+  // Context widget card: only the chosen fields, in the fixed order, blanks dropped
+  const vmw = { ready: true, usedTokens: 5700, contextLimit: 256000, percentage: 2, model: 'GPT-5.6', exchangesLeft: 40,
+    limits: [{ label: '5-hour', percent: 30, resetIn: '2h 10m', blocked: false }], warning: null };
+  const f1 = widgetFields(vmw, ['model', 'tokens', 'percent']);
+  assert('Fields in display order, not pick order', f1.map(f => f.key).join() === 'tokens,percent,model');
+  assert('Token value formatted with window', f1[0].value === '5.7K / 256K');
+  assert('Percent value', f1[1].value === '2%');
+  assert('Limits joined', widgetFields(vmw, ['limits'])[0].value === '5-hour 30% · resets in 2h 10m');
+  assert('Empty values dropped (no alert, unknown exchanges)', widgetFields({ ...vmw, exchangesLeft: null }, ['exchangesLeft', 'alert']).length === 0);
+  assert('Unknown window: tokens only', widgetFields({ ...vmw, contextLimit: null, percentage: null }, ['tokens', 'percent'])[0].value === '5.7K' && widgetFields({ ...vmw, contextLimit: null, percentage: null }, ['tokens', 'percent']).length === 1);
+  assert('Not ready -> nothing', widgetFields({ ready: false }, ['tokens']).length === 0);
+
+  // Pill positions: defaults bottom-right, the old single widget's position becomes the Context pill's
+  const d = widgetPositions(undefined);
+  assert('Default positions: both bottom-right, Capsule below Context', !d.migrated && d.pos.context.side === 'right' && d.pos.capsule.side === 'right' && d.pos.capsule.yFromBottom < d.pos.context.yFromBottom);
+  const m = widgetPositions({ pos: { side: 'left', dx: 20, y: 300 }, theme: 'dark', expanded: true });
+  assert('Old position migrates to the Context pill', m.migrated && m.pos.context.side === 'left' && m.pos.context.dx === 20 && m.pos.context.y === 300);
+  assert('Migrated: Capsule pill gets its default', m.pos.capsule.side === 'right' && m.pos.capsule.yFromBottom === d.pos.capsule.yFromBottom);
+  const n = widgetPositions({ pos: { context: { side: 'left', dx: 8, yFromBottom: 40 }, capsule: { side: 'up', dx: 1, y: 2 } } });
+  assert('New shape kept; an invalid pill position falls back to its default', !n.migrated && n.pos.context.yFromBottom === 40 && n.pos.capsule.side === 'right');
+  n.pos.capsule.dx = 999;
+  assert('Defaults are copies, never shared', widgetPositions(null).pos.capsule.dx === 16);
 
   return { passed, failed };
 }

@@ -13,14 +13,14 @@ import { ModelDetector } from './model-detector.js';
 import { PlanDetector, normalizePlanTier, PlanTier } from './plan-detector.js';
 import { AttachmentDetector } from './attachment-detector.js';
 import { ToolDetector } from './tool-detector.js';
-import { ContextWidget } from './overlay-ui.js';
+import { Widgets } from './widgets.js';
 import { toWidgetState } from './widget-state.js';
 import { servePanel } from './panel-channel.js';
 import { mergeLiveTurns } from './turn-merger.js';
 import { ConversationClient } from './conversation-client.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { RequestObserver } from '../network/request-observer.js';
-import { badgeSender, listenForToggle, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
+import { badgeSender, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -115,7 +115,7 @@ export class ContentScriptCoordinator {
     this.attachmentDetector = new AttachmentDetector();
     this.toolDetector = new ToolDetector();
     // UI adapter: the only ChatGPT-specific UI knowledge is the name and where the input is
-    this.overlayUI = new ContextWidget({
+    this.overlayUI = new Widgets({
       provider: 'ChatGPT',
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
@@ -161,7 +161,7 @@ export class ContentScriptCoordinator {
   init() {
     console.log('[ChatGPT Context Monitor] Initializing content script...');
 
-    // Mount in-page overlay HUD
+    // Mount the in-page widgets (Context and Capsule pills)
     this.overlayUI.mount();
 
     // Start DOM observing
@@ -179,7 +179,6 @@ export class ContentScriptCoordinator {
     // Build the BPE rank table (one-off, ~0.1 s) while the first pass waits on the network
     this.tokenizer.warm();
 
-    listenForToggle(this.overlayUI);
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
     if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
       this.panel = servePanel({

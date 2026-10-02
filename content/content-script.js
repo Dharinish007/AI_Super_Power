@@ -4040,6 +4040,76 @@ class ToolDetector {
 }
 
 
+  // --- content/settings.js ---
+  /**
+ * Context Monitor - Settings
+ *
+ * One object in chrome.storage.local, read by the side panel and by the widgets on every site. Reads
+ * always go through normalizeSettings, so a missing, old or hand-edited value never breaks the UI.
+ */
+
+const SETTINGS_KEY = 'settings';
+
+/** Fields the Context widget can show, in display order. */
+const CONTEXT_FIELDS = [
+  { key: 'tokens', label: 'Tokens used / window' },
+  { key: 'percent', label: '% of window' },
+  { key: 'model', label: 'Model' },
+  { key: 'exchangesLeft', label: 'Exchanges left' },
+  { key: 'limits', label: 'Plan usage limits' },
+  { key: 'alert', label: 'Alert message' }
+];
+
+const CAPSULE_METHODS = ['ask-ai', 'quick'];
+const THEMES = ['auto', 'dark', 'light'];
+
+const DEFAULT_SETTINGS = Object.freeze({
+  widgets: { context: { enabled: true, fields: ['tokens', 'percent', 'model', 'exchangesLeft'] }, capsule: { enabled: true } },
+  capsule: { method: 'ask-ai' },
+  context: { alerts: true },
+  display: { theme: 'auto', compact: false, badges: true }
+});
+
+const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+const bool = (v, d) => (typeof v === 'boolean' ? v : d);
+const oneOf = (v, list) => (list.includes(v) ? v : list[0]);
+
+/** @returns {typeof DEFAULT_SETTINGS} a fresh, valid settings object */
+function normalizeSettings(raw) {
+  const r = obj(raw);
+  const w = obj(r.widgets);
+  const wc = obj(w.context);
+  const keys = CONTEXT_FIELDS.map(f => f.key);
+  const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
+  const d = obj(r.display);
+  return {
+    widgets: { context: { enabled: bool(wc.enabled, true), fields }, capsule: { enabled: bool(obj(w.capsule).enabled, true) } },
+    capsule: { method: oneOf(obj(r.capsule).method, CAPSULE_METHODS) },
+    context: { alerts: bool(obj(r.context).alerts, true) },
+    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) }
+  };
+}
+
+/** @param {{ get: Function }} area chrome.storage.local (or a fake) */
+async function readSettings(area) {
+  try { return normalizeSettings((await area.get(SETTINGS_KEY))?.[SETTINGS_KEY]); } catch (_) { return normalizeSettings(); }
+}
+
+/** Merges `patch` (any subset, two levels deep) into the stored settings; returns the result. */
+async function writeSettings(area, patch) {
+  const cur = await readSettings(area);
+  const p = obj(patch);
+  const next = normalizeSettings({
+    widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
+    capsule: { ...cur.capsule, ...obj(p.capsule) },
+    context: { ...cur.context, ...obj(p.context) },
+    display: { ...cur.display, ...obj(p.display) }
+  });
+  await area.set({ [SETTINGS_KEY]: next });
+  return next;
+}
+
+
   // --- content/widget-state.js ---
   /**
  * Context Monitor - Widget View State
@@ -4048,6 +4118,9 @@ class ToolDetector {
  * The widget never reads engine internals; any future provider adapter (Claude, Gemini, ...)
  * only needs to produce this shape. Pure function: formatting only, no recalculation.
  */
+
+
+
 
 /**
  * "gpt-5-6" -> "GPT-5.6", "gpt-5-5-thinking" -> "GPT-5.5 Thinking", "gpt-4o-mini" -> "GPT-4o Mini".
@@ -4273,6 +4346,26 @@ function toWidgetState(s, opts = {}) {
     ready: true
   };
   return vm;
+}
+
+/**
+ * The Context widget's expanded card: the chosen fields, in CONTEXT_FIELDS order, without blanks.
+ * @param {Object} vm Output of toWidgetState()
+ * @param {string[]} fields Keys from settings.widgets.context.fields
+ * @returns {Array<{ key: string, label: string, value: string }>}
+ */
+function widgetFields(vm, fields) {
+  if (!vm || vm.ready === false) return [];
+  const known = (v) => v !== null && v !== undefined;
+  const value = {
+    tokens: () => (vm.contextLimit ? `${fmtK(vm.usedTokens)} / ${fmtK(vm.contextLimit)}` : fmtK(vm.usedTokens)),
+    percent: () => (known(vm.percentage) ? `${vm.percentage}%` : null),
+    model: () => vm.model || null,
+    exchangesLeft: () => (known(vm.exchangesLeft) ? `~${vm.exchangesLeft}` : null),
+    limits: () => (vm.limits?.length ? vm.limits.map(l => `${l.label} ${limitText(l)}`).join(' | ') : null),
+    alert: () => vm.warning || null
+  };
+  return CONTEXT_FIELDS.filter(f => fields.includes(f.key)).map(f => ({ key: f.key, label: f.label, value: value[f.key]() })).filter(f => f.value);
 }
 
 
@@ -5423,741 +5516,19 @@ const STYLES = `
 `;
 
 
-  // --- ui/capsule-panel.js ---
+  // --- content/widgets.js ---
   /**
- * Context Monitor - Capsules / Skills panel
+ * Context Monitor - Widgets: two small pills on the chat page, each dragged on its own.
+ *   Context  "5.7K · 2%" (badge colours) → click expands a card with the fields chosen in Settings
+ *   Capsule  "💊 Capsule" → click runs captureCapsule with the chosen method; click again cancels
+ * Everything else lives in the side panel (toolbar icon). Also here, because they belong to the page:
+ * the 80% / 95% alerts (toasts on the Context pill) and the usage % next to chats in the sidebar.
+ * Alt+T hides / shows both pills for this page view; Settings turns each one off for good.
  *
- * Moved out of content/overlay-ui.js. It touches the AI site only through `ctx.page` (the Page
- * interface, content/page-actions.js), so it runs the same in the page or in the side panel.
+ * Each pill is its own shadow host (the page's CSS cannot reach it), moved only with transform and
+ * anchored to its nearer side and top / bottom edge. Positions persist per site in chrome.storage.local
+ * (`ui:<hostname>` = { pos: { context, capsule } }). Page-derived strings are only ever assigned as text.
  */
-
-
-
-
-
-/**
- * Capsules tab. Create fills the chat box with the Capsule prompt (the user sends it); while waiting,
- * page.watchCapsule watches for the reply's END marker and opens it in the editor; Save stores it.
- * The saved list (one for all sites) has Insert / Copy / Edit / Delete.
- * With `kind: 'skill'` the same panel is the Skills tab: reusable instructions written by the user
- * (＋ New Skill, starter Skills on first open), no AI capture, no Update.
- * @param {HTMLElement} parent
- * @param {{ kind?: 'capsule'|'skill', page: Object, storage: Object|null, toast: (text: string) => void, reveal: () => void }} ctx
- *   `page`: the Page interface (content/page-actions.js); every call is async
- */
-function CapsulePanel(parent, ctx) {
-  const isSkill = ctx.kind === 'skill';
-  const provider = ctx.page.provider; // Fixed texts only: the side panel's page follows the active tab, so live uses read ctx.page.provider
-  const noun = isSkill ? 'Skill' : 'Capsule';
-  const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
-  const view = h('div', 'body caps hide', parent);
-  const store = ctx.storage ? new CapsuleStore(ctx.storage, isSkill ? { key: SKILLS_KEY, noun } : {}) : null;
-
-  // The site's limit is reached: the AI here cannot write the Capsule
-  const limitCard = h('div', 'card warn hide', view);
-  limitCard.setAttribute('role', 'status');
-  const limitTextEl = h('div', 't', limitCard);
-  h('div', 'm', limitCard, `${provider} can't write a Capsule right now. Use ⚡ Quick (no AI), or 🔀 make it in another AI.`);
-
-  // A hand-off made on another chat or site, waiting to be pasted here
-  const handoffCard = h('div', 'card hide', view);
-  const handoffText = h('div', 't', handoffCard);
-  h('div', 'm', handoffCard, `Paste it here, press Enter, and ${provider} writes the Capsule.`);
-  const handoffBtns = h('div', 'btns', handoffCard);
-
-  const create = textButton(view, '📦 Create Capsule', null, 'btn primary');
-  const alt = h('div', 'btns', view);
-  const quickBtn = textButton(alt, '⚡ Quick (no AI)');
-  quickBtn.dataset.tip = 'Build it from this chat without any AI: goal, latest turns, code';
-  const handoffBtn = textButton(alt, '🔀 Make in another AI');
-  handoffBtn.dataset.tip = 'Copy this chat with the Capsule prompt; paste it into another AI that still has messages left';
-  const hint = h('div', 'fine', view, 'Select part of the chat first to capture only that part.');
-
-  // Skills tab: written by the user
-  const newBtn = textButton(view, '＋ New Skill', () => openDraft({ source: 'You' }), 'btn primary');
-  const skillHint = h('div', 'fine', view, 'Insert adds to what is already in the chat box: insert a Capsule, then a Skill, and send them together.');
-
-  const wait = h('div', 'card wait hide', view);
-  wait.setAttribute('role', 'status');
-  h('div', 't', wait, 'Waiting for the Capsule…');
-  h('div', 'm', wait, `Press Enter in the chat to send the prompt. The Capsule opens here when ${provider} has written it.`);
-  const waitBtns = h('div', 'btns', wait);
-
-  const draft = h('div', 'card hide', view);
-  const titleIn = h('input', 'field', draft);
-  titleIn.placeholder = isSkill ? 'Skill name, e.g. Code reviewer' : 'Title';
-  titleIn.maxLength = 80;
-  titleIn.setAttribute('aria-label', `${noun} title`);
-  const metaRow = h('div', 'two', draft);
-  const projectIn = h('input', 'field', metaRow);
-  projectIn.placeholder = '📁 Project';
-  projectIn.maxLength = 40;
-  projectIn.setAttribute('aria-label', `${noun} project`);
-  const projectList = h('datalist', null, draft); // Suggests the projects already in use
-  projectList.id = `${ctx.kind || 'capsule'}-projects`;
-  projectIn.setAttribute('list', projectList.id);
-  const tagsIn = h('input', 'field', metaRow);
-  tagsIn.placeholder = '🏷️ Tags: work, auth';
-  tagsIn.setAttribute('aria-label', `${noun} tags, separated by commas`);
-  const bodyIn = h('textarea', 'field', draft);
-  bodyIn.spellcheck = false;
-  bodyIn.setAttribute('aria-label', `${noun} text`);
-  if (isSkill) bodyIn.placeholder = 'How the AI should answer, e.g. "Review my code like a senior developer. Bugs first, be short."';
-  const draftBtns = h('div', 'btns', draft);
-
-  // Library: search (every word must match; #tag = tags only) and a project filter
-  const searchRow = h('div', 'two hide', view);
-  const searchIn = h('input', 'field', searchRow);
-  searchIn.type = 'search';
-  searchIn.placeholder = `🔍 Search ${noun}s… (#tag)`;
-  searchIn.setAttribute('aria-label', `Search ${noun}s`);
-  const projectSel = h('select', 'field', searchRow);
-  projectSel.setAttribute('aria-label', 'Show one project');
-
-  const listHead = h('div', 'caps-h hide', view);
-  const list = h('div', 'caps', view);
-  list.style.padding = '0';
-  const noMatch = h('div', 'fine hide', view, 'No matches. Try fewer words, or "All projects".');
-  const empty = h('div', 'fine', view, isSkill
-    ? 'No Skills yet. A Skill is an instruction you reuse, like "Explain simply". Add one, then insert it into any AI.'
-    : 'No Capsules yet. Create one here, then insert it into ChatGPT, Claude or Gemini.');
-  const io = h('div', 'btns', view);
-  const exportBtn = textButton(io, '📤 Export');
-  exportBtn.dataset.tip = `Download all ${noun}s as a JSON file (backup, or move to another PC)`;
-  const importBtn = textButton(io, '📥 Import');
-  importBtn.dataset.tip = `Add ${noun}s from an exported file; newer copies replace older ones`;
-  const fileIn = h('input', 'hide', view);
-  fileIn.type = 'file';
-  fileIn.accept = '.json,application/json';
-  fileIn.setAttribute('aria-label', `${noun}s file to import`);
-
-  // Ticked items: one insert for all of them, with what it costs here
-  const pick = h('div', 'card pick hide', view);
-  pick.setAttribute('role', 'status');
-  const pickText = h('div', 't', pick);
-  const pickCost = h('div', 'm', pick);
-  const pickBtns = h('div', 'btns', pick);
-  let query = '';
-  let projectFilter = '';
-  const selected = new Set(); // Ticked ids; kept while the list re-renders
-
-  let items = []; // Saved Capsules (or Skills), newest first
-  let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
-  let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
-  const tokenCache = new Map(); // `${id}:${updatedAt}` -> Promise of the estimated tokens
-
-  let pendingSelection = null; // Promise of the selection read on press
-  let editing = null; // { id, source, fromHandoff } of the Capsule in the editor
-  let watcher = null; // { from, stop } while waiting for the reply
-  let current = 'idle';
-  let limit = null; // Limit that blocks chatting here (chatLimitReached)
-  let handoff = null; // Waiting hand-off (readHandoff)
-
-  const mode = (m) => {
-    current = m;
-    const idle = m === 'idle';
-    const capture = idle && !isSkill; // AI capture exists only for Capsules
-    show(limitCard, capture && Boolean(limit));
-    show(handoffCard, capture && Boolean(handoff));
-    show(create, capture);
-    show(alt, capture);
-    show(hint, capture);
-    show(newBtn, idle && isSkill);
-    show(skillHint, idle && isSkill);
-    show(wait, m === 'waiting');
-    show(draft, m === 'draft');
-  };
-
-  /** A click handler that calls the page: a failed call (page gone) shows a toast instead of throwing. */
-  const onPage = (fn) => (...args) => fn(...args).catch((e) => { console.warn('[Context Monitor]', e); ctx.toast('Page not reachable'); });
-  /** Estimated tokens of a text: a number, or null when it can't be counted (never rejects). */
-  const countOne = (text) => Promise.resolve().then(() => ctx.page.countTokens([text()])).then(r => (typeof r?.[0] === 'number' ? r[0] : null));
-
-  /** Selection is read on press: the click itself may move focus away from the chat. */
-  const takeSelection = async () => {
-    const pending = pendingSelection;
-    pendingSelection = null;
-    return (await pending) || ctx.page.takeSelection();
-  };
-  for (const b of [create, quickBtn, handoffBtn]) b.addEventListener('pointerdown', () => { pendingSelection = ctx.page.takeSelection().catch(() => ''); });
-
-  /** @returns {boolean} whether a wait was running */
-  function stopWaiting() {
-    if (!watcher) return false;
-    watcher.stop();
-    watcher = null;
-    mode('idle');
-    return true;
-  }
-
-  /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */
-  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || ctx.page.provider }, Boolean(from?.handoff));
-
-  /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
-  function openDraft(capsule, fromHandoff = false) {
-    stopWaiting();
-    editing = { id: capsule.id || null, source: capsule.source || ctx.page.provider, fromHandoff };
-    titleIn.value = capsule.title || '';
-    bodyIn.value = capsule.body || '';
-    // An Update's new text has no tags or project: the saved item's win. A new one starts in the
-    // project being shown.
-    const stored = capsule.id ? items.find(c => c.id === capsule.id) : null;
-    tagsIn.value = ((stored || capsule).tags || []).join(', ');
-    projectIn.value = stored ? (stored.project || '') : (capsule.project || projectFilter);
-    projectList.textContent = '';
-    for (const p of projectsOf(items)) h('option', null, projectList).value = p;
-    mode('draft');
-    bodyIn.scrollTop = 0;
-    titleIn.focus({ preventScroll: true });
-  }
-
-  /**
-   * Waits for the Capsule in the reply (the one already on the page is ignored).
-   * @param {{ source: string, id?: string, handoff?: boolean }|null} [from] Hand-off (keeps its original site)
-   *   or Update (replaces Capsule `id`) being written
-   */
-  async function startWaiting(from = null) {
-    stopWaiting();
-    const w = watcher = { from, stop: () => {} };
-    mode('waiting');
-    let stop;
-    try {
-      stop = await ctx.page.watchCapsule((capsule) => {
-        if (watcher !== w) return;
-        draftFrom(capsule, from);
-        ctx.reveal();
-        ctx.toast('Capsule ready: review and save');
-      });
-    } catch (e) {
-      if (watcher === w) { watcher = null; mode('idle'); }
-      throw e;
-    }
-    if (watcher === w) w.stop = stop; else stop(); // Cancelled (or found) while the watch started
-  }
-
-  /** Fills the chat box with a prompt and waits for the Capsule in the reply. */
-  async function promptAndWait(prompt, from = null) {
-    if (!(await ctx.page.fill(prompt))) return ctx.toast('Chat box not found');
-    await startWaiting(from);
-    ctx.toast('Prompt ready: press Enter to send');
-  }
-
-  const copy = (capsule, done) => navigator.clipboard.writeText(fmt(capsule)).then(() => ctx.toast(done), () => ctx.toast('Copy failed'));
-
-  create.addEventListener('click', onPage(async () => {
-    const selection = await takeSelection();
-    if (!(await ctx.page.hasConversation())) return ctx.toast('Open a conversation first');
-    await promptAndWait(buildCapsulePrompt(selection));
-  }));
-
-  // Step 2: no AI. A selection is used as-is; otherwise goal + latest turns + code from the page
-  quickBtn.addEventListener('click', onPage(async () => {
-    const selection = await takeSelection();
-    const capsule = await quickCapsule(selection, () => ctx.page.transcript());
-    if (!capsule) return ctx.toast('Open a conversation first');
-    openDraft({ ...capsule, source: ctx.page.provider });
-  }));
-
-  // Step 3: the prompt plus this conversation wait in storage (and the clipboard) for another AI
-  handoffBtn.addEventListener('click', onPage(async () => {
-    const selection = await takeSelection();
-    const messages = await ctx.page.transcript();
-    if (!messages.length) return ctx.toast('Open a conversation first');
-    if (!ctx.storage) return ctx.toast('Storage unavailable');
-    const prompt = buildCapsulePrompt(selection, formatTranscript(messages));
-    try { await saveHandoff(ctx.storage, { prompt, source: ctx.page.provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
-    navigator.clipboard?.writeText(prompt).catch(() => {});
-    ctx.toast('Ready: open another AI → Capsules → Paste & create');
-  }));
-
-  textButton(handoffBtns, 'Paste & create', onPage(async () => {
-    if (handoff) await promptAndWait(handoff.prompt, { source: handoff.source, handoff: true });
-  }));
-  textButton(handoffBtns, 'Dismiss', async () => {
-    try { await clearHandoff(ctx.storage); } catch (_) {}
-    refresh();
-  });
-
-  textButton(waitBtns, 'Use last reply', onPage(async () => {
-    const w = watcher;
-    const capsule = parseCapsule(await ctx.page.latestReply(), { loose: true });
-    if (watcher !== w) return; // Cancelled, or the Capsule arrived, meanwhile
-    if (!capsule) return ctx.toast('No reply yet');
-    draftFrom(capsule, w?.from);
-  }));
-  textButton(waitBtns, 'Cancel', stopWaiting);
-
-  textButton(draftBtns, 'Save', async () => {
-    if (!store) return ctx.toast('Storage unavailable');
-    try {
-      await store.save({ id: editing?.id, source: editing?.source, title: titleIn.value, body: bodyIn.value, tags: tagsIn.value, project: projectIn.value });
-      if (editing?.fromHandoff) await clearHandoff(ctx.storage);
-    } catch (e) {
-      return ctx.toast(e?.message === `${noun} is empty` ? e.message : 'Save failed');
-    }
-    editing = null;
-    mode('idle');
-    ctx.toast(`${noun} saved`);
-    refresh();
-  });
-  textButton(draftBtns, 'Discard', () => { editing = null; mode('idle'); });
-
-  // Keys typed in the editor or search stay there: the sites move focus to their chat box on stray keystrokes
-  for (const type of ['keydown', 'keypress', 'keyup']) {
-    view.addEventListener(type, (e) => { if (e.key !== 'Escape' && e.target.matches?.('input, textarea, select')) e.stopPropagation(); });
-  }
-
-  /** Estimated tokens of the text Insert puts in the chat (cached per Capsule version; a failed count is retried). */
-  function tokensOf(capsule) {
-    const key = `${capsule.id}:${capsule.updatedAt}`;
-    if (!tokenCache.has(key)) {
-      tokenCache.set(key, countOne(() => fmt(capsule)).catch(() => { tokenCache.delete(key); return null; }));
-    }
-    return tokenCache.get(key);
-  }
-
-  function renderItem(capsule) {
-    const card = h('div', `card${selected.has(capsule.id) ? ' on' : ''}`, list);
-    const th = h('div', 'th', card);
-    const box = h('input', null, th);
-    box.type = 'checkbox';
-    box.checked = selected.has(capsule.id);
-    box.setAttribute('aria-label', `Pick "${capsule.title}" to insert together with others`);
-    box.addEventListener('change', () => {
-      if (box.checked) selected.add(capsule.id); else selected.delete(capsule.id);
-      card.classList.toggle('on', box.checked);
-      updatePick();
-    });
-    h('div', 't', th, capsule.title);
-    const pinLabel = capsule.pinned ? 'Unpin' : 'Pin to the top';
-    const pin = textButton(th, '📌', async () => {
-      try { await store.setPinned(capsule.id, !capsule.pinned); } catch (_) { return ctx.toast('Pin failed'); }
-      refresh();
-    }, `pin${capsule.pinned ? ' on' : ''}`);
-    pin.setAttribute('aria-pressed', String(Boolean(capsule.pinned)));
-    pin.setAttribute('aria-label', pinLabel);
-    pin.dataset.tip = pinLabel;
-    const date = new Date(capsule.updatedAt || capsule.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    h('div', 'm', card, `${capsule.source} · ${date}${capsule.project ? ` · 📁 ${capsule.project}` : ''}`);
-    if (capsule.tags?.length) {
-      const tagRow = h('div', 'tags', card);
-      for (const t of capsule.tags) {
-        const chip = textButton(tagRow, `#${t}`, () => { searchIn.value = query = `#${t}`; renderList(); }, 'chip');
-        chip.setAttribute('aria-label', `Show only #${t}`);
-      }
-    }
-    // Cost line: filled in when the count arrives
-    const line = h('div', 'm hide', card);
-    line.dataset.tip = 'Estimated with a local tokenizer; the site may count a little differently';
-    tokensOf(capsule).then((tokens) => {
-      if (tokens === null) return;
-      const cost = formatCost(tokens, view_.contextLimit, view_.remaining);
-      line.className = `m${cost.tooBig ? ' bad' : ''}`;
-      line.textContent = cost.tooBig ? `${cost.text} · too big for this chat` : cost.text;
-    });
-    const btns = h('div', 'btns', card);
-    textButton(btns, 'Insert', onPage(async () => {
-      if (await ctx.page.fill(fmt(capsule))) ctx.toast(isSkill ? 'Skill added: write your question and send' : 'Inserted: add your question and send');
-      else copy(capsule, 'Chat box not found: copied instead');
-    }));
-    textButton(btns, 'Copy', () => copy(capsule, 'Copied'));
-    // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
-    if (!isSkill) {
-      const upd = textButton(btns, 'Update', onPage(async () => {
-        if (limit) return ctx.toast(`${ctx.page.provider}'s limit is reached: update it later, or edit by hand`);
-        if (!(await ctx.page.hasConversation())) return ctx.toast('Open the chat with the new progress first');
-        await promptAndWait(buildCapsulePrompt(await takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
-      }));
-      upd.dataset.tip = `${ctx.page.provider} rewrites it with this chat's new progress`;
-    }
-    textButton(btns, 'Edit', () => openDraft(capsule));
-    const del = textButton(btns, 'Delete', async () => {
-      if (!del.dataset.armed) {
-        del.dataset.armed = '1';
-        del.textContent = 'Sure?';
-        setTimeout(() => { delete del.dataset.armed; del.textContent = 'Delete'; }, 3000);
-        return;
-      }
-      try { await store.remove(capsule.id); } catch (_) { return ctx.toast('Delete failed'); }
-      ctx.toast('Deleted');
-      refresh();
-    }, 'btn danger');
-  }
-
-  /** @param {Object} vm Widget view state: limits, and this chat's window for the cost lines */
-  function setView(vm) {
-    limit = chatLimitReached(vm?.limits);
-    const contextLimit = vm?.contextLimit || null;
-    const remaining = Number.isFinite(vm?.remainingTokens) ? vm.remainingTokens : null;
-    // Cost lines change with the window or the room left (to the nearest 1K): re-render only then
-    const sig = `${contextLimit}|${remaining === null ? '' : Math.round(remaining / 1000)}`;
-    if (sig !== view_.sig) {
-      view_ = { sig, contextLimit, remaining };
-      renderList();
-    }
-    // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
-    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.page.provider);
-    if (limit) setText(limitTextEl, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
-    mode(current);
-  }
-
-  async function refresh() {
-    if (!store) return;
-    if (isSkill && !seeded) {
-      seeded = true;
-      try { await store.seed(STARTER_SKILLS); } catch (_) {}
-    }
-    try {
-      handoff = isSkill ? null : await readHandoff(ctx.storage);
-    } catch (_) { handoff = null; }
-    const mins = handoff ? Math.round((Date.now() - handoff.at) / 60000) : 0;
-    if (handoff) setText(handoffText, `📨 Hand-off from ${handoff.source} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}`);
-    mode(current);
-    try { items = await store.list(); } catch (_) { return; }
-    renderList();
-  }
-
-  function renderList() {
-    // Project filter: options follow the projects in use; a project that no longer exists resets it
-    const projects = projectsOf(items);
-    if (projectSel.dataset.sig !== projects.join('\n')) {
-      projectSel.dataset.sig = projects.join('\n');
-      projectSel.textContent = '';
-      h('option', null, projectSel, 'All projects').value = '';
-      for (const p of projects) h('option', null, projectSel, `📁 ${p}`).value = p;
-      if (!projects.includes(projectFilter)) projectFilter = '';
-      projectSel.value = projectFilter;
-    }
-    show(projectSel, projects.length > 0);
-
-    const shown = searchItems(items, query, { project: projectFilter || null });
-    list.textContent = '';
-    setText(listHead, query.trim() || projectFilter ? `Found ${shown.length} of ${items.length}` : `Saved (${items.length})`);
-    show(listHead, items.length > 0);
-    show(searchRow, items.length > 0);
-    show(empty, items.length === 0);
-    show(noMatch, items.length > 0 && shown.length === 0);
-    show(exportBtn, items.length > 0);
-    for (const c of shown) renderItem(c);
-    updatePick();
-  }
-
-  searchIn.addEventListener('input', () => { query = searchIn.value; renderList(); });
-  projectSel.addEventListener('change', () => { projectFilter = projectSel.value; renderList(); });
-
-  /** Footer for the ticked items: count, cost of inserting them together, room left. */
-  async function updatePick() {
-    for (const id of [...selected]) if (!items.some(c => c.id === id)) selected.delete(id); // Deleted elsewhere
-    const picked = items.filter(c => selected.has(c.id));
-    show(pick, picked.length > 0);
-    if (!picked.length) return;
-    setText(pickText, `☑️ ${picked.length} ${noun}${picked.length === 1 ? '' : 's'} picked`);
-    const tokens = await countOne(() => formatManyForInsert(picked, ctx.kind)).catch(() => null);
-    const cost = tokens === null ? null : formatCost(tokens, view_.contextLimit, view_.remaining);
-    setText(pickCost, !cost ? '' : cost.tooBig ? `${cost.text} · too big for this chat`
-      : `${cost.text}${view_.remaining !== null ? ` · ${fmtK(view_.remaining)} left` : ''}`);
-    pickCost.classList.toggle('bad', Boolean(cost?.tooBig));
-  }
-
-  const pickedText = () => formatManyForInsert(items.filter(c => selected.has(c.id)), ctx.kind);
-  textButton(pickBtns, 'Insert all', onPage(async () => {
-    const text = pickedText();
-    if (await ctx.page.fill(text)) {
-      ctx.toast(`Inserted ${selected.size}: add your question and send`);
-      selected.clear();
-      renderList();
-    } else {
-      navigator.clipboard.writeText(text).then(() => ctx.toast('Chat box not found: copied instead'), () => ctx.toast('Copy failed'));
-    }
-  }));
-  textButton(pickBtns, 'Copy', () => navigator.clipboard.writeText(pickedText()).then(() => ctx.toast('Copied'), () => ctx.toast('Copy failed')));
-  textButton(pickBtns, 'Clear', () => { selected.clear(); renderList(); });
-
-  // Export: one JSON file with every Capsule
-  exportBtn.addEventListener('click', () => {
-    download(view, store.key, 'json', exportCapsules(items, store.key), 'application/json');
-    ctx.toast(`Exported ${items.length} ${noun}${items.length === 1 ? '' : 's'}`);
-  });
-
-  // Import: merge a file from Export (newer copies win; invalid entries skipped)
-  importBtn.addEventListener('click', () => fileIn.click());
-  fileIn.addEventListener('change', async () => {
-    const file = fileIn.files?.[0];
-    fileIn.value = '';
-    if (!file || !store) return;
-    try {
-      const r = await store.importMany(await file.text());
-      ctx.toast(`${r.added} added, ${r.updated} updated, ${r.skipped} skipped`);
-      refresh();
-    } catch (e) {
-      ctx.toast(e?.message === `Not a ${noun}s file` ? e.message : 'Import failed');
-    }
-  });
-
-  // Capture this chat from outside the tab (Context tab "Save as Capsule"): the AI writes it, or
-  // Quick (no AI) when the site's limit is reached
-  const capture = () => (limit ? quickBtn : create).click();
-
-  return { view, refresh, setView, capture, stop: stopWaiting };
-}
-
-
-  // --- ui/context-view.js ---
-  /**
- * Context Monitor - Context view: hero (tokens, bar, window, model), stats, Save-as-Capsule card,
- * sections (Breakdown, Biggest messages, Growth, Attachments, Hidden context, Usage limits) and
- * Diagnostics (closed by default), then the footer (confidence, Copy diagnostics, Refresh).
- * Moved out of content/overlay-ui.js. Renders a view state; knows nothing about where it is shown:
- * anything that reads the AI site goes through `actions`.
- */
-
-
-
-
-/**
- * Builds a scrolling `.body` and a `.foot` under `parent` (siblings, so the footer stays put while the body scrolls).
- * @param {HTMLElement} parent
- * @param {{ actions: { refresh: () => any, copyDiagnostics: () => any, exportChat: (format: string) => any, saveAsCapsule: () => any },
- *   settings: { display: { compact: boolean } } }} opts
- * @returns {{ el: HTMLElement, foot: HTMLElement, bar: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
- *   `bar` is the usage bar (the widget pulses it on alerts)
- */
-function ContextView(parent, { actions, settings }) {
-  let cfg = settings;
-  let shownTokens = null;
-  let countRaf = null;
-
-  const el = h('div', 'body', parent);
-  const hero = h('div', 'hero', el);
-  const top = h('div', 'top', hero);
-  const big = h('span', 'big', top, '—');
-  h('span', 'unit', top, 'tokens');
-  const pct = h('span', 'pct', top);
-  const bar = h('div', 'bar', hero);
-  bar.setAttribute('role', 'progressbar');
-  bar.setAttribute('aria-label', 'Context window used');
-  bar.setAttribute('aria-valuemin', '0');
-  bar.setAttribute('aria-valuemax', '100');
-  const fill = h('b', null, bar);
-  const meta = h('div', 'meta', hero);
-  const windowText = h('span', null, meta);
-  const windowBadge = approx(meta, 'Window size is not known for this model/plan');
-  const modelText = h('span', 'model', meta);
-  const limitLine = h('div', 'line', hero);
-  const warnLine = h('div', 'line warn', hero);
-  warnLine.setAttribute('role', 'status');
-  // At 80% full: save the chat as a Capsule now, and continue in a new chat with it
-  const saveCard = h('div', 'card warn hide', hero);
-  const saveText = h('div', 't', saveCard);
-  h('div', 'm', saveCard, 'Save it as a Capsule, then insert it in a new chat to keep going.');
-  textButton(h('div', 'btns', saveCard), '📦 Save as Capsule', () => actions.saveAsCapsule());
-
-  const stats = h('div', 'stats', el);
-  const stat = (label) => {
-    const c = h('div', 'stat', stats);
-    const k = h('div', 'k', c, label);
-    return { k, v: h('div', 'v', c, '—') };
-  };
-  const sUser = stat('You');
-  const sAsst = stat('');
-  const sHidden = stat('Hidden');
-
-  const brk = Section(el, 'Breakdown');
-  const brkRows = RowList(brk.body);
-  h('div', 'divider', brk.body);
-  const totals = RowList(brk.body);
-
-  const bigSec = Section(el, 'Biggest messages');
-  const bigRows = RowList(bigSec.body);
-  h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
-  const exportBtns = h('div', 'btns', bigSec.body);
-  for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
-    textButton(exportBtns, label).addEventListener('click', () => actions.exportChat(format));
-  }
-
-  const growth = Section(el, 'Growth');
-  const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  spark.setAttribute('viewBox', '0 0 200 40');
-  spark.setAttribute('preserveAspectRatio', 'none');
-  spark.setAttribute('class', 'spark');
-  spark.setAttribute('role', 'img');
-  const sparkLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-  spark.appendChild(sparkLine);
-  growth.body.appendChild(spark);
-  const growthText = h('div', 'fine', growth.body);
-
-  const att = Section(el, 'Attachments');
-  const attRows = RowList(att.body);
-  h('div', 'fine', att.body, 'Images use an estimate; documents the site reads server-side have no known cost here.');
-
-  const hid = Section(el, 'Hidden context');
-  const hidStack = HiddenStack(hid.body);
-  const hidFine = h('div', 'fine', hid.body);
-
-  const lim = Section(el, 'Usage limits');
-  const limRows = RowList(lim.body);
-
-  const diag = Section(el, 'Diagnostics');
-  const diagWarn = h('div', 'line warn', diag.body);
-  const diagRows = RowList(diag.body);
-  const evidence = h('ul', 'evidence', diag.body);
-  h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not. Everything runs in your browser: nothing is sent anywhere.');
-
-  const foot = h('div', 'foot', parent);
-  const conf = h('div', 'conf', foot);
-  const confDot = h('span', 'dot', conf);
-  const confText = h('span', null, conf);
-  const copyBtn = iconButton(foot, ICONS.copy, 'Copy diagnostics');
-  const refreshBtn = iconButton(foot, ICONS.refresh, 'Refresh');
-  copyBtn.b.addEventListener('click', () => actions.copyDiagnostics());
-  refreshBtn.b.addEventListener('click', async () => {
-    if (refreshBtn.b.disabled) return;
-    refreshBtn.b.disabled = true;
-    refreshBtn.b.classList.add('spin');
-    try { await actions.refresh(); } catch (_) { /* the next automatic pass still updates */ } finally {
-      refreshBtn.b.disabled = false;
-      refreshBtn.b.classList.remove('spin');
-    }
-  });
-
-  const num = (n) => (cfg.display.compact ? fmtK(Math.round(n)) : fmtInt(n));
-
-  /** Token count animates from the last shown value (instant with reduced motion). */
-  function countTo(target) {
-    if (countRaf) cancelAnimationFrame(countRaf);
-    if (target === null) { setText(big, '—'); shownTokens = null; return; }
-    const from = shownTokens;
-    if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
-      shownTokens = target;
-      setText(big, num(target));
-      return;
-    }
-    const start = performance.now();
-    const step = (t) => {
-      const k = Math.min(1, (t - start) / 400);
-      const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
-      setText(big, num(v));
-      shownTokens = k < 1 ? v : target;
-      countRaf = k < 1 ? requestAnimationFrame(step) : null;
-    };
-    countRaf = requestAnimationFrame(step);
-  }
-
-  /** Tokens by turn as a line, scaled to the window when known (so the slope reads as "how fast it fills"). */
-  function renderSpark(vm, ready) {
-    const g = ready ? vm.growth : null;
-    if (!g || g.points.length < 2) {
-      sparkLine.setAttribute('points', '');
-      setText(growthText, 'Appears after a few messages.');
-      return;
-    }
-    const topV = Math.max(vm.contextLimit || 0, g.total) || 1;
-    const pts = g.points.map((v, i) => `${((i / (g.points.length - 1)) * 200).toFixed(1)},${(38 - (v / topV) * 36).toFixed(1)}`).join(' ');
-    if (sparkLine.getAttribute('points') !== pts) sparkLine.setAttribute('points', pts);
-    spark.setAttribute('aria-label', `Message tokens by turn: ${fmtInt(g.total)} over ${g.turns} turns`);
-    setText(growthText, `${g.turns} turns · ${fmtInt(g.total)} message tokens${vm.contextLimit ? ` of ${fmtK(vm.contextLimit)}` : ''}`);
-  }
-
-  /** @param {Object} vm Output of toWidgetState() */
-  function update(vm) {
-    const ready = vm.ready !== false;
-    countTo(ready ? vm.usedTokens : null);
-    setText(pct, ready && vm.percentage !== null ? `${vm.percentage === 0 && vm.usedTokens > 0 ? '<0.1' : vm.percentage}%` : '');
-    const known = ready && vm.percentage !== null;
-    setClass(bar, `bar ${known ? tone(vm.percentage) : 'unknown'}`.trim());
-    const width = known ? `${Math.min(100, vm.percentage)}%` : '';
-    if (fill.style.width !== width) fill.style.width = width;
-    if (known) setAttr(bar, 'aria-valuenow', String(vm.percentage)); else bar.removeAttribute('aria-valuenow');
-    setText(windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
-    show(windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
-    windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
-    const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
-    setText(modelText, model);
-    setAttr(modelText, 'title', `${vm.provider}: ${model}`);
-    const head = headlineLimit(vm.limits);
-    setText(limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
-    setText(warnLine, vm.warning || '');
-    const full = ready && vm.percentage !== null && alertLevel(vm.percentage) >= 80;
-    show(saveCard, full);
-    if (full) setText(saveText, `💡 This chat is ${vm.percentage}% full`);
-
-    const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
-    setText(sAsst.k, `${vm.provider} + tools`);
-    setText(sUser.v, ready ? fmtK(st.user) : '—');
-    setText(sAsst.v, ready ? fmtK(st.assistant) : '—');
-    setText(sHidden.v, ready ? fmtK(st.hidden) : '—');
-
-    const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
-    bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
-    renderSpark(vm, ready);
-    show(att.el, (vm.attachmentFiles || []).length > 0);
-    attRows.update((vm.attachmentFiles || []).map(f => ({
-      label: f.name,
-      value: f.tokens !== null ? `~${f.tokens.toLocaleString()}` : f.inText ? 'in message text' : 'cost unknown'
-    })));
-    totals.update([
-      { label: 'Used', value: tokens(vm.usedTokens) },
-      { label: 'Remaining', value: tokens(vm.remainingTokens) },
-      { label: 'Window', value: vm.contextLimit ? vm.contextLimit.toLocaleString() : 'Unknown', tip: vm.contextLimit && vm.limitStatus === 'VERIFIED' ? null : (vm.contextLimit ? TAG_TIPS.UNVERIFIED : TAG_TIPS.UNKNOWN) }
-    ]);
-
-    const items = vm.hiddenItems || [];
-    show(hid.el, items.length > 0);
-    hidStack.update(items);
-    setText(hidFine, `Read from ${vm.provider}'s own data. ≈ marks estimates; anything else ${vm.provider} adds on its servers is not visible.`);
-    show(lim.el, (vm.limits || []).length > 0);
-    limRows.update((vm.limits || []).map(l => ({ label: l.label, value: limitText(l) })));
-
-    setText(diagWarn, vm.warning || '');
-    diagRows.update([
-      { label: 'Provider', value: vm.provider },
-      { label: 'Model', value: model || '—' },
-      { label: 'Plan', value: vm.plan || 'Unknown' },
-      { label: 'Source', value: vm.source || '—' },
-      { label: 'Turns', value: ready ? String(vm.turns) : '—' }
-    ]);
-    const evSig = JSON.stringify(vm.evidence || []);
-    if (evidence.dataset.sig !== evSig) {
-      evidence.dataset.sig = evSig;
-      evidence.textContent = '';
-      for (const e of vm.evidence || []) {
-        const li = h('li', null, evidence);
-        h('span', e.ok ? 'y' : 'n', li, e.ok ? '✓' : '!');
-        h('span', null, li, e.text);
-      }
-    }
-    setClass(confDot, `dot ${ready ? vm.confidenceLevel : 'LOW'}`);
-    setText(confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
-  }
-
-  return { el, foot, bar, update, setSettings(s) { cfg = s; } };
-}
-
-
-  // --- content/overlay-ui.js ---
-  /**
- * Context Monitor - Context Widget (provider-neutral UI)
- *
- * Renders the view state from widget-state.js (toWidgetState). It knows nothing about any AI site:
- * the adapter supplies a name, `onRefresh()` and `getDiagnostics()`. Everything lives in a shadow
- * root, so the host page's CSS cannot reach it and ours never leaks out.
- *
- *   Collapsed (default)  pill "39.3K • Medium" — click expands, drag moves
- *   Expanded             header (drag handle: theme / collapse / close)
- *                        Context tab: ContextView (ui/context-view.js: hero, stats, sections, Diagnostics,
- *                        footer) plus the Display section
- *
- * Position: free drag (pointer events, translate3d), clamped to the viewport, snapped to the nearest
- * side on release (hold Alt to skip), anchored to that side so expanding never pushes it off screen.
- * Position, expanded state and theme persist per site in chrome.storage.local.
- * Components build their DOM once; updates write only what changed, and page-derived strings are
- * only ever assigned as text, never HTML.
- *
- * Header tabs: Context (above) | Capsules (CapsulePanel in ui/capsule-panel.js: create, edit, save, insert)
- * | Skills (the same panel with kind 'skill': reusable instructions).
- */
-
 
 
 
@@ -6167,16 +5538,133 @@ function ContextView(parent, { actions, settings }) {
 
 
 const MARGIN = 8; // Viewport clamp
-const TOP_SAFE = 72; // Default/snap top: below the sites' top bars (Share, account buttons)
+const TOP_SAFE = 72; // Snap top: below the sites' top bars (Share, account buttons)
 const SNAP_Y = 48; // Snap to a top/bottom corner when released this close
 const DRAG_THRESHOLD = 4; // Pointer movement that turns a press into a drag
-const DEFAULT_POS = { side: 'right', dx: 16, y: TOP_SAFE };
-const THEMES = ['auto', 'dark', 'light'];
+const DEFAULT_POS = { context: { side: 'right', dx: 16, yFromBottom: 96 }, capsule: { side: 'right', dx: 16, yFromBottom: 52 } };
+const CAPSULE_LABEL = '💊 Capsule';
+const WIDGET_CSS = `
+  .root.w { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .root.w.left { align-items: flex-start; }
+  .root.w.top { flex-direction: column-reverse; }
+  .pill.dragging { cursor: grabbing; }
+  .pill.good .num { color: var(--good); } .pill.warn .num { color: var(--warn-text); } .pill.bad .num { color: var(--danger); }
+  .wcard { width: 220px; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
+  .wcard .fine:first-child { margin-top: 0; }
+  .root.w .toast { position: static; transform: none; max-width: 240px; opacity: 1; }
+`;
 
-class ContextWidget {
+const validPos = (p) => Boolean(p) && ['left', 'right'].includes(p.side) && Number.isFinite(p.dx) && (Number.isFinite(p.y) || Number.isFinite(p.yFromBottom));
+
+/**
+ * Pill positions from the stored per-site value. The old single widget saved `pos: { side, dx, y }`:
+ * that becomes the Context pill's position, the Capsule pill starts at its default, and `migrated`
+ * says the new shape should be written back.
+ * @returns {{ pos: { context: Object, capsule: Object }, migrated: boolean }}
+ */
+function widgetPositions(stored) {
+  const p = stored?.pos;
+  if (validPos(p)) return { pos: { context: { side: p.side, dx: p.dx, y: p.y }, capsule: { ...DEFAULT_POS.capsule } }, migrated: true };
+  const pick = (key) => (validPos(p?.[key]) ? p[key] : { ...DEFAULT_POS[key] });
+  return { pos: { context: pick('context'), capsule: pick('capsule') }, migrated: false };
+}
+
+/**
+ * Free drag for one pill: pointer events, translate3d, clamped to the viewport, snapped to the
+ * nearest side on release (hold Alt to skip). `onMoved(pos)` saves the new position.
+ * @returns {{ place(): void, wasDragged(): boolean }}
+ */
+function makeDraggable(host, handle, getPos, onMoved) {
+  let drag = null;
+  let raf = null;
+  let justDragged = false;
+  const size = () => ({ w: host.offsetWidth || 120, h: host.offsetHeight || 32 });
+  const xy = () => {
+    const p = getPos();
+    const { w, h: ht } = size();
+    return { x: p.side === 'left' ? p.dx : innerWidth - w - p.dx, y: Number.isFinite(p.y) ? p.y : innerHeight - ht - p.yFromBottom };
+  };
+  const apply = (x, y) => {
+    const { w, h: ht } = size();
+    const cx = Math.round(Math.max(MARGIN, Math.min(x, innerWidth - w - MARGIN)));
+    const cy = Math.round(Math.max(MARGIN, Math.min(y, innerHeight - ht - MARGIN)));
+    const t = `translate3d(${cx}px, ${cy}px, 0)`;
+    if (host.style.transform !== t) host.style.transform = t;
+  };
+  const place = () => { if (!drag?.moved) { const { x, y } = xy(); apply(x, y); } };
+  // Anchored to the nearer side and the nearer top / bottom edge, so resizes and the card never push it off screen
+  const settle = (x, y, snap, animate) => {
+    const { w, h: ht } = size();
+    const vw = innerWidth;
+    const vh = innerHeight;
+    const side = x + w / 2 < vw / 2 ? 'left' : 'right';
+    let dx = side === 'left' ? x : vw - w - x;
+    if (snap) {
+      dx = 16;
+      if (Math.abs(y - TOP_SAFE) < SNAP_Y) y = TOP_SAFE;
+      else if (Math.abs(vh - ht - MARGIN - y) < SNAP_Y) y = vh - ht - MARGIN;
+    }
+    // Store what is shown: the clamped position, so reloading never jumps
+    dx = Math.max(MARGIN, Math.min(dx, vw - w - MARGIN));
+    y = Math.max(MARGIN, Math.min(y, vh - ht - MARGIN));
+    onMoved(y + ht / 2 > vh / 2 ? { side, dx, yFromBottom: vh - ht - y } : { side, dx, y });
+    if (animate && !reducedMotion()) {
+      host.style.transition = 'transform .15s ease';
+      setTimeout(() => { host.style.transition = ''; }, 170);
+    }
+    place();
+  };
+  handle.addEventListener('pointerdown', (e) => {
+    justDragged = false;
+    if (e.button !== 0) return;
+    const { x, y } = xy();
+    drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, x0: x, y0: y, x, y, moved: false };
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  handle.addEventListener('pointermove', (e) => {
+    const d = drag;
+    if (!d || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.sx;
+    const dy = e.clientY - d.sy;
+    if (!d.moved) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // Still a click
+      d.moved = true;
+      handle.classList.add('dragging');
+      document.documentElement.style.userSelect = 'none';
+    }
+    e.preventDefault();
+    d.x = d.x0 + dx;
+    d.y = d.y0 + dy;
+    if (!raf) raf = requestAnimationFrame(() => { raf = null; apply(d.x, d.y); });
+  });
+  const end = (e) => {
+    const d = drag;
+    if (!d || e.pointerId !== d.id) return;
+    try { handle.releasePointerCapture(d.id); } catch (_) {}
+    drag = null;
+    if (!d.moved) return;
+    justDragged = true; // Swallow the click that follows a drag
+    handle.classList.remove('dragging');
+    document.documentElement.style.userSelect = '';
+    settle(d.x, d.y, !e.altKey && e.type !== 'pointercancel', true);
+  };
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+  handle.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 40 : 10;
+    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    const { x, y } = xy();
+    settle(x + d[0], y + d[1], false, false);
+  });
+  return { place, wasDragged: () => { const was = justDragged; justDragged = false; return was; } };
+}
+
+class Widgets {
   /**
-   * @param {{ provider?: string, findInput?: () => Element|null, replySelector?: string, onRefresh?: () => any, getDiagnostics?: () => Object }} [adapter]
-   *   `findInput` finds the site's chat box and `replySelector` matches assistant replies (Capsules).
+   * @param {{ provider?: string, findInput?: () => Element|null, replySelector?: string, userSelector?: string, countTokens?: Function }} [adapter]
+   *   Same shape the coordinators pass; `findInput` / `replySelector` are what the Capsule pill fills and reads.
    */
   constructor(adapter = {}) {
     this.adapter = {
@@ -6184,271 +5672,234 @@ class ContextWidget {
       findInput: adapter.findInput || (() => null),
       replySelector: adapter.replySelector || null,
       userSelector: adapter.userSelector || null,
-      countTokens: adapter.countTokens || null,
-      onRefresh: adapter.onRefresh || (() => {}),
-      getDiagnostics: adapter.getDiagnostics || (() => this.latestState?.diagnostics)
+      countTokens: adapter.countTokens || null
     };
-    // What the Capsules / Skills tabs use to read and fill the page
-    this.page = createPage({ ...this.adapter, getLimits: () => this.latestState?.limits || [] });
-    this.hostElement = null;
-    this.shadowRoot = null;
-    this.isExpanded = false;
-    this.isVisible = true;
-    this.tab = 'context';
-    this.theme = 'auto';
-    this.pos = { ...DEFAULT_POS };
-    this.latestState = null;
+    // What the Capsule pill and the side panel (over the panel channel) use to read and fill the page
+    this.page = createPage({ ...this.adapter, getLimits: () => this.vm?.limits || [] });
+    this.settings = normalizeSettings();
+    this.pos = widgetPositions(null).pos;
+    this.vm = null;
+    this.ctx = null;
+    this.cap = null;
+    this.loaded = false; // Hidden until Settings are read: a pill turned off never flashes
+    this.hidden = false; // Alt+T, this page view only
+    this.expanded = false;
+    this.run = null; // Active Capsule wait ({ cancel })
     this._alerted = new Map();
-    this.parts = null;
-    this._posRaf = null;
-    this._drag = null;
-    this._justDragged = false;
-    this._storeKey = typeof location !== 'undefined' ? `ui:${location.hostname}` : 'ui';
-    this._usageKey = typeof location !== 'undefined' ? `usage:${location.hostname}` : 'usage';
-    this.compact = false; // Hero number as 61.3K instead of 61,302
-    this.badges = true; // Usage % next to the chats in the site's sidebar
     this._usage = {};
+    const host = typeof location !== 'undefined' ? location.hostname : '';
+    this._storeKey = host ? `ui:${host}` : 'ui';
+    this._usageKey = host ? `usage:${host}` : 'usage';
   }
 
   mount() {
-    if (this.hostElement || typeof document === 'undefined') return;
-    document.getElementById('chatgpt-context-monitor-host')?.remove();
-    const host = this.hostElement = document.createElement('div');
-    host.id = 'chatgpt-context-monitor-host';
-    // Fixed at the origin, moved only with transform (no layout work while dragging)
-    host.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483000;contain:layout style;will-change:transform;';
-    this.shadowRoot = host.attachShadow({ mode: 'open' });
-    h('style', null, this.shadowRoot, STYLES);
-    const root = h('div', 'root', this.shadowRoot);
-    this.parts = { root, ...this._build(root) };
-    (document.body || document.documentElement).appendChild(host);
+    if (this.ctx || typeof document === 'undefined') return;
+    this.ctx = this._host('chatgpt-context-monitor-host', 'context');
+    this.cap = this._host('chatgpt-context-monitor-capsule', 'capsule');
+    this._buildContext();
+    this._buildCapsule();
 
-    window.addEventListener('resize', () => this._schedulePosition());
-    window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => this._applyTheme());
-    // Alt+T shows/hides the panel on any page state
+    window.addEventListener('resize', () => this._render());
+    window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => this._render());
     window.addEventListener('keydown', (e) => {
-      if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyT') {
-        e.preventDefault();
-        this.isVisible = !this.isVisible;
-        this.render();
-      }
+      if (!this.ctx || !e.altKey || e.ctrlKey || e.metaKey || e.code !== 'KeyT') return;
+      e.preventDefault();
+      this.hidden = !this.hidden;
+      this._render();
     }, true);
-    // A Capsule saved or deleted on another site / tab shows up here too
     try {
-      chrome.storage?.onChanged?.addListener((changes, area) => {
-        if (area !== 'local') return;
-        if (changes[CAPSULES_KEY] || changes[CAPSULE_HANDOFF_KEY]) this.parts?.caps.refresh();
-        if (changes[SKILLS_KEY]) this.parts?.skills.refresh();
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local' || !changes[SETTINGS_KEY] || !this.ctx) return;
+        this.settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
+        this._paintBadges();
+        this._render();
       });
     } catch (_) {}
-    this.parts.caps.refresh();
-    this.parts.skills.refresh();
-    this._loadPrefs();
-    this._startBadgeWatch();
-    this.render();
+    // The site re-renders its sidebar constantly: repaint at most every 400 ms, only when something changed
+    this._badgeObserver = new MutationObserver(() => {
+      if (this._badgeTimer) return;
+      this._badgeTimer = setTimeout(() => { this._badgeTimer = null; this._paintBadges(); }, 400);
+    });
+    this._badgeObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+    this._load().finally(() => { this.loaded = true; this._paintBadges(); this._render(); });
   }
 
-  _build(root) {
-    const provider = this.adapter.provider;
-
-    // Pill
+  /** One fixed shadow host per pill, so each one positions on its own. */
+  _host(id, key) {
+    document.getElementById(id)?.remove();
+    const host = document.createElement('div');
+    host.id = id;
+    host.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483000;contain:layout style;will-change:transform;display:none;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    h('style', null, shadow, STYLES + WIDGET_CSS);
+    const root = h('div', 'root w', shadow);
     const pill = h('button', 'pill', root);
     pill.type = 'button';
+    const drag = makeDraggable(host, pill, () => this.pos[key], (pos) => { this.pos[key] = pos; this._savePos(); this._render(); });
+    (document.body || document.documentElement).appendChild(host);
+    return { host, root, pill, drag, key };
+  }
+
+  _buildContext() {
+    const { root, pill } = this.ctx;
+    pill.title = 'Context usage: click for details, drag to move (Alt+T hides)';
     pill.setAttribute('aria-expanded', 'false');
-    const pillDot = h('span', 'dot', pill);
-    const pillNum = h('span', 'num', pill);
-    h('span', 'sep', pill, '•');
-    const pillLvl = h('span', 'lvl', pill);
-    pill.addEventListener('click', () => {
-      if (this._justDragged) { this._justDragged = false; return; }
-      this._setExpanded(true);
-    });
-
-    // Panel
-    const panel = h('div', 'panel', root);
-    panel.setAttribute('role', 'region');
-    panel.setAttribute('aria-label', `${provider} context usage`);
-    const head = h('div', 'head', panel);
-    head.tabIndex = 0;
-    head.setAttribute('aria-label', 'Move panel: drag, or use arrow keys. Double-click to reset position.');
-    const tabs = h('div', 'tabs', head);
-    tabs.setAttribute('role', 'tablist');
-    const tab = (label, key) => {
-      const b = textButton(tabs, label, () => this._setTab(key), 'tab');
-      b.setAttribute('role', 'tab');
-      return b;
-    };
-    const tabContext = tab('Context', 'context');
-    const tabCaps = tab('Capsules', 'capsules');
-    const tabSkills = tab('Skills', 'skills');
-    const themeBtn = iconButton(head, ICONS.auto, 'Theme: auto');
-    const collapseBtn = iconButton(head, ICONS.collapse, 'Collapse');
-    const closeBtn = iconButton(head, ICONS.close, 'Close (Alt+T to reopen)');
-    themeBtn.b.addEventListener('click', () => {
-      this.theme = THEMES[(THEMES.indexOf(this.theme) + 1) % THEMES.length];
-      this._applyTheme();
-      this._savePrefs();
-    });
-    collapseBtn.b.addEventListener('click', () => this._setExpanded(false));
-    closeBtn.b.addEventListener('click', () => { this.isVisible = false; this.render(); });
-
-    const ctxView = ContextView(panel, { settings: { display: { compact: this.compact } }, actions: {
-      refresh: () => this.adapter.onRefresh(),
-      copyDiagnostics: async () => {
-        try {
-          await navigator.clipboard.writeText(JSON.stringify(this.adapter.getDiagnostics() || { note: 'no state yet' }, null, 2));
-          this._toast('Diagnostics copied');
-        } catch (_) {
-          this._toast('Copy failed');
-        }
-      },
-      exportChat: (f) => this._exportChat(f),
-      saveAsCapsule: () => { this._setTab('capsules'); this.parts.caps.capture(); }
-    } });
-
-    const display = Section(ctxView.el, 'Display');
-    const displayBtns = h('div', 'btns', display.body);
-    const compactBtn = textButton(displayBtns, '', () => { this.compact = !this.compact; this._savePrefs(); this.render(); });
-    const badgesBtn = textButton(displayBtns, '', () => { this.badges = !this.badges; this._savePrefs(); this._paintBadges(); this.render(); });
-
-    const panelCtx = {
-      page: this.page,
-      storage: this._storage(),
-      toast: (text) => this._toast(text),
-      reveal: () => {
-        this.isVisible = true;
-        this._setTab('capsules');
-        if (!this.isExpanded) this._setExpanded(true);
-      }
-    };
-    const caps = CapsulePanel(panel, panelCtx);
-    const skills = CapsulePanel(panel, { ...panelCtx, kind: 'skill' });
-
-    const toast = h('div', 'toast', root);
+    this.ctx.num = h('span', 'num', pill, '—');
+    const card = this.ctx.card = h('div', 'wcard hide', root);
+    card.setAttribute('role', 'region');
+    card.setAttribute('aria-label', `${this.adapter.provider} context usage`);
+    this.ctx.empty = h('p', 'fine', card);
+    this.ctx.rows = h('div', null, card);
+    this.ctx.rowEls = new Map();
+    h('p', 'fine', card, 'More in the side panel');
+    const toast = this.ctx.toast = h('div', 'toast hide', root);
     toast.setAttribute('role', 'status');
     toast.setAttribute('aria-live', 'polite');
-    const tip = h('div', 'tip', root);
-    tip.setAttribute('aria-hidden', 'true');
-
-    // Tooltips for anything with data-tip (bar segments, badges, icon buttons)
-    root.addEventListener('pointerover', (e) => {
-      const t = e.target.closest?.('[data-tip]');
-      if (t && !this._drag?.moved) this._showTip(t);
-    });
-    root.addEventListener('pointerout', (e) => { if (e.target.closest?.('[data-tip]')) tip.classList.remove('show'); });
-    root.addEventListener('focusin', (e) => { if (e.target.dataset?.tip) this._showTip(e.target); });
-    root.addEventListener('focusout', () => tip.classList.remove('show'));
-
-    // Drag from the pill or the header (never from a header button)
-    for (const handle of [pill, head]) {
-      handle.addEventListener('pointerdown', (e) => this._dragStart(e, handle));
-      handle.addEventListener('pointermove', (e) => this._dragMove(e));
-      handle.addEventListener('pointerup', (e) => this._dragEnd(e));
-      handle.addEventListener('pointercancel', (e) => this._dragEnd(e));
-    }
-    head.addEventListener('dblclick', (e) => {
-      if (e.target.closest('button')) return;
-      this.pos = { ...DEFAULT_POS };
-      this._position();
-      this._savePrefs();
-    });
-    head.addEventListener('keydown', (e) => {
-      const step = e.shiftKey ? 40 : 10;
-      const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-      if (!d || e.target !== head) return;
-      e.preventDefault();
-      const { x, y } = this._xy();
-      this._settle(x + d[0], y + d[1], false);
-    });
+    // The card comes before the pill: above it when bottom-anchored, below it (column-reverse) when top-anchored
+    root.append(toast, card, pill);
+    pill.addEventListener('click', () => { if (!this.ctx.drag.wasDragged()) this._setExpanded(!this.expanded); });
     root.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.isExpanded) { e.stopPropagation(); this._setExpanded(false); pill.focus(); }
+      if (e.key === 'Escape' && this.expanded) { e.stopPropagation(); this._setExpanded(false); pill.focus(); }
     });
+  }
 
-    return {
-      pill, pillDot, pillNum, pillLvl, panel, ctxView, body: ctxView.el, foot: ctxView.foot, compactBtn, badgesBtn, head, tabContext, tabCaps, tabSkills, caps, skills, themeBtn, toast, tip
-    };
+  _buildCapsule() {
+    const { pill } = this.cap;
+    pill.title = 'Save this chat as a Capsule (method in Settings); click again to cancel. Drag to move.';
+    this.cap.label = h('span', null, pill, CAPSULE_LABEL);
+    this.cap.label.setAttribute('aria-live', 'polite');
+    pill.addEventListener('click', () => { if (!this.cap.drag.wasDragged()) this._capsuleClick(); });
   }
 
   /** @param {Object} viewState Output of toWidgetState() */
   update(viewState) {
-    this.latestState = viewState;
-    if (!this.hostElement) this.mount();
-    this._maybeAlert(viewState);
+    this.vm = viewState;
+    if (!this.ctx) this.mount();
+    if (!this.ctx) return;
+    if (this.settings.context.alerts) this._maybeAlert(viewState);
     this._trackUsage(viewState);
-    this.parts?.caps.setView(viewState);
-    this.parts?.skills.setView(viewState);
-    // SPA re-renders can drop our node; re-attach instead of rebuilding
-    if (!this.hostElement.isConnected) (document.body || document.documentElement).appendChild(this.hostElement);
-    this.render();
+    // SPA re-renders can drop our nodes; re-attach instead of rebuilding
+    for (const p of [this.ctx, this.cap]) if (!p.host.isConnected) (document.body || document.documentElement).appendChild(p.host);
+    this._render();
   }
 
-  render() {
-    if (!this.hostElement || !this.parts) return;
-    const display = this.isVisible ? '' : 'none';
-    if (this.hostElement.style.display !== display) this.hostElement.style.display = display;
-    const p = this.parts;
-    this._applyTheme();
-    setClass(p.root, `root${this._isDark() ? '' : ' light'}${this.isExpanded ? ' open' : ''}${this._drag?.moved ? ' dragging' : ''}`);
-    show(p.pill, !this.isExpanded);
-    show(p.panel, this.isExpanded);
-    setAttr(p.pill, 'aria-expanded', String(this.isExpanded));
-    const onContext = this.tab === 'context';
-    show(p.body, onContext);
-    show(p.foot, onContext);
-    show(p.caps.view, this.tab === 'capsules');
-    show(p.skills.view, this.tab === 'skills');
-    setAttr(p.tabContext, 'aria-selected', String(onContext));
-    setAttr(p.tabCaps, 'aria-selected', String(this.tab === 'capsules'));
-    setAttr(p.tabSkills, 'aria-selected', String(this.tab === 'skills'));
-
-    const vm = this.latestState || { ready: false, usedTokens: 0, percentage: null, evidence: [], breakdown: [], hiddenItems: [], limits: [], confidenceLevel: 'LOW', confidence: 0, provider: this.adapter.provider, model: 'Detecting…' };
-    const lvl = vm.ready === false ? 'LOW' : vm.confidenceLevel;
-    setClass(p.pillDot, `dot ${lvl}`);
-    setText(p.pillNum, vm.ready === false ? '…' : fmtK(vm.usedTokens));
-    setText(p.pillLvl, vm.ready === false ? 'Reading' : levelName(vm.confidenceLevel));
-    setAttr(p.pill, 'aria-label', vm.ready === false
-      ? 'Context usage: reading conversation. Expand panel.'
-      : `Context usage ${fmtInt(vm.usedTokens)} tokens${vm.percentage !== null ? `, ${vm.percentage}% of window` : ''}, confidence ${levelName(vm.confidenceLevel)}. Expand panel.`);
-
-    if (this.isExpanded) {
-      p.ctxView.setSettings({ display: { compact: this.compact } });
-      p.ctxView.update(vm);
-      setText(p.compactBtn, `Exact numbers: ${this.compact ? 'off' : 'on'}`);
-      setText(p.badgesBtn, `Sidebar badges: ${this.badges ? 'on' : 'off'}`);
+  _render() {
+    if (!this.ctx) return;
+    const s = this.settings;
+    const dark = s.display.theme === 'dark' || (s.display.theme === 'auto' && Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches));
+    for (const [p, on] of [[this.ctx, s.widgets.context.enabled], [this.cap, s.widgets.capsule.enabled]]) {
+      const display = on && this.loaded && !this.hidden ? '' : 'none';
+      if (p.host.style.display !== display) p.host.style.display = display;
+      p.root.classList.toggle('light', !dark);
+      p.root.classList.toggle('left', this.pos[p.key].side === 'left');
+      p.root.classList.toggle('top', !Number.isFinite(this.pos[p.key].yFromBottom));
     }
-    this._schedulePosition();
+
+    const { pill, num, card } = this.ctx;
+    const vm = this.vm;
+    const ready = Boolean(vm) && vm.ready !== false;
+    const pct = ready ? vm.percentage ?? null : null;
+    setText(num, ready ? `${fmtK(vm.usedTokens)}${pct !== null ? ` · ${pct}%` : ''}` : '—');
+    const level = pct === null ? '' : pct >= 85 ? 'bad' : pct >= 65 ? 'warn' : 'good';
+    for (const t of ['good', 'warn', 'bad']) pill.classList.toggle(t, t === level);
+    setAttr(pill, 'aria-label', ready
+      ? `Context usage ${fmtInt(vm.usedTokens)} tokens${pct !== null ? `, ${pct}% of window` : ''}. ${this.expanded ? 'Hide' : 'Show'} details.`
+      : 'Context usage: reading conversation.');
+    setAttr(pill, 'aria-expanded', String(this.expanded));
+    show(card, this.expanded);
+    if (this.expanded) this._renderCard(ready);
+    this.ctx.drag.place();
+    this.cap.drag.place();
+  }
+
+  /** Rows are rebuilt only when the chosen / available fields change; otherwise only values are written. */
+  _renderCard(ready) {
+    const { rows, rowEls, empty } = this.ctx;
+    const fields = ready ? widgetFields(this.vm, this.settings.widgets.context.fields) : [];
+    const keys = fields.map(f => f.key).join();
+    if (keys !== [...rowEls.keys()].join()) {
+      rowEls.clear();
+      rows.replaceChildren();
+      for (const f of fields) {
+        const row = h('div', 'row', rows);
+        h('span', 'k', row, f.label);
+        rowEls.set(f.key, h('span', 'v', row));
+      }
+    }
+    for (const f of fields) setText(rowEls.get(f.key), f.value);
+    setText(empty, !ready ? 'Reading the conversation…' : fields.length ? '' : 'No fields chosen: pick them in the side panel\'s Settings.');
+    show(empty, !ready || !fields.length);
   }
 
   _setExpanded(open) {
-    this.isExpanded = open;
-    this.render();
-    this._savePrefs();
-    if (open) this.parts.head.focus({ preventScroll: true });
+    this.expanded = open;
+    this._render();
   }
 
-  /** @param {'context'|'capsules'|'skills'} key */
-  _setTab(key) {
-    if (this.tab !== key && key === 'capsules') this.parts.caps.refresh();
-    if (this.tab !== key && key === 'skills') this.parts.skills.refresh();
-    this.tab = key;
-    this.render();
-    this._savePrefs();
+  // ------------------------------------------------------------------ Capsule pill
+
+  /** R11: errors become a status; the run handle is dropped on saved / error / cancelled. */
+  async _capsuleClick() {
+    if (this.run) { const run = this.run; this.run = null; run.cancel(); return; }
+    if (this._capturing) return;
+    this._capturing = true;
+    this._waiting = false;
+    this._capsuleText('Working…');
+    try {
+      const run = await captureCapsule({
+        method: this.settings.capsule.method,
+        page: this.page,
+        store: new CapsuleStore(this._storage()),
+        onStatus: (st) => this._capsuleStatus(st)
+      });
+      if (this._waiting) this.run = run;
+    } catch (_) {
+      this._capsuleStatus({ state: 'error', text: 'Capsule failed' });
+    } finally {
+      this._capturing = false;
+    }
   }
 
-  /** Saves the chat as shown on the page (md / txt / json). */
-  _exportChat(format) {
-    const msgs = readTranscript(document, this.adapter.userSelector, this.adapter.replySelector);
-    if (!msgs.length) return this._toast('Open a conversation first');
-    download(this.parts.body, 'chat', format, formatChatExport(msgs, format, { provider: this.adapter.provider }), format === 'json' ? 'application/json' : 'text/plain');
-    this._toast(`Exported ${msgs.length} messages shown on the page`, 2500);
+  _capsuleStatus(st) {
+    this._waiting = st.state === 'waiting';
+    if (!this._waiting) this.run = null;
+    if (st.state === 'waiting') this._capsuleText('Press Enter to send');
+    else if (st.state === 'saved') this._capsuleText(st.reason === 'limit' ? 'Limit reached: saved with Quick ✓' : 'Saved ✓ · edit in side panel', 4000);
+    else if (st.state === 'error') this._capsuleText(st.text || 'Capsule failed', 3000);
+    else this._capsuleText(CAPSULE_LABEL);
   }
+
+  /** Pill text; with `ms`, back to the plain label after that long. */
+  _capsuleText(text, ms) {
+    clearTimeout(this._capTimer);
+    if (!this.cap) return;
+    setText(this.cap.label, text);
+    if (ms) this._capTimer = setTimeout(() => this._capsuleText(CAPSULE_LABEL), ms);
+    this.cap.drag.place(); // The pill's width changed
+  }
+
+  // ------------------------------------------------------------------ alerts & sidebar badges
 
   _toast(text, ms = 1500) {
-    const t = this.parts.toast;
+    const t = this.ctx.toast;
     t.textContent = text;
-    t.classList.add('show');
+    show(t, true);
+    this.ctx.drag.place();
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+    this._toastTimer = setTimeout(() => { show(t, false); this.ctx?.drag.place(); }, ms);
+  }
+
+  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
+  _maybeAlert(vm) {
+    if (!vm.ready || vm.percentage === null) return;
+    const lvl = alertLevel(vm.percentage);
+    const key = vm.conversationId || '';
+    if (lvl <= (this._alerted.get(key) || 0)) return;
+    this._alerted.set(key, lvl);
+    this._toast(lvl === 95
+      ? `Context ${vm.percentage}% full: start a new chat soon`
+      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
+    if (!reducedMotion()) this.ctx.pill.animate?.([{ transform: 'scale(1)' }, { transform: 'scale(1.12)' }, { transform: 'scale(1)' }], { duration: 700, iterations: 2 });
   }
 
   /** Remembers this chat's usage and shows it next to the chat in the sidebar. */
@@ -6469,7 +5920,7 @@ class ContextWidget {
     const inChat = [this.adapter.replySelector, this.adapter.userSelector].filter(Boolean).join(',');
     for (const a of links) {
       let badge = a.querySelector(':scope > [data-ctx-badge]');
-      const id = this.badges && !(inChat && a.closest(inChat)) ? chatIdFromHref(a.getAttribute('href')) : null;
+      const id = this.settings.display.badges && !(inChat && a.closest(inChat)) ? chatIdFromHref(a.getAttribute('href')) : null;
       const u = id && this._usage[id];
       if (!u) { badge?.remove(); continue; }
       if (!badge) {
@@ -6486,208 +5937,48 @@ class ContextWidget {
     }
   }
 
-  _startBadgeWatch() {
-    this._storage()?.get(this._usageKey).then((r) => {
-      if (r?.[this._usageKey] && typeof r[this._usageKey] === 'object') this._usage = { ...r[this._usageKey], ...this._usage };
-      this._paintBadges();
-    }).catch(() => {});
-    // The site re-renders its sidebar constantly: repaint at most every 400 ms, only when something changed
-    this._badgeObserver = new MutationObserver(() => {
-      if (this._badgeTimer) return;
-      this._badgeTimer = setTimeout(() => { this._badgeTimer = null; this._paintBadges(); }, 400);
-    });
-    this._badgeObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
-  }
-
-  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
-  _maybeAlert(vm) {
-    if (!vm.ready || vm.percentage === null) return;
-    const lvl = alertLevel(vm.percentage);
-    const key = vm.conversationId || '';
-    if (lvl <= (this._alerted.get(key) || 0)) return;
-    this._alerted.set(key, lvl);
-    this._toast(lvl === 95
-      ? `Context ${vm.percentage}% full: start a new chat soon`
-      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
-    if (!reducedMotion()) this.parts.ctxView.bar.animate?.([{ transform: 'scaleY(1)' }, { transform: 'scaleY(2.2)' }, { transform: 'scaleY(1)' }], { duration: 700, iterations: 2 });
-  }
-
-  _showTip(target) {
-    const { tip, root } = this.parts;
-    tip.textContent = target.dataset.tip;
-    const r = target.getBoundingClientRect();
-    const rr = root.getBoundingClientRect();
-    tip.classList.add('show');
-    const tw = tip.offsetWidth;
-    const th = tip.offsetHeight;
-    let left = r.left - rr.left + r.width / 2 - tw / 2;
-    left = Math.max(4, Math.min(left, rr.width - tw - 4));
-    let top = r.top - rr.top - th - 6;
-    if (r.top - th - 6 < 0) top = r.bottom - rr.top + 6; // No room above: show below
-    tip.style.left = `${left}px`;
-    tip.style.top = `${top}px`;
-  }
-
-  // ------------------------------------------------------------------ theme
-
-  _isDark() {
-    if (this.theme === 'dark') return true;
-    if (this.theme === 'light') return false;
-    return Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches);
-  }
-
-  _applyTheme() {
-    if (!this.parts) return;
-    const { root, themeBtn } = this.parts;
-    root.classList.toggle('light', !this._isDark());
-    const label = `Theme: ${this.theme}`;
-    if (themeBtn.b.getAttribute('aria-label') !== label) {
-      themeBtn.b.setAttribute('aria-label', label);
-      themeBtn.b.dataset.tip = label;
-      themeBtn.path.setAttribute('d', ICONS[this.theme]);
-    }
-  }
-
-  // ------------------------------------------------------------------ drag & position
-
-  _dragStart(e, handle) {
-    if (e.button !== 0 || (handle === this.parts.head && e.target.closest('button'))) return;
-    const { x, y } = this._xy();
-    this._drag = { id: e.pointerId, handle, sx: e.clientX, sy: e.clientY, x0: x, y0: y, x, y, moved: false };
-    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
-  }
-
-  _dragMove(e) {
-    const d = this._drag;
-    if (!d || e.pointerId !== d.id) return;
-    const dx = e.clientX - d.sx;
-    const dy = e.clientY - d.sy;
-    if (!d.moved) {
-      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // Still a click
-      d.moved = true;
-      this.parts.tip.classList.remove('show');
-      this.parts.root.classList.add('dragging');
-      document.documentElement.style.userSelect = 'none';
-    }
-    e.preventDefault();
-    d.x = d.x0 + dx;
-    d.y = d.y0 + dy;
-    if (!this._posRaf) this._posRaf = requestAnimationFrame(() => { this._posRaf = null; this._applyXY(d.x, d.y); });
-  }
-
-  _dragEnd(e) {
-    const d = this._drag;
-    if (!d || e.pointerId !== d.id) return;
-    try { d.handle.releasePointerCapture(d.id); } catch (_) {}
-    this._drag = null;
-    if (!d.moved) return;
-    this._justDragged = d.handle === this.parts.pill; // Swallow the click that follows a pill drag
-    this.parts.root.classList.remove('dragging');
-    document.documentElement.style.userSelect = '';
-    this._settle(d.x, d.y, !e.altKey && e.type !== 'pointercancel', true);
-  }
-
-  /**
-   * Stores a position given as top-left x/y: anchored to the nearer side, optionally snapped to that
-   * side (and to a top/bottom corner when close), then applied and saved.
-   */
-  _settle(x, y, snap, animate = false) {
-    const { w, h: ht } = this._size();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const side = x + w / 2 < vw / 2 ? 'left' : 'right';
-    let dx = side === 'left' ? x : vw - w - x;
-    if (snap) {
-      dx = 16;
-      if (Math.abs(y - TOP_SAFE) < SNAP_Y) y = TOP_SAFE;
-      else if (Math.abs(vh - ht - MARGIN - y) < SNAP_Y) y = vh - ht - MARGIN;
-    }
-    // Store what is shown: the clamped position, so collapsing/reloading never jumps
-    dx = Math.max(MARGIN, Math.min(dx, vw - w - MARGIN));
-    y = Math.max(MARGIN, Math.min(y, vh - ht - MARGIN));
-    this.pos = { side, dx, y };
-    if (animate && !reducedMotion()) {
-      this.hostElement.style.transition = 'transform .15s ease';
-      setTimeout(() => { if (this.hostElement) this.hostElement.style.transition = ''; }, 170);
-    }
-    this._position();
-    this._savePrefs();
-  }
-
-  _size() {
-    const el = this.isExpanded ? this.parts.panel : this.parts.pill;
-    const r = el.getBoundingClientRect();
-    return { w: r.width || (this.isExpanded ? 320 : 150), h: r.height || 32 };
-  }
-
-  /** Current top-left from the stored side-anchored position. */
-  _xy() {
-    const { w } = this._size();
-    const x = this.pos.side === 'left' ? this.pos.dx : window.innerWidth - w - this.pos.dx;
-    return { x, y: this.pos.y };
-  }
-
-  _applyXY(x, y) {
-    const { w, h: ht } = this._size();
-    const cx = Math.round(Math.max(MARGIN, Math.min(x, window.innerWidth - w - MARGIN)));
-    const cy = Math.round(Math.max(MARGIN, Math.min(y, window.innerHeight - ht - MARGIN)));
-    const t = `translate3d(${cx}px, ${cy}px, 0)`;
-    if (this.hostElement.style.transform !== t) this.hostElement.style.transform = t;
-  }
-
-  _position() {
-    if (!this.hostElement || !this.parts || this._drag?.moved) return;
-    const { x, y } = this._xy();
-    this._applyXY(x, y);
-  }
-
-  /** One layout pass per frame for resizes and content changes. */
-  _schedulePosition() {
-    if (this._posRaf || typeof requestAnimationFrame !== 'function') return this._position();
-    this._posRaf = requestAnimationFrame(() => { this._posRaf = null; this._position(); });
-  }
-
-  // ------------------------------------------------------------------ preferences
+  // ------------------------------------------------------------------ storage
 
   _storage() {
     try { return typeof chrome !== 'undefined' ? chrome.storage?.local || null : null; } catch (_) { return null; }
   }
 
-  _loadPrefs() {
-    const store = this._storage();
-    if (!store) return;
+  /** Settings, positions and sidebar usage; migrates the old single widget's per-site prefs once. */
+  async _load() {
+    const area = this._storage();
+    if (!area) return;
     try {
-      store.get(this._storeKey).then((r) => {
-        const s = r?.[this._storeKey];
-        if (!s || typeof s !== 'object') return;
-        if (s.pos && ['left', 'right'].includes(s.pos.side) && Number.isFinite(s.pos.dx) && Number.isFinite(s.pos.y)) this.pos = s.pos;
-        if (THEMES.includes(s.theme)) this.theme = s.theme;
-        if (['context', 'capsules', 'skills'].includes(s.tab)) this.tab = s.tab;
-        this.isExpanded = Boolean(s.expanded);
-        this.compact = Boolean(s.compact);
-        this.badges = s.badges !== false;
-        this.render();
-      }).catch(() => {});
+      const r = (await area.get([SETTINGS_KEY, this._storeKey, this._usageKey])) || {};
+      const old = r[this._storeKey] && typeof r[this._storeKey] === 'object' ? r[this._storeKey] : {};
+      const { pos, migrated } = widgetPositions(old);
+      this.pos = pos;
+      if (migrated) area.set({ [this._storeKey]: { pos } }).catch(() => {});
+      // R5: the old widget kept theme / exact numbers / sidebar badges per site; Settings owns them now
+      if (!r[SETTINGS_KEY] && ['theme', 'compact', 'badges'].some(k => k in old)) {
+        this.settings = await writeSettings(area, { display: { theme: old.theme, compact: old.compact, badges: old.badges } });
+      } else {
+        this.settings = normalizeSettings(r[SETTINGS_KEY]);
+      }
+      const usage = r[this._usageKey];
+      if (usage && typeof usage === 'object') this._usage = { ...usage, ...this._usage };
     } catch (_) {}
   }
 
-  _savePrefs() {
-    const store = this._storage();
-    if (!store) return;
+  _savePos() {
     clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
-      try { store.set({ [this._storeKey]: { pos: this.pos, expanded: this.isExpanded, theme: this.theme, tab: this.tab, compact: this.compact, badges: this.badges } }).catch(() => {}); } catch (_) {}
+      try { this._storage()?.set({ [this._storeKey]: { pos: this.pos } }).catch(() => {}); } catch (_) {}
     }, 200);
   }
 
   unmount() {
     this._badgeObserver?.disconnect();
-    this.parts?.caps.stop();
-    this.parts?.skills.stop();
-    this.hostElement?.remove();
-    this.hostElement = null;
-    this.shadowRoot = null;
-    this.parts = null;
+    this.run?.cancel();
+    this.run = null;
+    this.ctx?.host.remove();
+    this.cap?.host.remove();
+    this.ctx = null;
+    this.cap = null;
   }
 }
 
@@ -6811,14 +6102,14 @@ class ChatGPTDOMObserver {
 
   /**
    * False for mutations inside regions that never hold conversation content: the chat input's form
-   * (unless it is the model switcher), the sidebar <nav>, and the extension's own widget.
+   * (unless it is the model switcher), the sidebar <nav>, and the extension's own widgets.
    * @param {MutationRecord} m
    * @returns {boolean}
    */
   _isRelevant(m) {
     const node = m.target && (m.target.nodeType === 1 ? m.target : m.target.parentElement);
     if (!node || !node.closest) return true;
-    if (node.closest('#chatgpt-context-monitor-host, nav')) return false;
+    if (node.closest('[id^="chatgpt-context-monitor-"], nav')) return false;
     if (!this._composer || !this._composer.isConnected) {
       const input = document.querySelector(this.composerSelector);
       this._composer = input ? (input.closest('form, fieldset') || input) : null;
@@ -6965,7 +6256,7 @@ function mergeLiveTurns(base, candidates, opts = {}) {
   // --- content/coordinator-common.js ---
   /**
  * Context Monitor - pieces shared by the ChatGPT coordinator (content-main.js) and the Claude / Gemini
- * coordinator (provider-coordinator.js): toolbar badge, toolbar-icon toggle, diagnostics envelope,
+ * coordinator (provider-coordinator.js): toolbar badge, diagnostics envelope,
  * limit provenance and context intelligence.
  */
 
@@ -6996,18 +6287,6 @@ function badgeSender(counters = {}, ms = 250) {
     if (timer) counters.syncsCoalesced = (counters.syncsCoalesced || 0) + 1;
     else flush();
   };
-}
-
-/** The toolbar icon (background service worker) shows / hides the widget. */
-function listenForToggle(widget) {
-  if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request?.type !== 'TOGGLE_OVERLAY') return false;
-    widget.isVisible = !widget.isVisible;
-    widget.render();
-    sendResponse({ success: true, isVisible: widget.isVisible });
-    return true;
-  });
 }
 
 /** Short hash identifying a conversation in diagnostics without exposing its id. */
@@ -7186,7 +6465,7 @@ class ContentScriptCoordinator {
     this.attachmentDetector = new AttachmentDetector();
     this.toolDetector = new ToolDetector();
     // UI adapter: the only ChatGPT-specific UI knowledge is the name and where the input is
-    this.overlayUI = new ContextWidget({
+    this.overlayUI = new Widgets({
       provider: 'ChatGPT',
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
@@ -7232,7 +6511,7 @@ class ContentScriptCoordinator {
   init() {
     console.log('[ChatGPT Context Monitor] Initializing content script...');
 
-    // Mount in-page overlay HUD
+    // Mount the in-page widgets (Context and Capsule pills)
     this.overlayUI.mount();
 
     // Start DOM observing
@@ -7250,7 +6529,6 @@ class ContentScriptCoordinator {
     // Build the BPE rank table (one-off, ~0.1 s) while the first pass waits on the network
     this.tokenizer.warm();
 
-    listenForToggle(this.overlayUI);
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
     if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
       this.panel = servePanel({
@@ -8685,7 +7963,7 @@ class ProviderCoordinator {
   constructor(provider) {
     this.provider = provider;
     this.tokenizer = new Tokenizer();
-    this.overlayUI = new ContextWidget({
+    this.overlayUI = new Widgets({
       provider: provider.name,
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
@@ -8723,7 +8001,6 @@ class ProviderCoordinator {
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
     this._loadSiteTokenizer();
     this._listenForLimits();
-    listenForToggle(this.overlayUI);
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
     if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
       this.panel = servePanel({

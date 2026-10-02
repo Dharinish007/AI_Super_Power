@@ -11,13 +11,13 @@
 import { Tokenizer } from '../engine/tokenizer.js';
 import { ContextCalculator } from '../engine/context-calculator.js';
 import { EvidenceMerger, EvidenceType } from '../engine/evidence-merger.js';
-import { ContextWidget } from './overlay-ui.js';
+import { Widgets } from './widgets.js';
 import { toWidgetState } from './widget-state.js';
 import { servePanel } from './panel-channel.js';
 import { mergeLiveTurns } from './turn-merger.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { invalidateText, trustTextCache } from './providers.js';
-import { badgeSender, listenForToggle, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
+import { badgeSender, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
 
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
 const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
@@ -52,7 +52,7 @@ export class ProviderCoordinator {
   constructor(provider) {
     this.provider = provider;
     this.tokenizer = new Tokenizer();
-    this.overlayUI = new ContextWidget({
+    this.overlayUI = new Widgets({
       provider: provider.name,
       findInput: () => provider.findInput(document),
       replySelector: provider.replySelector,
@@ -90,7 +90,6 @@ export class ProviderCoordinator {
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
     this._loadSiteTokenizer();
     this._listenForLimits();
-    listenForToggle(this.overlayUI);
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
     if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
       this.panel = servePanel({

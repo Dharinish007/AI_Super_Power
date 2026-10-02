@@ -85,6 +85,9 @@ async function writeSettings(area, patch) {
  * only needs to produce this shape. Pure function: formatting only, no recalculation.
  */
 
+
+
+
 /**
  * "gpt-5-6" -> "GPT-5.6", "gpt-5-5-thinking" -> "GPT-5.5 Thinking", "gpt-4o-mini" -> "GPT-4o Mini".
  * Display formatting only; unknown shapes pass through unchanged.
@@ -309,6 +312,26 @@ function toWidgetState(s, opts = {}) {
     ready: true
   };
   return vm;
+}
+
+/**
+ * The Context widget's expanded card: the chosen fields, in CONTEXT_FIELDS order, without blanks.
+ * @param {Object} vm Output of toWidgetState()
+ * @param {string[]} fields Keys from settings.widgets.context.fields
+ * @returns {Array<{ key: string, label: string, value: string }>}
+ */
+function widgetFields(vm, fields) {
+  if (!vm || vm.ready === false) return [];
+  const known = (v) => v !== null && v !== undefined;
+  const value = {
+    tokens: () => (vm.contextLimit ? `${fmtK(vm.usedTokens)} / ${fmtK(vm.contextLimit)}` : fmtK(vm.usedTokens)),
+    percent: () => (known(vm.percentage) ? `${vm.percentage}%` : null),
+    model: () => vm.model || null,
+    exchangesLeft: () => (known(vm.exchangesLeft) ? `~${vm.exchangesLeft}` : null),
+    limits: () => (vm.limits?.length ? vm.limits.map(l => `${l.label} ${limitText(l)}`).join(' | ') : null),
+    alert: () => vm.warning || null
+  };
+  return CONTEXT_FIELDS.filter(f => fields.includes(f.key)).map(f => ({ key: f.key, label: f.label, value: value[f.key]() })).filter(f => f.value);
 }
 
 
