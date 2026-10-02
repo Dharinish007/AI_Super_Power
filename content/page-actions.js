@@ -27,15 +27,18 @@ export function createPage(adapter, doc = globalThis.document) {
       return texts.map((t) => { try { return adapter.countTokens ? adapter.countTokens(t) : null; } catch (_) { return null; } });
     },
     async limitReached() { return Boolean(chatLimitReached(adapter.getLimits?.() || [])); },
-    /** Waits for a Capsule in a new reply (at most one read per 500 ms while it streams); reports it once. */
-    async watchCapsule(onFound) {
-      const ignoreBody = readLatestCapsule(doc, replySelector)?.body ?? null;
+    /**
+     * Waits for a Capsule in a new reply (at most one read per 500 ms while it streams); reports it once.
+     * @param {{ markers?: { start: string, end: string } }} [opts] Other START / END lines (Memory's Learn)
+     */
+    async watchCapsule(onFound, { markers } = {}) {
+      const ignoreBody = readLatestCapsule(doc, replySelector, null, markers)?.body ?? null;
       let timer = null;
       const observer = new MutationObserver(() => {
         if (timer) return;
         timer = setTimeout(() => {
           timer = null;
-          const capsule = readLatestCapsule(doc, replySelector, ignoreBody);
+          const capsule = readLatestCapsule(doc, replySelector, ignoreBody, markers);
           if (!capsule) return;
           stop();
           onFound(capsule);

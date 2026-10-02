@@ -31,7 +31,7 @@ export async function runPanelChannelTests() {
   let onConnect = null;
   const runtime = { onConnect: { addListener(f) { onConnect = f; } } };
   const page = { provider: 'Claude', fill: async (t) => t === 'ok', countTokens: async (ts) => ts.map(t => t.length),
-    watchCapsule: async (cb) => { page.cb = cb; return () => { page.stopped = true; }; } };
+    watchCapsule: async (cb, opts) => { page.cb = cb; page.opts = opts; return () => { page.stopped = true; }; } };
   let refreshed = 0;
   const server = servePanel({ runtime, page, getState: () => ({ ready: true, usedTokens: 5 }),
     actions: { refresh: () => { refreshed++; }, diagnostics: () => ({ v: 1 }) } });
@@ -59,11 +59,15 @@ export async function runPanelChannelTests() {
 
   const got = [];
   const stop = await client.page.watchCapsule((c) => got.push(c.title));
+  assert('watchCapsule without options sends none', page.opts === undefined);
   page.cb({ title: 'T', body: 'b' });
   await tick(); await tick();
   assert('Capsule found in the tab reaches the panel', JSON.stringify(got) === '["T"]');
   stop(); await tick(); await tick();
   assert('Stopping in the panel stops the tab watcher', page.stopped === true);
+  const stopM = await client.page.watchCapsule(() => {}, { markers: { start: 'S', end: 'E' } });
+  assert('watchCapsule options reach the tab', page.opts?.markers?.start === 'S' && page.opts.markers.end === 'E');
+  stopM();
 
   // A port with another name is ignored; after disconnect, push does nothing
   const [other] = portPair(); other.name = 'x'; let otherGot = 0; other.postMessage = () => { otherGot++; };

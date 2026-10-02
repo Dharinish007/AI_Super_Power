@@ -20,6 +20,7 @@
 
 export const CAPSULE_START = '=== CAPSULE START ===';
 export const CAPSULE_END = '=== CAPSULE END ===';
+export const CAPSULE_MARKERS = Object.freeze({ start: CAPSULE_START, end: CAPSULE_END });
 export const CAPSULE_MAX_SELECTION = 4000;
 export const CAPSULES_KEY = 'capsules';
 export const SKILLS_KEY = 'skills';
@@ -205,15 +206,16 @@ export async function clearHandoff(area) {
 
 /**
  * @param {string} text Reply text
- * @param {{ loose?: boolean }} [opts] loose: no markers needed (the whole reply is the Capsule)
+ * @param {{ loose?: boolean, markers?: { start: string, end: string } }} [opts] loose: no markers needed
+ *   (the whole reply is the Capsule); markers: other START / END lines (Memory's Learn reply)
  * @returns {{ title: string, body: string }|null} null when there is no complete Capsule
  */
-export function parseCapsule(text, { loose = false } = {}) {
+export function parseCapsule(text, { loose = false, markers = CAPSULE_MARKERS } = {}) {
   const src = String(text || '').replace(/\r\n?/g, '\n');
-  const start = src.indexOf(CAPSULE_START);
-  const end = start < 0 ? -1 : src.indexOf(CAPSULE_END, start + CAPSULE_START.length);
+  const start = src.indexOf(markers.start);
+  const end = start < 0 ? -1 : src.indexOf(markers.end, start + markers.start.length);
   if (!loose && end < 0) return null; // No START, or the reply is still streaming
-  let body = src.slice(start < 0 ? 0 : start + CAPSULE_START.length, end < 0 ? undefined : end).trim();
+  let body = src.slice(start < 0 ? 0 : start + markers.start.length, end < 0 ? undefined : end).trim();
   // A fence the AI put inside the markers (opening and closing pair); fences in Key snippets stay
   const fence = body.match(/^(`{3,})[\w-]*\n/);
   if (fence && body.endsWith(`\n${fence[1]}`)) body = body.slice(fence[0].length, -fence[1].length - 1).trim();
@@ -245,12 +247,13 @@ export function latestReplyText(doc, replySelector) {
  * @param {Document} doc
  * @param {string} replySelector Matches assistant replies (never the user's prompt, which holds the markers too)
  * @param {string|null} [ignoreBody] Body of a Capsule already on the page before this one was asked for
+ * @param {{ start: string, end: string }} [markers] START / END lines to look for (default: Capsule's)
  */
-export function readLatestCapsule(doc, replySelector, ignoreBody = null) {
+export function readLatestCapsule(doc, replySelector, ignoreBody = null, markers = CAPSULE_MARKERS) {
   if (!doc || !replySelector) return null;
   const replies = doc.querySelectorAll(replySelector);
   for (let i = replies.length - 1; i >= Math.max(0, replies.length - CAPSULE_REPLIES_SCANNED); i--) {
-    const capsule = parseCapsule(replies[i].innerText || replies[i].textContent);
+    const capsule = parseCapsule(replies[i].innerText || replies[i].textContent, { markers });
     if (capsule) return capsule.body === ignoreBody ? null : capsule;
   }
   return null;

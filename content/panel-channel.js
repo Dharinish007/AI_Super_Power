@@ -62,7 +62,7 @@ export function servePanel({ runtime, page, getState, actions }) {
       try {
         let value;
         if (m.name === 'watchCapsule') {
-          const stop = await page.watchCapsule((capsule) => send(p, { type: 'CAPSULE', id: m.id, capsule }));
+          const stop = await page.watchCapsule((capsule) => send(p, { type: 'CAPSULE', id: m.id, capsule }), ...(m.args || []));
           if (port === p) watchers.set(m.id, stop); else stop(); // the panel left while it started
         } else if (PAGE_CALLS.includes(m.name)) value = await page[m.name](...(m.args || []));
         else if (ACTION_CALLS.includes(m.name)) value = await actions[m.name](...(m.args || []));
@@ -103,10 +103,10 @@ export function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) 
   const page = {
     get provider() { return provider; },
     ...Object.fromEntries(PAGE_CALLS.map(n => [n, (...args) => call(n, args)])),
-    async watchCapsule(onFound) {
+    async watchCapsule(onFound, opts) {
       const id = seq + 1; // call() takes this id
       capsuleCbs.set(id, onFound);
-      try { await call('watchCapsule'); } catch (e) { capsuleCbs.delete(id); throw e; }
+      try { await call('watchCapsule', opts ? [opts] : []); } catch (e) { capsuleCbs.delete(id); throw e; }
       return () => { capsuleCbs.delete(id); try { port.postMessage({ type: 'STOP_WATCH', id }); } catch (_) {} };
     }
   };

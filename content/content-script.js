@@ -4392,6 +4392,7 @@ function widgetFields(vm, fields) {
 
 const CAPSULE_START = '=== CAPSULE START ===';
 const CAPSULE_END = '=== CAPSULE END ===';
+const CAPSULE_MARKERS = Object.freeze({ start: CAPSULE_START, end: CAPSULE_END });
 const CAPSULE_MAX_SELECTION = 4000;
 const CAPSULES_KEY = 'capsules';
 const SKILLS_KEY = 'skills';
@@ -4577,15 +4578,16 @@ async function clearHandoff(area) {
 
 /**
  * @param {string} text Reply text
- * @param {{ loose?: boolean }} [opts] loose: no markers needed (the whole reply is the Capsule)
+ * @param {{ loose?: boolean, markers?: { start: string, end: string } }} [opts] loose: no markers needed
+ *   (the whole reply is the Capsule); markers: other START / END lines (Memory's Learn reply)
  * @returns {{ title: string, body: string }|null} null when there is no complete Capsule
  */
-function parseCapsule(text, { loose = false } = {}) {
+function parseCapsule(text, { loose = false, markers = CAPSULE_MARKERS } = {}) {
   const src = String(text || '').replace(/\r\n?/g, '\n');
-  const start = src.indexOf(CAPSULE_START);
-  const end = start < 0 ? -1 : src.indexOf(CAPSULE_END, start + CAPSULE_START.length);
+  const start = src.indexOf(markers.start);
+  const end = start < 0 ? -1 : src.indexOf(markers.end, start + markers.start.length);
   if (!loose && end < 0) return null; // No START, or the reply is still streaming
-  let body = src.slice(start < 0 ? 0 : start + CAPSULE_START.length, end < 0 ? undefined : end).trim();
+  let body = src.slice(start < 0 ? 0 : start + markers.start.length, end < 0 ? undefined : end).trim();
   // A fence the AI put inside the markers (opening and closing pair); fences in Key snippets stay
   const fence = body.match(/^(`{3,})[\w-]*\n/);
   if (fence && body.endsWith(`\n${fence[1]}`)) body = body.slice(fence[0].length, -fence[1].length - 1).trim();
@@ -4617,12 +4619,13 @@ function latestReplyText(doc, replySelector) {
  * @param {Document} doc
  * @param {string} replySelector Matches assistant replies (never the user's prompt, which holds the markers too)
  * @param {string|null} [ignoreBody] Body of a Capsule already on the page before this one was asked for
+ * @param {{ start: string, end: string }} [markers] START / END lines to look for (default: Capsule's)
  */
-function readLatestCapsule(doc, replySelector, ignoreBody = null) {
+function readLatestCapsule(doc, replySelector, ignoreBody = null, markers = CAPSULE_MARKERS) {
   if (!doc || !replySelector) return null;
   const replies = doc.querySelectorAll(replySelector);
   for (let i = replies.length - 1; i >= Math.max(0, replies.length - CAPSULE_REPLIES_SCANNED); i--) {
-    const capsule = parseCapsule(replies[i].innerText || replies[i].textContent);
+    const capsule = parseCapsule(replies[i].innerText || replies[i].textContent, { markers });
     if (capsule) return capsule.body === ignoreBody ? null : capsule;
   }
   return null;
@@ -5007,15 +5010,18 @@ function createPage(adapter, doc = globalThis.document) {
       return texts.map((t) => { try { return adapter.countTokens ? adapter.countTokens(t) : null; } catch (_) { return null; } });
     },
     async limitReached() { return Boolean(chatLimitReached(adapter.getLimits?.() || [])); },
-    /** Waits for a Capsule in a new reply (at most one read per 500 ms while it streams); reports it once. */
-    async watchCapsule(onFound) {
-      const ignoreBody = readLatestCapsule(doc, replySelector)?.body ?? null;
+    /**
+     * Waits for a Capsule in a new reply (at most one read per 500 ms while it streams); reports it once.
+     * @param {{ markers?: { start: string, end: string } }} [opts] Other START / END lines (Memory's Learn)
+     */
+    async watchCapsule(onFound, { markers } = {}) {
+      const ignoreBody = readLatestCapsule(doc, replySelector, null, markers)?.body ?? null;
       let timer = null;
       const observer = new MutationObserver(() => {
         if (timer) return;
         timer = setTimeout(() => {
           timer = null;
-          const capsule = readLatestCapsule(doc, replySelector, ignoreBody);
+          const capsule = readLatestCapsule(doc, replySelector, ignoreBody, markers);
           if (!capsule) return;
           stop();
           onFound(capsule);
@@ -5094,7 +5100,7 @@ function servePanel({ runtime, page, getState, actions }) {
       try {
         let value;
         if (m.name === 'watchCapsule') {
-          const stop = await page.watchCapsule((capsule) => send(p, { type: 'CAPSULE', id: m.id, capsule }));
+          const stop = await page.watchCapsule((capsule) => send(p, { type: 'CAPSULE', id: m.id, capsule }), ...(m.args || []));
           if (port === p) watchers.set(m.id, stop); else stop(); // the panel left while it started
         } else if (PAGE_CALLS.includes(m.name)) value = await page[m.name](...(m.args || []));
         else if (ACTION_CALLS.includes(m.name)) value = await actions[m.name](...(m.args || []));
@@ -5135,10 +5141,10 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
   const page = {
     get provider() { return provider; },
     ...Object.fromEntries(PAGE_CALLS.map(n => [n, (...args) => call(n, args)])),
-    async watchCapsule(onFound) {
+    async watchCapsule(onFound, opts) {
       const id = seq + 1; // call() takes this id
       capsuleCbs.set(id, onFound);
-      try { await call('watchCapsule'); } catch (e) { capsuleCbs.delete(id); throw e; }
+      try { await call('watchCapsule', opts ? [opts] : []); } catch (e) { capsuleCbs.delete(id); throw e; }
       return () => { capsuleCbs.delete(id); try { port.postMessage({ type: 'STOP_WATCH', id }); } catch (_) {} };
     }
   };

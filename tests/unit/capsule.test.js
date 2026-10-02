@@ -4,7 +4,7 @@
  */
 
 import {
-  CAPSULE_START, CAPSULE_END, CAPSULE_MAX_SELECTION, CAPSULES_KEY, CAPSULE_HANDOFF_KEY,
+  CAPSULE_START, CAPSULE_END, CAPSULE_MARKERS, CAPSULE_MAX_SELECTION, CAPSULES_KEY, CAPSULE_HANDOFF_KEY,
   buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
   chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
   formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert,
@@ -80,6 +80,12 @@ export async function runCapsuleTests() {
   assert('Capsule already on the page before asking is ignored', readLatestCapsule(fakeDoc([capsuleReply]), 'x', '## Goal\nnew goal') === null);
   assert('Only the newest replies are scanned', readLatestCapsule(fakeDoc([capsuleReply, 'a', 'b', 'c']), 'x') === null);
   assert('No selector -> null', readLatestCapsule(fakeDoc([capsuleReply]), null) === null);
+  const MK = { start: '=== MEMORY START ===', end: '=== MEMORY END ===' };
+  assert('Default markers are the Capsule ones', CAPSULE_MARKERS.start === CAPSULE_START && CAPSULE_MARKERS.end === CAPSULE_END);
+  const pm = parseCapsule(`x\n${MK.start}\n- preference | preference.fruit | Likes mango\n${MK.end}`, { markers: MK });
+  assert('parseCapsule with custom markers', pm?.body === '- preference | preference.fruit | Likes mango');
+  assert('Capsule markers do not match a memory reply', parseCapsule(`${MK.start}\nx\n${MK.end}`) === null);
+  assert('readLatestCapsule with custom markers', readLatestCapsule(fakeDoc([`${MK.start}\n- a | b | c\n${MK.end}`]), 'R', null, MK)?.body === '- a | b | c');
   assert('latestReplyText returns the newest reply', latestReplyText(fakeDoc(['a', ' b ']), 'x') === 'b' && latestReplyText(fakeDoc([]), 'x') === '');
 
   // Insert format
