@@ -53,11 +53,13 @@ export function widgetPositions(stored) {
 /**
  * Free drag for one pill: pointer events, translate3d, clamped to the viewport, snapped to the
  * nearest side on release (hold Alt to skip). `onMoved(pos)` saves the new position.
+ * `place()` re-positions at most once per frame (it reads layout).
  * @returns {{ place(): void, wasDragged(): boolean }}
  */
 function makeDraggable(host, handle, getPos, onMoved) {
   let drag = null;
   let raf = null;
+  let placeRaf = null;
   let justDragged = false;
   const size = () => ({ w: host.offsetWidth || 120, h: host.offsetHeight || 32 });
   const xy = () => {
@@ -72,7 +74,8 @@ function makeDraggable(host, handle, getPos, onMoved) {
     const t = `translate3d(${cx}px, ${cy}px, 0)`;
     if (host.style.transform !== t) host.style.transform = t;
   };
-  const place = () => { if (!drag?.moved) { const { x, y } = xy(); apply(x, y); } };
+  const placeNow = () => { placeRaf = null; if (!drag?.moved) { const { x, y } = xy(); apply(x, y); } };
+  const place = () => { if (typeof requestAnimationFrame !== 'function') placeNow(); else placeRaf ??= requestAnimationFrame(placeNow); };
   // Anchored to the nearer side and the nearer top / bottom edge, so resizes and the card never push it off screen
   const settle = (x, y, snap, animate) => {
     const { w, h: ht } = size();
@@ -192,6 +195,8 @@ export class Widgets {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local' || !changes[SETTINGS_KEY] || !this.ctx) return;
         this.settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
+        this._settingsFresh = true; // Newer than what _load may still be reading
+        if (!this.settings.widgets.capsule.enabled) this._cancelRun();
         this._paintBadges();
         this._render();
       });
@@ -257,7 +262,6 @@ export class Widgets {
     this.vm = viewState;
     if (!this.ctx) this.mount();
     if (!this.ctx) return;
-    if (this.settings.context.alerts) this._maybeAlert(viewState);
     this._trackUsage(viewState);
     // SPA re-renders can drop our nodes; re-attach instead of rebuilding
     for (const p of [this.ctx, this.cap]) if (!p.host.isConnected) (document.body || document.documentElement).appendChild(p.host);
@@ -291,6 +295,8 @@ export class Widgets {
     if (this.expanded) this._renderCard(ready);
     this.ctx.drag.place();
     this.cap.drag.place();
+    // Only while the Context pill is shown (a hidden toast would use up the chat's alert); fires once it shows
+    if (ready && s.context.alerts && this.ctx.host.style.display !== 'none') this._maybeAlert(vm);
   }
 
   /** Rows are rebuilt only when the chosen / available fields change; otherwise only values are written. */
@@ -321,7 +327,7 @@ export class Widgets {
 
   /** R11: errors become a status; the run handle is dropped on saved / error / cancelled. */
   async _capsuleClick() {
-    if (this.run) { const run = this.run; this.run = null; run.cancel(); return; }
+    if (this.run) return this._cancelRun();
     if (this._capturing) return;
     this._capturing = true;
     this._waiting = false;
@@ -333,12 +339,19 @@ export class Widgets {
         store: new CapsuleStore(this._storage()),
         onStatus: (st) => this._capsuleStatus(st)
       });
-      if (this._waiting) this.run = run;
+      if (this._waiting) { this.run = run; if (!this.settings.widgets.capsule.enabled) this._cancelRun(); }
     } catch (_) {
       this._capsuleStatus({ state: 'error', text: 'Capsule failed' });
     } finally {
       this._capturing = false;
     }
+  }
+
+  /** Drops the handle first (R11), so cancel() runs once. */
+  _cancelRun() {
+    const run = this.run;
+    this.run = null;
+    run?.cancel();
   }
 
   _capsuleStatus(st) {
@@ -436,8 +449,9 @@ export class Widgets {
       if (migrated) area.set({ [this._storeKey]: { pos } }).catch(() => {});
       // R5: the old widget kept theme / exact numbers / sidebar badges per site; Settings owns them now
       if (!r[SETTINGS_KEY] && ['theme', 'compact', 'badges'].some(k => k in old)) {
-        this.settings = await writeSettings(area, { display: { theme: old.theme, compact: old.compact, badges: old.badges } });
-      } else {
+        const next = await writeSettings(area, { display: { theme: old.theme, compact: old.compact, badges: old.badges } });
+        if (!this._settingsFresh) this.settings = next;
+      } else if (!this._settingsFresh) {
         this.settings = normalizeSettings(r[SETTINGS_KEY]);
       }
       const usage = r[this._usageKey];
@@ -454,8 +468,7 @@ export class Widgets {
 
   unmount() {
     this._badgeObserver?.disconnect();
-    this.run?.cancel();
-    this.run = null;
+    this._cancelRun();
     this.ctx?.host.remove();
     this.cap?.host.remove();
     this.ctx = null;
