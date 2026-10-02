@@ -4,7 +4,7 @@
 
 - **Name:** AI Context Monitor
 - **Short Name:** Context Monitor
-- **Version:** 1.0.0
+- **Version:** 1.1.0
 - **Primary Category:** Productivity
 - **Secondary Category:** Developer Tools
 - **Default Language:** English
@@ -29,7 +29,7 @@ Key Features:
 - Itemized breakdown: user messages, assistant replies, attachments, tool activity and hidden context the page exposes.
 - Skills: save instructions you reuse ("Explain simply", "Review my code") and insert them into any of the three AIs.
 - Capsules: ask the AI you are using to summarize the conversation into a Capsule, edit and save it, then insert it into ChatGPT, Claude or Gemini so you never re-explain your context. Saved only in your browser.
-- Non-intrusive widget: a draggable in-page meter that updates during streaming without slowing the page. The toolbar icon shows or hides it.
+- Side panel: the toolbar icon opens Context, Capsules, Skills and Settings next to the chat. Two small draggable on-page pills (Context and Capsule) stay visible and update during streaming without slowing the page.
 - Local and private: all reading, tokenizing and calculating happens in your browser. Nothing is sent to the developer or any third party, and there is no analytics.
 
 ---
@@ -39,7 +39,10 @@ Key Features:
 Every declared permission serves a single necessary purpose.
 
 ### `storage`
-- **Justification:** Saves widget preferences (position, expanded state, theme and tab, per site), the last plan-usage percentages, the Capsules and Skills the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
+- **Justification:** Saves settings (widget choices, Capsule method, display options), widget positions per site, the last plan-usage percentages, the Capsules and Skills the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
+
+### `sidePanel`
+- **Justification:** Shows the extension's main view (context, Capsules, Skills, settings) next to the chat. No data leaves the browser.
 
 ### `unlimitedStorage`
 - **Justification:** Lets the Capsules and Skills the user saves grow past the 10 MB `chrome.storage.local` quota (a Capsule can be up to 100,000 characters). Data stays on the device; the permission shows no install warning.

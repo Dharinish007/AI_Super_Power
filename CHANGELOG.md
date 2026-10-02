@@ -4,7 +4,13 @@ All notable changes to AI Context Monitor. Versions follow `manifest.json`; bump
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-02
+
 ### Changed
+- **Side panel:** the toolbar icon opens the extension in Chrome's side panel (Context · Capsules · Skills · Settings); the site narrows to make room. Breakdown and Diagnostics are sections of Context. On other sites only the Context tab is blocked. Requires Chrome 116+ (`sidePanel` permission, no install warning).
+- **Widgets:** the floating panel is replaced by two small pills, each dragged on its own: **Context** (click for the fields chosen in Settings) and **Capsule** (one click: Ask this AI fills the chat box and saves the Capsule from the reply, or Quick builds it from the page; falls back to Quick when the limit is reached). Both on by default; turn off in Settings. Alt+T hides / shows both on the page. The old widget position moves to the Context pill.
+- **Settings tab:** widget toggles and fields, Capsule method, alerts, theme, compact numbers, sidebar badges (old per-site theme / compact / badges choices are migrated once).
+- The side panel and the page talk over one runtime port per tab (`content/panel-channel.js`); `npm run build` also writes `sidepanel/sidepanel.js`; `content/overlay-ui.js` was split into `content/widgets.js` and `ui/*`.
 - Renamed to **AI Context Monitor** (was "ChatGPT Context Monitor"): third-party trademarks stay out of the name.
 - Only the `o200k_base` tokenizer ships: the bundle shrinks from 3.6 MB to 2.6 MB. Retired GPT-4 / GPT-4 Turbo / GPT-3.5 chats are counted with `o200k_base` and marked "approximate tokenizer".
 - The tokenizer table is built in ~8 ms slices instead of one ~100 ms task on every page load.

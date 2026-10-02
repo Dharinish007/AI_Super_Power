@@ -1,6 +1,6 @@
 {
   "name": "ai-context-monitor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Chrome extension (Manifest V3) that shows context-window usage for ChatGPT, Claude and Gemini conversations, computed locally without fabricating hidden server data.",
   "main": "background/service-worker.js",
   "type": "module",

@@ -38,18 +38,23 @@ The extension operates across three isolated browser contexts coordinated via me
   ├── Local Offline BPE Tokenizer (engine/tokenizer.js via js-tiktoken)
   ├── Context Calculator & Epistemic Classifier (engine/context-calculator.js, context-classifier.js)
   ├── Explainable Confidence Engine (engine/confidence-engine.js)
-  ├── In-Page Shadow DOM widget (content/overlay-ui.js; Capsules / Skills in content/capsule.js)
+  ├── In-Page Shadow DOM widgets: Context + Capsule pills (content/widgets.js); views shared with the side panel in ui/*; Capsule logic in content/capsule.js
+  ├── Side-panel channel: one runtime port per tab, named `panel` (content/panel-channel.js; page methods in content/page-actions.js)
   └── Claude / Gemini: content/provider-coordinator.js + adapters in content/providers.js
   │
   └── chrome.runtime.sendMessage({ type: 'CONTEXT_UPDATED', payload: { percentage, awaitingData } })
   ▼
 [ BACKGROUND Service Worker ] (background/service-worker.js)
-  └── Updates the toolbar badge (text & color); a toolbar icon click shows / hides the widget (no popup)
+  └── Updates the toolbar badge (text & color); a toolbar icon click opens the side panel (no popup)
+  ▲
+  │ port `panel`: tab pushes STATE, panel sends CALL
+  ▼
+[ SIDE PANEL ] (sidepanel/sidepanel.html + main.js, built into sidepanel/sidepanel.js; tabs Context | Capsules | Skills | Settings)
 ```
 
 ### Build Pipeline Invariant
-* Modular files in `engine/` and `content/` are bundled into a standalone `content/content-script.js` via `node scripts/build.js`.
-* **Rule**: Whenever editing code in `engine/`, `content/`, or `network/`, you **must** run `npm run build` so that `content/content-script.js` is refreshed.
+* Modular files in `engine/` and `content/` are bundled into a standalone `content/content-script.js` via `node scripts/build.js`. The same build also writes `sidepanel/sidepanel.js` (from `sidepanel/main.js` and `ui/`).
+* **Rule**: Whenever editing code in `engine/`, `content/`, `network/`, `ui/` or `sidepanel/`, you **must** run `npm run build` so that `content/content-script.js` and `sidepanel/sidepanel.js` are refreshed (the bundle-integrity test checks both).
 
 ---
 
@@ -98,7 +103,7 @@ The extension operates across three isolated browser contexts coordinated via me
   * **Tools & MCP**: Automatically captures both network tool calls (`web_search`, python code interpreter) and DOM tool execution chips.
   * **Streaming**: Debounced with timers (not `requestAnimationFrame`, which is paused in background tabs) to prevent UI thrashing during assistant generation.
 * **Manual Interaction**:
-  * The widget's Refresh button re-reads the conversation now (bypassing the short cache and failure back-off) without clearing in-flight streaming turns.
+  * The side panel's Refresh button re-reads the conversation now (bypassing the short cache and failure back-off) without clearing in-flight streaming turns.
 
 ---
 
@@ -135,9 +140,9 @@ When investigating issues, observe the **Iron Law**: find and verify the root ca
    * Content Script / Overlay: In-page Chrome DevTools Console.
    * Network Interceptor: Page Console with prefix `[ChatGPT Network Interceptor]`.
    * Service Worker: `chrome://extensions` → "Inspect views: service worker".
-   * Widget: its **Copy diagnostics** button copies a structure-only snapshot (no message text).
+   * Side panel: the Context tab's **Copy diagnostics** button copies a structure-only snapshot (no message text).
 2. **Trace the Real Execution Flow**:
-   $$\text{Network/DOM Event} \rightarrow \text{Extractor/Interceptor} \rightarrow \text{EvidenceMerger} \rightarrow \text{ContextCalculator} \rightarrow \text{OverlayUI}$$
+   $$\text{Network/DOM Event} \rightarrow \text{Extractor/Interceptor} \rightarrow \text{EvidenceMerger} \rightarrow \text{ContextCalculator} \rightarrow \text{Widgets / Side Panel}$$
    * Validate real runtime payloads against expected shapes rather than guessing.
 3. **Avoid Heuristic Hacks**:
    * Never modify `engine/` calculation math to fix an upstream extraction or timing issue.

@@ -40,7 +40,7 @@ Breakdown and Diagnostics are **sections inside Context**, not tabs: they are de
   - **Supported site, live:** full UI.
   - **Supported site, no data yet:** "Reading the conversation…" (the badge is already blank in this state).
   - **Supported site, script missing** (tab opened before install / update): "Reload this page to start".
-  - **Any other site:** "Open ChatGPT, Claude or Gemini" with nothing else.
+  - **Any other site:** the Context tab says "Open ChatGPT, Claude or Gemini". Capsules, Skills and Settings stay usable (saved notes are useful anywhere; insert just fails with a toast).
 - Tabs are a plain list (`[{ id, label, render }]`). Adding a feature = one entry plus one settings section.
 - Width is whatever the user drags it to (Chrome controls it). Layout is single-column and must work from 320 px up.
 
@@ -60,7 +60,7 @@ Breakdown and Diagnostics are **sections inside Context**, not tabs: they are de
 - Clicking again while waiting cancels. Editing, inserting and deleting stay in the side panel.
 
 ### Opening the panel from a widget
-Chrome only opens a side panel from a user gesture in an extension context (toolbar icon, keyboard shortcut, extension page). A click inside the web page may not qualify. The widgets therefore **do not open the panel**; the text says "side panel" and the toolbar icon opens it. The implementation plan checks whether `chrome.sidePanel.open()` from the widget's click message works on Chrome 116+. If it does, "edit in side panel" becomes a link.
+Chrome only opens a side panel from a user gesture in an extension context (toolbar icon, keyboard shortcut, extension page). A click inside the web page may not qualify. **Decision: the widgets do not open the panel**; the text says "side panel" and the toolbar icon opens it. The spike (does `chrome.sidePanel.open()` from the widget's click message work on Chrome 116+?) was not run; it can be revisited, and "edit in side panel" would then become a link.
 
 ## Settings
 Stored as one object in `chrome.storage.local` (`settings`), read with defaults filled in so older or missing values never break:
@@ -81,18 +81,19 @@ Sections in the Settings tab: **Widgets** (two toggles + Context field checkboxe
 ## How the pieces talk
 The engine stays in the **content script**: it needs the page and the tokenizer is large. The side panel is a view only.
 ```text
-content script (engine, widgets)  ──VIEW_STATE──▶  side panel (renders)
-                                  ◀──COMMAND─────  (create capsule, insert text, …)
+content script (engine, widgets)  ──STATE──────▶  side panel (renders)
+      one runtime port per tab    ◀──CALL────────  (page actions, refresh, diagnostics)
            both read / write chrome.storage.local: settings, capsules, skills
 ```
-- The content script already builds the provider-neutral view state (`content/widget-state.js`). It sends it with `chrome.runtime.sendMessage({ type: 'VIEW_STATE', state })` whenever it changes (throttled like the badge). The panel ignores messages from tabs that are not active.
-- On open or tab switch the panel asks the active tab: `chrome.tabs.sendMessage(tabId, { type: 'GET_VIEW_STATE' })`. No reply = "Reload this page to start".
-- Actions that touch the page (fill the chat box, read the newest reply, insert a Capsule or Skill) are **commands** sent to the tab; the content script performs them exactly as today.
+- The panel opens **one runtime port per tab**, named `panel` (`content/panel-channel.js`: `servePanel` on the tab side, `connectPanel` on the panel side). There is no `sendMessage` VIEW_STATE / GET_VIEW_STATE.
+- The content script already builds the provider-neutral view state (`content/widget-state.js`). The tab **pushes `STATE`** over the port whenever it changes (throttled to 250 ms). No port / no reply = "Reload this page to start".
+- The panel sends **`CALL`** for the whitelisted `Page` methods (fill the chat box, read the newest reply, transcript, token counts, limit check) plus `refresh` and `diagnostics`; the tab answers with `REPLY`. `watchCapsule` streams `CAPSULE` events until `STOP_WATCH`.
 - Capsules, Skills and Settings are read directly from `chrome.storage.local` by both sides and kept in sync with `storage.onChanged` (already done for Capsules).
 
 ## Units
-- `sidepanel/sidepanel.html` + `sidepanel/sidepanel.js` (new): tab list, active-tab tracking, empty states, message handling. Imports the view components as ES modules (extension pages need no bundling).
-- `content/overlay-ui.js`: split. The tab views (Context sections, Capsules, Skills) move to modules the side panel imports. What stays in the page is the two widgets.
+- `sidepanel/sidepanel.html` + `sidepanel/main.js` (bundled by `npm run build` into `sidepanel/sidepanel.js`): tab list, active-tab tracking, empty states, port handling.
+- `content/overlay-ui.js` (removed): split into `ui/{dom,styles,capsule-panel,context-view,settings-view}.js` (views shared with the panel) and `content/widgets.js` (the two pills).
+- `content/page-actions.js` (new): `createPage(adapter)`, the in-page implementation of the `Page` interface the views use (the panel's version sends each call over the port). There is no `exportChat` action: the panel builds the export from `page.transcript()`.
 - `content/settings.js` (new, small): defaults, `readSettings` (merge with defaults), `writeSettings`.
 - `content/capsule.js`: add a widget entry point that runs the chosen method and saves automatically. The prompt, parsing and store are unchanged.
 - `background/service-worker.js`: `chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`; remove the `TOGGLE_OVERLAY` click handler.
@@ -101,12 +102,12 @@ content script (engine, widgets)  ──VIEW_STATE──▶  side panel (renders
 - `PRIVACY.md`, `CHROMEWEBSTORE.md`: new permission reason; no change to the data handling.
 
 ## Migration
-- Saved widget position per site → position of the Context widget; the Capsule widget starts just below it.
+- Saved widget position per site → position of the Context widget; the Capsule widget starts at its default position.
 - The old "widget hidden" state → both widgets enabled (new default), shown once.
 - Capsules, Skills and display options keep their storage keys.
 
 ## Testing
-- Unit: settings defaults and merge (missing / old / bad values), Context widget field selection, Capsule widget method choice including the limit-reached fallback, message handlers (`GET_VIEW_STATE` reply, unknown tab ignored).
+- Unit: settings defaults and merge (missing / old / bad values), Context widget field selection, Capsule widget method choice including the limit-reached fallback, the port protocol (`STATE` push, `CALL` / `REPLY`, non-whitelisted calls rejected).
 - DOM: side panel renders each state (live, awaiting, reload, unsupported) from fake view states; tab list switching; Settings changes reach a fake widget through a fake `storage.onChanged`.
 - Existing 789 tests keep passing. `npm test`, `npm run lint`, `npm run build`, `npm run pack`.
 - Manual on all three sites: panel follows tab switches, page narrows correctly, widgets survive panel close, one-click Capsule both methods, insert from panel lands in the right tab.

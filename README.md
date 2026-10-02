@@ -38,8 +38,9 @@ ChatGPT Web Page
      └── Tool Detector (tool-detector.js)            │
          └── Web Search / Python / Memory            ▼
                                              ┌─────────────────────────────────┐
-                                             │ Floating HUD (overlay-ui.js)    │
-                                             │ Toolbar icon: show / hide HUD   │
+                                             │ Widgets: Context + Capsule pills│
+                                             │ Panel channel (port `panel`) ⇄  │
+                                             │ Side Panel (toolbar icon opens) │
                                              │ Toolbar Badge (service-worker)  │
                                              └─────────────────────────────────┘
 ```
@@ -60,8 +61,8 @@ ChatGPT Web Page
 | **Python Interpreter** | ✅ Completed | `OBSERVED` / `UNKNOWN` | Executions observed; raw runtime state marked UNKNOWN |
 | **Memory Updates** | ✅ Completed | `OBSERVED` / `UNKNOWN` | Memory references observed; vector tokens marked UNKNOWN |
 | **System / Dev Prompts**| ✅ Completed | `UNKNOWN` | Explicitly marked unexposed; never fabricated |
-| **In-Page Floating HUD**| ✅ Completed | `ESTIMATED` | Non-intrusive Shadow DOM overlay with mini popover |
-| **Refresh Button** | ✅ Completed | `OBSERVED` | Re-reads the current conversation on demand; the toolbar icon shows / hides the widget (there is no popup) |
+| **Side Panel + Widgets**| ✅ Completed | `ESTIMATED` | Toolbar icon opens a side panel (Context, Capsules, Skills, Settings); two small draggable Shadow DOM pills on the page |
+| **Refresh Button** | ✅ Completed | `OBSERVED` | Re-reads the current conversation on demand; the side panel's Refresh button does the same (there is no popup) |
 | **Toolbar Badge** | ✅ Completed | `ESTIMATED` | Displays percentage utilization (`24%`) with alert colors |
 | **Capsules** | ✅ Completed | n/a | Save a conversation's context and insert it into another AI (see below) |
 
@@ -82,9 +83,9 @@ ChatGPT Web Page
 
 **Session token (ChatGPT):** `/backend-api` rejects cookie-only requests, so the content script reads `accessToken` from same-origin `/api/auth/session` (exactly what ChatGPT's own page does). It lives only in a private in-memory field, is sent only to `chatgpt.com`, and is never logged, stored, or included in extension state or diagnostics.
 
-**Widget:** a small draggable pill in the top-right corner (`39.3K • Medium`). Click it for the full panel (usage bar, model, plan, breakdown, hidden context, usage limits); the toolbar icon shows or hides it. **Copy diagnostics** copies a structure-only JSON snapshot (source statuses, selector counts, candidates; no message text, no token) for troubleshooting.
+**Side panel and widgets** (details: `docs/superpowers/specs/2026-10-01-side-panel-widgets-design.md`): the toolbar icon opens Chrome's side panel (tabs **Context | Capsules | Skills | ⚙ Settings**). Context holds the usage bar, model, plan, breakdown, hidden context and usage limits; on sites other than ChatGPT, Claude and Gemini only that tab is blocked. The content script and the panel talk over one runtime port per tab (`content/panel-channel.js`): the tab pushes its state, the panel sends calls. On the page, two small pills (drag each one; Alt+T hides / shows both): **Context** (`39.3K • 2%`; click for a card with the fields chosen in Settings) and **Capsule** (one click makes a Capsule: *Ask this AI* fills the chat box, you press Enter and it is saved automatically; *Quick* builds it from the page). Both are on by default and can be turned off in Settings (`chrome.storage.local` key `settings`). The widgets never open the panel. **Copy diagnostics** (Context tab) copies a structure-only JSON snapshot (source statuses, selector counts, candidates; no message text, no token) for troubleshooting.
 
-**Capsules** (widget → **Capsules** tab, `content/capsule.js`): a portable summary of one conversation for use in another AI.
+**Capsules** (side panel → **Capsules** tab, or the Capsule pill; `content/capsule.js`): a portable summary of one conversation for use in another AI.
 1. **Create Capsule** fills the chat box with a prompt asking the current AI to write the Capsule (select chat text first to focus on that part). You press Enter; nothing is sent for you.
 2. When the reply's `=== CAPSULE END ===` marker appears, the Capsule opens in an editor. A MutationObserver runs only while waiting. **Use last reply** saves the newest reply as-is if the markers are missing.
 3. **Save** stores it in `chrome.storage.local`, one list shared by ChatGPT, Claude and Gemini.
@@ -97,7 +98,7 @@ When the site's limit is reached (ChatGPT model with no messages left, Claude us
 - **⚡ Quick (no AI)** builds the Capsule from the page: the goal (first message), the last 6 turns and the latest code blocks, or just the selected text.
 - **🔀 Make in another AI** stores the Capsule prompt plus this conversation (up to 60K characters: the first message and the newest that fit) in `chrome.storage.local`, and copies it. On another AI, the Capsules tab shows **Paste & create**; that AI writes the Capsule, which keeps its original site. A hand-off expires after a day.
 
-**Skills** (widget → **Skills** tab): reusable instructions for how the AI should answer ("Code reviewer", "Explain simply"). **＋ New Skill** opens the editor; three starter Skills appear the first time (deleting them is remembered). Insert adds `Follow these instructions for the rest of this chat (Skill: …)` plus the text. Insert always appends to the chat box, so a Capsule then a Skill go in one message. Same list, cost line and Export / Import (`skills-YYYY-MM-DD.json`) as Capsules, stored under `skills`.
+**Skills** (side panel → **Skills** tab): reusable instructions for how the AI should answer ("Code reviewer", "Explain simply"). **＋ New Skill** opens the editor; three starter Skills appear the first time (deleting them is remembered). Insert adds `Follow these instructions for the rest of this chat (Skill: …)` plus the text. Insert always appends to the chat box, so a Capsule then a Skill go in one message. Same list, cost line and Export / Import (`skills-YYYY-MM-DD.json`) as Capsules, stored under `skills`.
 
 ---
 
@@ -144,7 +145,7 @@ npm run pack
 3. Click the **Load unpacked** button in the top-left corner.
 4. Select this repository folder (the one containing `manifest.json`). Run `npm install && npm run build` first if you changed any source file.
 5. Open [chatgpt.com](https://chatgpt.com) and start or open any conversation.
-6. The context widget appears in the top-right corner (drag it anywhere; it snaps to the nearest side). Click it for the full breakdown. Clicking the toolbar icon shows or hides the widget. The same works on [claude.ai](https://claude.ai) and [gemini.google.com](https://gemini.google.com).
+6. Two small pills appear on the page (drag each anywhere). Click the toolbar icon to open the side panel for the full breakdown, Capsules, Skills and Settings. Requires Chrome 116+. The same works on [claude.ai](https://claude.ai) and [gemini.google.com](https://gemini.google.com).
 
 ---
 
