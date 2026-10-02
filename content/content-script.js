@@ -5407,6 +5407,17 @@ const STYLES = `
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 
+  /* Side panel page: the document itself is the .root (":host" above matches nothing outside a shadow root) */
+  .panelpage { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--bg); }
+  .panelpage > .tabs { flex: none; margin: 0; padding: 8px; border-bottom: 1px solid var(--border); }
+  .panelpage > .body { flex: 1; min-height: 0; }
+  .panelpage > .empty { margin: 24px 16px; text-align: center; color: var(--muted); }
+  .settings { padding: 4px 16px 16px; }
+  .settings .group { border: 0; margin-top: 12px; }
+  .settings legend { margin-bottom: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .settings .row { justify-content: flex-start; align-items: center; gap: 8px; cursor: pointer; }
+  .settings input { flex: none; accent-color: var(--accent); }
+
   .hide { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 `;
@@ -5436,7 +5447,7 @@ const STYLES = `
  */
 function CapsulePanel(parent, ctx) {
   const isSkill = ctx.kind === 'skill';
-  const provider = ctx.page.provider;
+  const provider = ctx.page.provider; // Fixed texts only: the side panel's page follows the active tab, so live uses read ctx.page.provider
   const noun = isSkill ? 'Skill' : 'Capsule';
   const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
   const view = h('div', 'body caps hide', parent);
@@ -5578,12 +5589,12 @@ function CapsulePanel(parent, ctx) {
   }
 
   /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */
-  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || provider }, Boolean(from?.handoff));
+  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || ctx.page.provider }, Boolean(from?.handoff));
 
   /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
   function openDraft(capsule, fromHandoff = false) {
     stopWaiting();
-    editing = { id: capsule.id || null, source: capsule.source || provider, fromHandoff };
+    editing = { id: capsule.id || null, source: capsule.source || ctx.page.provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
     // An Update's new text has no tags or project: the saved item's win. A new one starts in the
@@ -5642,7 +5653,7 @@ function CapsulePanel(parent, ctx) {
     const selection = await takeSelection();
     const capsule = await quickCapsule(selection, () => ctx.page.transcript());
     if (!capsule) return ctx.toast('Open a conversation first');
-    openDraft({ ...capsule, source: provider });
+    openDraft({ ...capsule, source: ctx.page.provider });
   }));
 
   // Step 3: the prompt plus this conversation wait in storage (and the clipboard) for another AI
@@ -5652,7 +5663,7 @@ function CapsulePanel(parent, ctx) {
     if (!messages.length) return ctx.toast('Open a conversation first');
     if (!ctx.storage) return ctx.toast('Storage unavailable');
     const prompt = buildCapsulePrompt(selection, formatTranscript(messages));
-    try { await saveHandoff(ctx.storage, { prompt, source: provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
+    try { await saveHandoff(ctx.storage, { prompt, source: ctx.page.provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
     navigator.clipboard?.writeText(prompt).catch(() => {});
     ctx.toast('Ready: open another AI → Capsules → Paste & create');
   }));
@@ -5751,11 +5762,11 @@ function CapsulePanel(parent, ctx) {
     // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
     if (!isSkill) {
       const upd = textButton(btns, 'Update', onPage(async () => {
-        if (limit) return ctx.toast(`${provider}'s limit is reached: update it later, or edit by hand`);
+        if (limit) return ctx.toast(`${ctx.page.provider}'s limit is reached: update it later, or edit by hand`);
         if (!(await ctx.page.hasConversation())) return ctx.toast('Open the chat with the new progress first');
         await promptAndWait(buildCapsulePrompt(await takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
       }));
-      upd.dataset.tip = `${provider} rewrites it with this chat's new progress`;
+      upd.dataset.tip = `${ctx.page.provider} rewrites it with this chat's new progress`;
     }
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
@@ -5783,7 +5794,7 @@ function CapsulePanel(parent, ctx) {
       renderList();
     }
     // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
-    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || provider);
+    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.page.provider);
     if (limit) setText(limitTextEl, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
     mode(current);
   }

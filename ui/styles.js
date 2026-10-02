@@ -168,6 +168,17 @@ export const STYLES = `
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 
+  /* Side panel page: the document itself is the .root (":host" above matches nothing outside a shadow root) */
+  .panelpage { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--bg); }
+  .panelpage > .tabs { flex: none; margin: 0; padding: 8px; border-bottom: 1px solid var(--border); }
+  .panelpage > .body { flex: 1; min-height: 0; }
+  .panelpage > .empty { margin: 24px 16px; text-align: center; color: var(--muted); }
+  .settings { padding: 4px 16px 16px; }
+  .settings .group { border: 0; margin-top: 12px; }
+  .settings legend { margin-bottom: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .settings .row { justify-content: flex-start; align-items: center; gap: 8px; cursor: pointer; }
+  .settings input { flex: none; accent-color: var(--accent); }
+
   .hide { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 `;

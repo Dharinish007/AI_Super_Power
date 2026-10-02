@@ -1,0 +1,58 @@
+/**
+ * Context Monitor - Settings tab: Widgets (two toggles, Context widget fields), Capsules (method),
+ * Context (alerts), Display (theme, compact numbers, sidebar badges). Every change is written at once;
+ * the widgets on every site pick it up through storage.onChanged.
+ */
+
+import { h } from './dom.js';
+import { CONTEXT_FIELDS, writeSettings } from '../content/settings.js';
+
+/**
+ * @param {HTMLElement} parent
+ * @param {{ storage: Object }} opts chrome.storage.local (or a fake)
+ * @returns {{ el: HTMLElement, update: (settings: Object) => void }} `update` shows the stored settings
+ */
+export function SettingsView(parent, { storage }) {
+  const el = h('div', 'body settings', parent);
+  const inputs = [];
+  const save = (patch) => writeSettings(storage, patch).catch((e) => console.warn('[Context Monitor] Settings not saved', e));
+
+  const group = (title) => { const g = h('fieldset', 'group', el); h('legend', null, g, title); return g; };
+  const input = (g, type, label, get, onChange) => {
+    const row = h('label', 'row', g);
+    const box = h('input', null, row);
+    box.type = type;
+    h('span', null, row, label);
+    box.addEventListener('change', onChange);
+    inputs.push((s) => { box.checked = get(s); });
+    return box;
+  };
+  const check = (g, label, get, patch) => { const box = input(g, 'checkbox', label, get, () => save(patch(box.checked))); return box; };
+  const radio = (g, name, value, label, get, patch) => {
+    const r = input(g, 'radio', label, s => get(s) === value, () => r.checked && save(patch(value)));
+    r.name = name;
+    r.value = value;
+  };
+
+  const w = group('Widgets');
+  check(w, 'Context widget', s => s.widgets.context.enabled, v => ({ widgets: { context: { enabled: v } } }));
+  check(w, 'Capsule widget', s => s.widgets.capsule.enabled, v => ({ widgets: { capsule: { enabled: v } } }));
+  h('div', 'fine', w, 'Context widget shows:');
+  // The ticked boxes, in CONTEXT_FIELDS order
+  const fields = () => ({ widgets: { context: { fields: CONTEXT_FIELDS.filter((_, i) => fieldBoxes[i].checked).map(f => f.key) } } });
+  const fieldBoxes = CONTEXT_FIELDS.map(f => check(w, f.label, s => s.widgets.context.fields.includes(f.key), fields));
+
+  const c = group('Capsules: one-click method');
+  radio(c, 'method', 'ask-ai', 'Ask this AI (fills the chat box; you press Enter)', s => s.capsule.method, v => ({ capsule: { method: v } }));
+  radio(c, 'method', 'quick', 'Quick (no AI): built from the page', s => s.capsule.method, v => ({ capsule: { method: v } }));
+
+  const x = group('Context');
+  check(x, 'Alerts at 80% and 95%', s => s.context.alerts, v => ({ context: { alerts: v } }));
+
+  const d = group('Display');
+  for (const t of ['auto', 'dark', 'light']) radio(d, 'theme', t, `Theme: ${t}`, s => s.display.theme, v => ({ display: { theme: v } }));
+  check(d, 'Compact numbers (61.3K)', s => s.display.compact, v => ({ display: { compact: v } }));
+  check(d, 'Usage % next to chats in the sidebar', s => s.display.badges, v => ({ display: { badges: v } }));
+
+  return { el, update(s) { for (const set of inputs) set(s); } };
+}

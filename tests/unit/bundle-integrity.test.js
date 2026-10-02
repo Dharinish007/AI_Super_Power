@@ -12,7 +12,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { EvidenceType as ClassifierEvidenceType, AccuracyClass } from '../../engine/context-classifier.js';
 import { EvidenceType as MergerEvidenceType } from '../../engine/evidence-merger.js';
-import { bundledContentScript } from '../../scripts/build.js';
+import { bundledContentScript, bundledSidePanel } from '../../scripts/build.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -68,6 +68,12 @@ export function runBundleIntegrityTests() {
   assert(
     bundleContent.replace(/\r\n/g, '\n') === bundledContentScript.replace(/\r\n/g, '\n'),
     'content/content-script.js is up to date with its sources (run `npm run build` after editing engine/, content/ or network/)'
+  );
+
+  const panelPath = path.join(rootDir, 'sidepanel', 'sidepanel.js');
+  assert(
+    fs.readFileSync(panelPath, 'utf8').replace(/\r\n/g, '\n') === bundledSidePanel.replace(/\r\n/g, '\n'),
+    'sidepanel/sidepanel.js is up to date with its sources (run `npm run build`)'
   );
 
   // 4. Bundle parses cleanly without SyntaxErrors

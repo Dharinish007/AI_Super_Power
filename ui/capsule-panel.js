@@ -21,7 +21,7 @@ import { h, textButton, download, setText, show, fmtK } from './dom.js';
  */
 export function CapsulePanel(parent, ctx) {
   const isSkill = ctx.kind === 'skill';
-  const provider = ctx.page.provider;
+  const provider = ctx.page.provider; // Fixed texts only: the side panel's page follows the active tab, so live uses read ctx.page.provider
   const noun = isSkill ? 'Skill' : 'Capsule';
   const fmt = isSkill ? formatSkillForInsert : formatForInsert; // Text that Insert / Copy / the cost use
   const view = h('div', 'body caps hide', parent);
@@ -163,12 +163,12 @@ export function CapsulePanel(parent, ctx) {
   }
 
   /** Draft of a Capsule just written for a hand-off / update (`from`), or for this chat. */
-  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || provider }, Boolean(from?.handoff));
+  const draftFrom = (capsule, from) => openDraft({ ...capsule, id: from?.id, source: from?.source || ctx.page.provider }, Boolean(from?.handoff));
 
   /** @param {boolean} [fromHandoff] Saving it also clears the hand-off */
   function openDraft(capsule, fromHandoff = false) {
     stopWaiting();
-    editing = { id: capsule.id || null, source: capsule.source || provider, fromHandoff };
+    editing = { id: capsule.id || null, source: capsule.source || ctx.page.provider, fromHandoff };
     titleIn.value = capsule.title || '';
     bodyIn.value = capsule.body || '';
     // An Update's new text has no tags or project: the saved item's win. A new one starts in the
@@ -227,7 +227,7 @@ export function CapsulePanel(parent, ctx) {
     const selection = await takeSelection();
     const capsule = await quickCapsule(selection, () => ctx.page.transcript());
     if (!capsule) return ctx.toast('Open a conversation first');
-    openDraft({ ...capsule, source: provider });
+    openDraft({ ...capsule, source: ctx.page.provider });
   }));
 
   // Step 3: the prompt plus this conversation wait in storage (and the clipboard) for another AI
@@ -237,7 +237,7 @@ export function CapsulePanel(parent, ctx) {
     if (!messages.length) return ctx.toast('Open a conversation first');
     if (!ctx.storage) return ctx.toast('Storage unavailable');
     const prompt = buildCapsulePrompt(selection, formatTranscript(messages));
-    try { await saveHandoff(ctx.storage, { prompt, source: provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
+    try { await saveHandoff(ctx.storage, { prompt, source: ctx.page.provider }); } catch (_) { return ctx.toast('Hand-off failed'); }
     navigator.clipboard?.writeText(prompt).catch(() => {});
     ctx.toast('Ready: open another AI → Capsules → Paste & create');
   }));
@@ -336,11 +336,11 @@ export function CapsulePanel(parent, ctx) {
     // Update: this AI rewrites the Capsule with this chat's new progress; saving replaces it
     if (!isSkill) {
       const upd = textButton(btns, 'Update', onPage(async () => {
-        if (limit) return ctx.toast(`${provider}'s limit is reached: update it later, or edit by hand`);
+        if (limit) return ctx.toast(`${ctx.page.provider}'s limit is reached: update it later, or edit by hand`);
         if (!(await ctx.page.hasConversation())) return ctx.toast('Open the chat with the new progress first');
         await promptAndWait(buildCapsulePrompt(await takeSelection(), '', capsule), { id: capsule.id, source: capsule.source });
       }));
-      upd.dataset.tip = `${provider} rewrites it with this chat's new progress`;
+      upd.dataset.tip = `${ctx.page.provider} rewrites it with this chat's new progress`;
     }
     textButton(btns, 'Edit', () => openDraft(capsule));
     const del = textButton(btns, 'Delete', async () => {
@@ -368,7 +368,7 @@ export function CapsulePanel(parent, ctx) {
       renderList();
     }
     // "GPT-5 limit reached" (not "Messages · gpt-5"), "Session (5h) limit reached", "Gemini usage limit reached"
-    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || provider);
+    const name = limit && (String(limit.key).startsWith('model:') ? formatModelName(limit.key.slice(6)) : limit.label || ctx.page.provider);
     if (limit) setText(limitTextEl, `⚠️ ${name} limit reached${limit.resetIn ? ` · resets in ${limit.resetIn}` : ''}`);
     mode(current);
   }
