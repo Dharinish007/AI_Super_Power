@@ -24,6 +24,8 @@ export const CAPSULE_MAX_SELECTION = 4000;
 export const CAPSULES_KEY = 'capsules';
 export const SKILLS_KEY = 'skills';
 export const CAPSULE_HANDOFF_KEY = 'capsuleHandoff';
+/** Memory categories (content/memory.js); the shared store keeps `category` / `key` only when valid. */
+export const MEMORY_CATEGORIES = ['profile', 'preference', 'project', 'instruction', 'skill', 'decision', 'other'];
 // Hand-off conversation size: ~15K tokens, fits even Gemini's free 32K window with room for the reply
 export const CAPSULE_MAX_TRANSCRIPT = 60000;
 const HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
@@ -302,6 +304,21 @@ export const STARTER_SKILLS = [
 
 const newCapsuleId = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
 
+/** Memory key "category.topic-with-dashes" (topic <= 40 characters), or null. */
+export function normalizeMemoryKey(input) {
+  if (typeof input !== 'string') return null;
+  const [cat, ...rest] = input.trim().toLowerCase().split('.');
+  const topic = rest.join('-').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return MEMORY_CATEGORIES.includes(cat) && topic ? `${cat}.${topic}` : null;
+}
+
+/** Memory-only fields: given ones replace, missing ones are kept; absent when never set (Capsules, Skills). */
+function memoryFields(c, old = null) {
+  const category = MEMORY_CATEGORIES.includes(c?.category) ? c.category : old?.category;
+  const key = c?.key !== undefined ? normalizeMemoryKey(c.key) : old?.key;
+  return { ...(category ? { category } : {}), ...(key ? { key } : {}) };
+}
+
 /**
  * Capsules (or Skills) in a chrome.storage area, newest first: { id, title, body, source, createdAt, updatedAt }.
  * ponytail: read-modify-write of one list; two tabs saving in the same instant can drop one save.
@@ -310,13 +327,16 @@ const newCapsuleId = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() 
 export class CapsuleStore {
   /**
    * @param {{ get: Function, set: Function }} area chrome.storage.local (or a fake with the same API)
-   * @param {{ key?: string, noun?: string }} [opts] Storage key and item name ('Capsule' / 'Skill') for
-   *   defaults, errors and the export file
+   * @param {{ key?: string, noun?: string, plural?: string, reject?: ((item: Object) => string|null)|null }} [opts]
+   *   Storage key, item name ('Capsule' / 'Skill' / 'Memory') and its plural for defaults, errors and the
+   *   export file; `reject` refuses an item (save throws its message, import skips it)
    */
-  constructor(area, { key = CAPSULES_KEY, noun = 'Capsule' } = {}) {
+  constructor(area, { key = CAPSULES_KEY, noun = 'Capsule', plural = `${noun}s`, reject = null } = {}) {
     this.area = area;
     this.key = key;
     this.noun = noun;
+    this.plural = plural;
+    this.reject = reject;
   }
 
   async list() {
@@ -350,9 +370,12 @@ export class CapsuleStore {
       tags: normalizeTags(capsule.tags ?? old?.tags),
       project: normalizeProject(capsule.project !== undefined ? capsule.project : old?.project),
       pinned: Boolean(capsule.pinned ?? old?.pinned),
+      ...memoryFields(capsule, old),
       createdAt: old ? old.createdAt : now,
       updatedAt: now
     };
+    const why = this.reject?.(item);
+    if (why) throw new Error(why);
     if (i >= 0) list[i] = item; else list.unshift(item);
     await this.area.set({ [this.key]: list });
     return item;
@@ -381,7 +404,7 @@ export class CapsuleStore {
    */
   async importMany(json, now = Date.now()) {
     let data;
-    const wrong = `Not a ${this.noun}s file`;
+    const wrong = `Not a ${this.plural} file`;
     try { data = JSON.parse(json); } catch (e) { throw new Error(wrong, { cause: e }); }
     const items = Array.isArray(data) ? data : data?.[this.key];
     if (!Array.isArray(items)) throw new Error(wrong);
@@ -391,7 +414,7 @@ export class CapsuleStore {
     for (const raw of items) {
       const c = normalizeCapsule(raw, now, this.noun);
       const i = c ? byId.get(c.id) : undefined;
-      if (!c || (i !== undefined && !(c.updatedAt > list[i].updatedAt))) { counts.skipped++; continue; }
+      if (!c || this.reject?.(c) || (i !== undefined && !(c.updatedAt > list[i].updatedAt))) { counts.skipped++; continue; }
       if (i !== undefined) { list[i] = c; counts.updated++; } else { byId.set(c.id, list.length); list.push(c); counts.added++; }
     }
     list.sort((a, b) => b.createdAt - a.createdAt);
@@ -422,6 +445,7 @@ export function normalizeCapsule(raw, now = Date.now(), noun = 'Capsule') {
     tags: normalizeTags(raw.tags),
     project: normalizeProject(raw.project),
     pinned: raw.pinned === true,
+    ...memoryFields(raw),
     createdAt,
     updatedAt: Math.max(createdAt, time(raw.updatedAt))
   };

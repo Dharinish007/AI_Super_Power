@@ -8,7 +8,8 @@ import {
   buildCapsulePrompt, parseCapsule, readLatestCapsule, latestReplyText, formatForInsert, CapsuleStore, insertText,
   chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
   formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert,
-  normalizeTags, normalizeProject, projectsOf, searchItems, formatManyForInsert, captureCapsule
+  normalizeTags, normalizeProject, projectsOf, searchItems, formatManyForInsert, captureCapsule,
+  MEMORY_CATEGORIES, normalizeMemoryKey
 } from '../../content/capsule.js';
 
 /** chrome.storage.local stand-in */
@@ -344,5 +345,25 @@ export async function runCapsuleTests() {
   await captureCapsule({ method: 'quick', page: fakePage({ sel: 'Only this part\nmore' }), store: cs7, onStatus: statuses(st7) });
   assert('Quick with a selection: selection kept as-is', (await cs7.list())[0].body === 'Only this part\nmore' && (await cs7.list())[0].title === 'Only this part');
   assert('Export file names the product', JSON.parse(exportCapsules([], CAPSULES_KEY)).app === 'ai-super-powers');
+
+  // Memory support in the shared store
+  assert('Memory categories', MEMORY_CATEGORIES.join() === 'profile,preference,project,instruction,skill,decision,other');
+  assert('Memory key normalized', normalizeMemoryKey(' Preference.Favorite Fruit ') === 'preference.favorite-fruit');
+  assert('Memory key: unknown category or no topic is null', normalizeMemoryKey('food.mango') === null && normalizeMemoryKey('profile.') === null && normalizeMemoryKey(5) === null);
+  const ms = new CapsuleStore(fakeArea(), { key: 'memories', noun: 'Memory', plural: 'Memories', reject: (i) => (i.body.includes('sk-') ? 'Looks like a secret: not saved' : null) });
+  const m1 = await ms.save({ title: 'Likes mango', body: 'Likes mango', category: 'preference', key: 'preference.favorite-fruit' });
+  assert('Store keeps category and key', m1.category === 'preference' && m1.key === 'preference.favorite-fruit');
+  const m2 = await ms.save({ id: m1.id, title: 'Likes apple', body: 'Likes apple' });
+  assert('Edit without category / key keeps them', m2.category === 'preference' && m2.key === 'preference.favorite-fruit');
+  const c1 = await new CapsuleStore(fakeArea()).save({ title: 't', body: 'b', category: 'profile', key: 'profile.name' });
+  assert('Store keeps valid memory fields given to any list', c1.category === 'profile');
+  const c2 = await new CapsuleStore(fakeArea()).save({ title: 't', body: 'b' });
+  assert('Capsule without memory fields has none', !('category' in c2) && !('key' in c2));
+  let rej = null; try { await ms.save({ body: 'my key sk-abc' }); } catch (e) { rej = e.message; }
+  assert('Reject hook refuses a save', rej === 'Looks like a secret: not saved' && (await ms.list()).length === 1);
+  const memImp = await ms.importMany(JSON.stringify({ memories: [{ id: 'a1', body: 'ok fact' }, { id: 'a2', body: 'sk-secret' }] }));
+  assert('Reject hook skips imported items', memImp.added === 1 && memImp.skipped === 1);
+  let wrongFile = null; try { await ms.importMany('{}'); } catch (e) { wrongFile = e.message; }
+  assert('Import error uses the plural', wrongFile === 'Not a Memories file');
   return { passed, failed };
 }
