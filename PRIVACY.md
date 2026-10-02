@@ -14,8 +14,8 @@ AI Super Powers is a browser extension that shows how much of the AI model's con
 
 ## What it does with that data
 
-- All text is processed locally to count tokens. It never leaves the page, and it is stored only when you save a Capsule (below).
-- **Memory:** facts you save (or approve after **Learn from this chat**) are stored in your browser. Learn only puts a prompt in the chat box; you choose whether to send it. Facts that look like passwords, keys, tokens or card numbers are never stored.
+- All text is processed locally to count tokens. It never leaves the page, and it is stored only when you save a Capsule, Skill or Memory, or when **Learn from this chat** puts a fact in the review inbox (below).
+- **Memory:** facts you save are stored in your browser. **Learn from this chat** only puts a prompt in the chat box; you choose whether to send it. When the AI answers, the extension reads that reply to find the facts and puts them in a review inbox (at most 50), where they wait in your browser until you approve (✅) or reject (❌) each one; only approved facts become Memories. **Inject memory** puts saved facts in the chat box, and only you send them. Facts that look like passwords, keys, tokens or card numbers are never stored, and nothing leaves your browser except what you send to the site yourself.
 - **Capsules:** when you click Create Capsule, the extension puts a prompt in the site's chat box; you choose whether to send it. When you click Save, that Capsule's title and text are stored in your browser. Insert puts a saved Capsule in the chat box of the site you are on, and only you send it. **Make in another AI** stores the Capsule prompt with the visible conversation in your browser (and copies it) until you paste it into another AI, save the result or dismiss it; it is deleted after a day.
 - Network requests go only to the site you are using, the same requests the site makes itself. Nothing is sent to the developer or any third party.
 - The ChatGPT session token and the Gemini request token are kept only in memory while the page is open. They are never saved, logged, or included in diagnostics.
@@ -37,7 +37,7 @@ Nothing else is stored: no other message text, no ChatGPT saved-memory text, tok
 
 - No analytics, tracking, advertising or remote logging.
 - No selling or sharing of data with anyone.
-- No use of data for any purpose other than showing context usage.
+- No use of data for any purpose other than showing context usage and the Capsules, Skills and Memory you ask for.
 
 ## Removing data
 
