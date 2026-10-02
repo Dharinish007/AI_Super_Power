@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "AI Context Monitor",
-  "short_name": "Context Monitor",
+  "name": "AI Super Powers",
+  "short_name": "Super Powers",
   "version": "1.1.0",
   "description": "Shows context-window usage for ChatGPT, Claude and Gemini conversations, computed locally in your browser.",
   "minimum_chrome_version": "116",
@@ -11,7 +11,7 @@
     "128": "assets/icons/icon-128.png"
   },
   "action": {
-    "default_title": "AI Context Monitor: open the side panel",
+    "default_title": "AI Super Powers: open the side panel",
     "default_icon": {
       "16": "assets/icons/icon-16.png",
       "48": "assets/icons/icon-48.png",

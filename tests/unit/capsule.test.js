@@ -343,5 +343,6 @@ export async function runCapsuleTests() {
   const cs7 = new CapsuleStore(fakeArea()); const st7 = [];
   await captureCapsule({ method: 'quick', page: fakePage({ sel: 'Only this part\nmore' }), store: cs7, onStatus: statuses(st7) });
   assert('Quick with a selection: selection kept as-is', (await cs7.list())[0].body === 'Only this part\nmore' && (await cs7.list())[0].title === 'Only this part');
+  assert('Export file names the product', JSON.parse(exportCapsules([], CAPSULES_KEY)).app === 'ai-super-powers');
   return { passed, failed };
 }

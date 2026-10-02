@@ -1,8 +1,8 @@
-# AI Context Monitor: Privacy Policy
+# AI Super Powers: Privacy Policy
 
 _Last updated: 2026-10-01_
 
-AI Context Monitor is a browser extension that shows how much of the AI model's context window your current conversation uses on ChatGPT, Claude and Gemini. All of its work happens inside your browser.
+AI Super Powers is a browser extension that shows how much of the AI model's context window your current conversation uses on ChatGPT, Claude and Gemini. All of its work happens inside your browser.
 
 ## What the extension reads
 

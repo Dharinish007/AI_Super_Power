@@ -1,4 +1,4 @@
-# AI Context Monitor
+# AI Super Powers
 
 > A production-grade Chrome Extension (Manifest V3) for ChatGPT, Claude and Gemini that calculates and displays the **most accurate possible context-window utilization** for the current conversation without fabricating unobservable server-side data.
 
@@ -8,7 +8,7 @@
 
 None of these sites expose an exact, authoritative context-token counter in the DOM. Many third-party tools falsely claim that summing DOM message tokens represents 100% of the model's context window.
 
-**AI Context Monitor** solves this by adhering to the **Truth-in-Measurement Standard**:
+**AI Super Powers** solves this by adhering to the **Truth-in-Measurement Standard**:
 - Calculates local, high-precision BPE token estimates from observable conversation text.
 - Resolves context limits against a versioned, verified OpenAI model database (`config/model-limits.json`).
 - Explicitly labels every metric with its epistemic classification:

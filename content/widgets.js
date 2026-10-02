@@ -426,7 +426,7 @@ export class Widgets {
       }
       const text = `${u.pct}%`;
       if (badge.textContent !== text) badge.textContent = text;
-      badge.title = `Context ${text} full (Context Monitor)`;
+      badge.title = `Context ${text} full (AI Super Powers)`;
       const color = u.pct > 85 ? '#F87171' : u.pct >= 60 ? '#FBBF24' : '';
       if (badge.style.color !== color) badge.style.color = color;
     }

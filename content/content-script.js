@@ -4774,7 +4774,7 @@ class CapsuleStore {
 
 /** Export file text: every Capsule (or Skill: key 'skills'), newest first. */
 function exportCapsules(list, key = CAPSULES_KEY) {
-  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), [key]: list }, null, 2);
+  return JSON.stringify({ app: 'ai-super-powers', version: 1, exportedAt: Date.now(), [key]: list }, null, 2);
 }
 
 /**
@@ -5928,7 +5928,7 @@ class Widgets {
       }
       const text = `${u.pct}%`;
       if (badge.textContent !== text) badge.textContent = text;
-      badge.title = `Context ${text} full (Context Monitor)`;
+      badge.title = `Context ${text} full (AI Super Powers)`;
       const color = u.pct > 85 ? '#F87171' : u.pct >= 60 ? '#FBBF24' : '';
       if (badge.style.color !== color) badge.style.color = color;
     }

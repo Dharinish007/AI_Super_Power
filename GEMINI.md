@@ -49,7 +49,7 @@ The extension operates across three isolated browser contexts coordinated via me
   ▲
   │ port `panel`: tab pushes STATE, panel sends CALL
   ▼
-[ SIDE PANEL ] (sidepanel/sidepanel.html + main.js, built into sidepanel/sidepanel.js; tabs Context | Capsules | Skills | Settings)
+[ SIDE PANEL ] (sidepanel/sidepanel.html + main.js, built into sidepanel/sidepanel.js; tabs Context | Brain (Memory · Capsules · Skills) | Settings)
 ```
 
 ### Build Pipeline Invariant

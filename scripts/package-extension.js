@@ -87,6 +87,6 @@ function zip(entries) {
   return Buffer.concat([...local, centralBuf, end]);
 }
 
-const zipPath = path.join(distDir, `ai-context-monitor-${manifest.version}.zip`);
+const zipPath = path.join(distDir, `ai-super-powers-${manifest.version}.zip`);
 fs.writeFileSync(zipPath, zip(filesToInclude.map(rel => ({ name: rel, data: fs.readFileSync(path.join(rootDir, rel)) }))));
 console.log(`📦 Store upload: ${path.relative(rootDir, zipPath)} (${(fs.statSync(zipPath).size / 1024).toFixed(1)} KB)\n`);

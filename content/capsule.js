@@ -402,7 +402,7 @@ export class CapsuleStore {
 
 /** Export file text: every Capsule (or Skill: key 'skills'), newest first. */
 export function exportCapsules(list, key = CAPSULES_KEY) {
-  return JSON.stringify({ app: 'ai-context-monitor', version: 1, exportedAt: Date.now(), [key]: list }, null, 2);
+  return JSON.stringify({ app: 'ai-super-powers', version: 1, exportedAt: Date.now(), [key]: list }, null, 2);
 }
 
 /**

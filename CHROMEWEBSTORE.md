@@ -2,8 +2,8 @@
 
 ## 1. Extension Metadata
 
-- **Name:** AI Context Monitor
-- **Short Name:** Context Monitor
+- **Name:** AI Super Powers
+- **Short Name:** Super Powers
 - **Version:** 1.1.0
 - **Primary Category:** Productivity
 - **Secondary Category:** Developer Tools
@@ -20,7 +20,7 @@
 See how much of the context window your ChatGPT, Claude or Gemini chat uses. Computed locally; hidden context is marked unknown.
 
 ### Detailed Description
-AI Context Monitor shows a compact meter on ChatGPT, Claude and Gemini with how much of the model's context window the current conversation uses.
+AI Super Powers shows a compact meter on ChatGPT, Claude and Gemini with how much of the model's context window the current conversation uses.
 
 Key Features:
 - Context meter: estimated conversation tokens against the context window of the detected model and plan. Limits come from a dated table bundled with the extension, sourced from each provider's public pricing and help pages.
