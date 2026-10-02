@@ -118,6 +118,7 @@ export function CapsulePanel(parent, ctx) {
   let items = []; // Saved Capsules (or Skills), newest first
   let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
   let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
+  let tokenProvider = ctx.page.provider; // the panel's page follows the active tab: counts differ per provider
   const tokenCache = new Map(); // `${id}:${updatedAt}` -> Promise of the estimated tokens
 
   let pendingSelection = null; // Promise of the selection read on press
@@ -360,6 +361,7 @@ export function CapsulePanel(parent, ctx) {
 
   /** @param {Object} vm Widget view state: limits, and this chat's window for the cost lines */
   function setView(vm) {
+    if (ctx.page.provider !== tokenProvider) { tokenProvider = ctx.page.provider; tokenCache.clear(); view_.sig = null; }
     limit = chatLimitReached(vm?.limits);
     const contextLimit = vm?.contextLimit || null;
     const remaining = Number.isFinite(vm?.remainingTokens) ? vm.remainingTokens : null;

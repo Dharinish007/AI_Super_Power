@@ -5130,13 +5130,8 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 
 const ICONS = {
   chevron: 'M4 6l4 4 4-4',
-  collapse: 'M4 8h8',
-  close: 'M4.5 4.5l7 7M11.5 4.5l-7 7',
   refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
-  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
-  auto: 'M8 2.5a5.5 5.5 0 1 0 0 11zM8 2.5a5.5 5.5 0 0 1 0 11',
-  dark: 'M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z',
-  light: 'M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1'
+  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z'
 };
 
 const fmtK = (n) => {
@@ -5362,21 +5357,12 @@ const STYLES = `
     background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); white-space: nowrap;
     font-weight: 600; cursor: grab; touch-action: none; user-select: none; }
   .pill .num { font-family: var(--mono); font-size: 12.5px; }
-  .pill .sep, .pill .lvl { color: var(--muted); font-weight: 500; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.HIGH { background: var(--good); } .dot.MEDIUM { background: var(--warn); } .dot.LOW { background: var(--muted); }
 
-  /* Panel (expanded) */
-  .panel { width: 320px; display: flex; flex-direction: column; max-height: 70vh; border-radius: 12px; overflow: hidden;
-    background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
   @supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
-    .panel, .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
   }
-  .open .panel { animation: in .15s ease; }
-  @keyframes in { from { opacity: 0; transform: translateY(-4px); } }
-  .head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border);
-    cursor: grab; touch-action: none; user-select: none; }
-  .dragging .pill, .dragging .head { cursor: grabbing; }
   .ib { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); flex: none; }
   .ib:hover { background: var(--hover); color: var(--text); }
   .ib:disabled { opacity: .5; cursor: default; }
@@ -5450,9 +5436,6 @@ const STYLES = `
   .toast.show { opacity: 1; }
   .spark { display: block; width: 100%; height: 40px; }
   .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
-  .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
-    font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
-  .tip.show { opacity: 1; }
 
   /* Tabs (header) */
   .tabs { flex: 1; min-width: 0; display: flex; gap: 2px; margin-left: -8px; }
@@ -5846,6 +5829,7 @@ class Widgets {
 
   /** R11: errors become a status; the run handle is dropped on saved / error / cancelled. */
   async _capsuleClick() {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id) return this._capsuleStatus({ state: 'error', text: 'Extension updated: reload the page' });
     if (this.run) return this._cancelRun();
     if (this._capturing) return;
     this._capturing = true;
@@ -5983,15 +5967,6 @@ class Widgets {
     this._saveTimer = setTimeout(() => {
       try { this._storage()?.set({ [this._storeKey]: { pos: this.pos } }).catch(() => {}); } catch (_) {}
     }, 200);
-  }
-
-  unmount() {
-    this._badgeObserver?.disconnect();
-    this._cancelRun();
-    this.ctx?.host.remove();
-    this.cap?.host.remove();
-    this.ctx = null;
-    this.cap = null;
   }
 }
 
@@ -6483,9 +6458,7 @@ class ContentScriptCoordinator {
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
       userSelector: "[data-message-author-role='user']",
-      countTokens: (text) => this.tokenizer.countTokens(text),
-      onRefresh: () => this.refresh(),
-      getDiagnostics: () => this.getDiagnostics()
+      countTokens: (text) => this.tokenizer.countTokens(text)
     });
     this.domObserver = null;
     this.latestState = null;
@@ -7985,9 +7958,7 @@ class ProviderCoordinator {
       countTokens: (text) => {
         const { encoding, scale } = this._counting();
         return Math.round(this.tokenizer.countTokens(text, encoding) * scale);
-      },
-      onRefresh: () => this.refresh(),
-      getDiagnostics: () => this.getDiagnostics()
+      }
     });
     this.domObserver = null;
     this.latestState = null;

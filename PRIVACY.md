@@ -27,7 +27,9 @@ AI Context Monitor is a browser extension that shows how much of the AI model's 
 - A Capsules or Skills file, only when you click Export: it is downloaded to your device by your browser and goes nowhere else. Import reads a file you pick.
 - `chrome.storage.local`: at most one pending hand-off (Capsule prompt plus the conversation you chose to hand off), removed when used, dismissed, or after a day.
 
-Nothing else is stored: no other message text, no memory text, conversation IDs, tokens or cookies. The toolbar badge receives only the current percentage.
+- `chrome.storage.local`: for the sidebar badges, the usage percentage of up to 200 recent chats per site, keyed by the site's own chat ID (no titles or text).
+
+Nothing else is stored: no other message text, no memory text, tokens or cookies. The toolbar badge receives only the current percentage.
 
 ## What it does not do
 

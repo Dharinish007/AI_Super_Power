@@ -49,7 +49,7 @@ export function SettingsView(parent, { storage }) {
   radio(c, 'method', 'quick', 'Quick (no AI): built from the page', s => s.capsule.method, v => ({ capsule: { method: v } }));
 
   const x = group('Context');
-  check(x, 'Alerts at 80% and 95%', s => s.context.alerts, v => ({ context: { alerts: v } }));
+  check(x, 'Alerts at 80% and 95% (on the Context widget)', s => s.context.alerts, v => ({ context: { alerts: v } }));
 
   const d = group('Display');
   for (const t of ['auto', 'dark', 'light']) radio(d, 'theme', t, `Theme: ${t}`, s => s.display.theme, v => ({ display: { theme: v } }));

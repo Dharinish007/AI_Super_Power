@@ -1044,13 +1044,8 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 
 const ICONS = {
   chevron: 'M4 6l4 4 4-4',
-  collapse: 'M4 8h8',
-  close: 'M4.5 4.5l7 7M11.5 4.5l-7 7',
   refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
-  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
-  auto: 'M8 2.5a5.5 5.5 0 1 0 0 11zM8 2.5a5.5 5.5 0 0 1 0 11',
-  dark: 'M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z',
-  light: 'M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1'
+  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z'
 };
 
 const fmtK = (n) => {
@@ -1276,21 +1271,12 @@ const STYLES = `
     background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); white-space: nowrap;
     font-weight: 600; cursor: grab; touch-action: none; user-select: none; }
   .pill .num { font-family: var(--mono); font-size: 12.5px; }
-  .pill .sep, .pill .lvl { color: var(--muted); font-weight: 500; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.HIGH { background: var(--good); } .dot.MEDIUM { background: var(--warn); } .dot.LOW { background: var(--muted); }
 
-  /* Panel (expanded) */
-  .panel { width: 320px; display: flex; flex-direction: column; max-height: 70vh; border-radius: 12px; overflow: hidden;
-    background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
   @supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
-    .panel, .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
   }
-  .open .panel { animation: in .15s ease; }
-  @keyframes in { from { opacity: 0; transform: translateY(-4px); } }
-  .head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border);
-    cursor: grab; touch-action: none; user-select: none; }
-  .dragging .pill, .dragging .head { cursor: grabbing; }
   .ib { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); flex: none; }
   .ib:hover { background: var(--hover); color: var(--text); }
   .ib:disabled { opacity: .5; cursor: default; }
@@ -1364,9 +1350,6 @@ const STYLES = `
   .toast.show { opacity: 1; }
   .spark { display: block; width: 100%; height: 40px; }
   .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
-  .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
-    font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
-  .tip.show { opacity: 1; }
 
   /* Tabs (header) */
   .tabs { flex: 1; min-width: 0; display: flex; gap: 2px; margin-left: -8px; }
@@ -1551,6 +1534,7 @@ function CapsulePanel(parent, ctx) {
   let items = []; // Saved Capsules (or Skills), newest first
   let seeded = false; // Skills: starters offered once per page (CapsuleStore.seed skips a list already written)
   let view_ = { sig: null, contextLimit: null, remaining: null }; // This chat's window, for cost lines
+  let tokenProvider = ctx.page.provider; // the panel's page follows the active tab: counts differ per provider
   const tokenCache = new Map(); // `${id}:${updatedAt}` -> Promise of the estimated tokens
 
   let pendingSelection = null; // Promise of the selection read on press
@@ -1793,6 +1777,7 @@ function CapsulePanel(parent, ctx) {
 
   /** @param {Object} vm Widget view state: limits, and this chat's window for the cost lines */
   function setView(vm) {
+    if (ctx.page.provider !== tokenProvider) { tokenProvider = ctx.page.provider; tokenCache.clear(); view_.sig = null; }
     limit = chatLimitReached(vm?.limits);
     const contextLimit = vm?.contextLimit || null;
     const remaining = Number.isFinite(vm?.remainingTokens) ? vm.remainingTokens : null;
@@ -1926,8 +1911,7 @@ function CapsulePanel(parent, ctx) {
  * @param {HTMLElement} parent
  * @param {{ actions: { refresh: () => any, copyDiagnostics: () => any, exportChat: (format: string) => any, saveAsCapsule: () => any },
  *   settings: { display: { compact: boolean } } }} opts
- * @returns {{ el: HTMLElement, foot: HTMLElement, bar: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
- *   `bar` is the usage bar (the widget pulses it on alerts)
+ * @returns {{ el: HTMLElement, foot: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
  */
 function ContextView(parent, { actions, settings }) {
   let cfg = settings;
@@ -2138,7 +2122,7 @@ function ContextView(parent, { actions, settings }) {
     setText(confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
   }
 
-  return { el, foot, bar, update, setSettings(s) { cfg = s; } };
+  return { el, foot, update, setSettings(s) { cfg = s; } };
 }
 
 
@@ -2194,7 +2178,7 @@ function SettingsView(parent, { storage }) {
   radio(c, 'method', 'quick', 'Quick (no AI): built from the page', s => s.capsule.method, v => ({ capsule: { method: v } }));
 
   const x = group('Context');
-  check(x, 'Alerts at 80% and 95%', s => s.context.alerts, v => ({ context: { alerts: v } }));
+  check(x, 'Alerts at 80% and 95% (on the Context widget)', s => s.context.alerts, v => ({ context: { alerts: v } }));
 
   const d = group('Display');
   for (const t of ['auto', 'dark', 'light']) radio(d, 'theme', t, `Theme: ${t}`, s => s.display.theme, v => ({ display: { theme: v } }));

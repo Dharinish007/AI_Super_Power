@@ -39,7 +39,7 @@ Key Features:
 Every declared permission serves a single necessary purpose.
 
 ### `storage`
-- **Justification:** Saves settings (widget choices, Capsule method, display options), widget positions per site, the last plan-usage percentages, the Capsules and Skills the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. Nothing else is stored: no other message text and no conversation IDs.
+- **Justification:** Saves settings (widget choices, Capsule method, display options), widget positions per site, the last plan-usage percentages, the Capsules and Skills the user explicitly saves (title and text), and at most one pending hand-off the user created (Capsule prompt plus that conversation, deleted after use or a day) in `chrome.storage.local`. For the sidebar badges it also stores the usage percentage of up to 200 recent chats per site, keyed by the site's own chat ID. Nothing else is stored: no other message text.
 
 ### `sidePanel`
 - **Justification:** Shows the extension's main view (context, Capsules, Skills, settings) next to the chat. No data leaves the browser.
@@ -83,7 +83,7 @@ Every declared permission serves a single necessary purpose.
 - [x] Extension Icon (48x48 px) — `assets/icons/icon-48.png`
 - [x] Extension Icon (128x128 px) — `assets/icons/icon-128.png`
 - [ ] Promotional Tile (440x280 px)
-- [ ] Screenshot 1 (1280x800 px) — collapsed status bar on a ChatGPT conversation
-- [ ] Screenshot 2 (1280x800 px) — widget expanded with the full context breakdown
-- [ ] Screenshot 3 (1280x800 px) — widget on Claude showing plan usage limits
+- [ ] Screenshot 1 (1280x800 px) — Context and Capsule pills on a ChatGPT conversation
+- [ ] Screenshot 2 (1280x800 px) — side panel, Context tab with the full context breakdown
+- [ ] Screenshot 3 (1280x800 px) — side panel on Claude showing plan usage limits
 - [ ] Privacy policy URL: publish `PRIVACY.md` (e.g. https://github.com/Dharinish007/ChatGPT-context-window/blob/main/PRIVACY.md once merged)

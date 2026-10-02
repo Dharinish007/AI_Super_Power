@@ -30,21 +30,12 @@ export const STYLES = `
     background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); white-space: nowrap;
     font-weight: 600; cursor: grab; touch-action: none; user-select: none; }
   .pill .num { font-family: var(--mono); font-size: 12.5px; }
-  .pill .sep, .pill .lvl { color: var(--muted); font-weight: 500; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.HIGH { background: var(--good); } .dot.MEDIUM { background: var(--warn); } .dot.LOW { background: var(--muted); }
 
-  /* Panel (expanded) */
-  .panel { width: 320px; display: flex; flex-direction: column; max-height: 70vh; border-radius: 12px; overflow: hidden;
-    background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
   @supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
-    .panel, .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    .pill { background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
   }
-  .open .panel { animation: in .15s ease; }
-  @keyframes in { from { opacity: 0; transform: translateY(-4px); } }
-  .head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--border);
-    cursor: grab; touch-action: none; user-select: none; }
-  .dragging .pill, .dragging .head { cursor: grabbing; }
   .ib { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); flex: none; }
   .ib:hover { background: var(--hover); color: var(--text); }
   .ib:disabled { opacity: .5; cursor: default; }
@@ -118,9 +109,6 @@ export const STYLES = `
   .toast.show { opacity: 1; }
   .spark { display: block; width: 100%; height: 40px; }
   .spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
-  .tip { position: absolute; z-index: 1; max-width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--text); color: var(--surface);
-    font-size: 11px; line-height: 1.4; pointer-events: none; opacity: 0; transition: opacity .1s ease; }
-  .tip.show { opacity: 1; }
 
   /* Tabs (header) */
   .tabs { flex: 1; min-width: 0; display: flex; gap: 2px; margin-left: -8px; }

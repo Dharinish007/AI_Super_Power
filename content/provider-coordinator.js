@@ -61,9 +61,7 @@ export class ProviderCoordinator {
       countTokens: (text) => {
         const { encoding, scale } = this._counting();
         return Math.round(this.tokenizer.countTokens(text, encoding) * scale);
-      },
-      onRefresh: () => this.refresh(),
-      getDiagnostics: () => this.getDiagnostics()
+      }
     });
     this.domObserver = null;
     this.latestState = null;

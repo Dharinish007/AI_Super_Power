@@ -120,9 +120,7 @@ export class ContentScriptCoordinator {
       findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
       replySelector: "[data-message-author-role='assistant']",
       userSelector: "[data-message-author-role='user']",
-      countTokens: (text) => this.tokenizer.countTokens(text),
-      onRefresh: () => this.refresh(),
-      getDiagnostics: () => this.getDiagnostics()
+      countTokens: (text) => this.tokenizer.countTokens(text)
     });
     this.domObserver = null;
     this.latestState = null;

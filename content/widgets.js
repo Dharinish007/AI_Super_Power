@@ -327,6 +327,7 @@ export class Widgets {
 
   /** R11: errors become a status; the run handle is dropped on saved / error / cancelled. */
   async _capsuleClick() {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id) return this._capsuleStatus({ state: 'error', text: 'Extension updated: reload the page' });
     if (this.run) return this._cancelRun();
     if (this._capturing) return;
     this._capturing = true;
@@ -464,14 +465,5 @@ export class Widgets {
     this._saveTimer = setTimeout(() => {
       try { this._storage()?.set({ [this._storeKey]: { pos: this.pos } }).catch(() => {}); } catch (_) {}
     }, 200);
-  }
-
-  unmount() {
-    this._badgeObserver?.disconnect();
-    this._cancelRun();
-    this.ctx?.host.remove();
-    this.cap?.host.remove();
-    this.ctx = null;
-    this.cap = null;
   }
 }

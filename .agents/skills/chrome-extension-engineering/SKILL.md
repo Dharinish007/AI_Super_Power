@@ -122,7 +122,7 @@ content/
 ├── claude-limit-watcher.js           # MAIN world (Claude): forwards only the usage-limit event
 ├── content-main.js                   # ChatGPT coordinator
 ├── provider-coordinator.js           # Claude / Gemini coordinator (adapters in providers.js)
-├── coordinator-common.js             # Badge, toggle, diagnostics, limit evidence shared by both
+├── coordinator-common.js             # Badge, diagnostics, limit evidence shared by both
 ├── conversation-client.js            # ChatGPT conversation API client
 ├── message-extractor.js, model-detector.js, plan-detector.js, attachment-detector.js, tool-detector.js
 ├── chatgpt-dom.js, turn-merger.js    # MutationObserver lifecycle; live turn merging

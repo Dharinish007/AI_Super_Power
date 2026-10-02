@@ -71,7 +71,8 @@ Stored as one object in `chrome.storage.local` (`settings`), read with defaults 
     capsule: { enabled: true }
   },
   capsule: { method: 'ask-ai' },            // 'ask-ai' | 'quick'
-  context: { alerts: true }                 // existing 80% / 95% alerts
+  context: { alerts: true },                // existing 80% / 95% alerts
+  display: { theme: 'auto', compact: false, badges: true }
 }
 ```
 Sections in the Settings tab: **Widgets** (two toggles + Context field checkboxes), **Capsules** (method), **Context** (alerts). Existing display options from the old widget move here too.
@@ -109,7 +110,7 @@ content script (engine, widgets)  ──STATE──────▶  side panel (
 ## Testing
 - Unit: settings defaults and merge (missing / old / bad values), Context widget field selection, Capsule widget method choice including the limit-reached fallback, the port protocol (`STATE` push, `CALL` / `REPLY`, non-whitelisted calls rejected).
 - DOM: side panel renders each state (live, awaiting, reload, unsupported) from fake view states; tab list switching; Settings changes reach a fake widget through a fake `storage.onChanged`.
-- Existing 789 tests keep passing. `npm test`, `npm run lint`, `npm run build`, `npm run pack`.
+- All existing tests keep passing. `npm test`, `npm run lint`, `npm run build`, `npm run pack`.
 - Manual on all three sites: panel follows tab switches, page narrows correctly, widgets survive panel close, one-click Capsule both methods, insert from panel lands in the right tab.
 
 ## Out of scope

@@ -14,8 +14,7 @@ import { h, Section, RowList, HiddenStack, textButton, iconButton, approx, TAG_T
  * @param {HTMLElement} parent
  * @param {{ actions: { refresh: () => any, copyDiagnostics: () => any, exportChat: (format: string) => any, saveAsCapsule: () => any },
  *   settings: { display: { compact: boolean } } }} opts
- * @returns {{ el: HTMLElement, foot: HTMLElement, bar: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
- *   `bar` is the usage bar (the widget pulses it on alerts)
+ * @returns {{ el: HTMLElement, foot: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
  */
 export function ContextView(parent, { actions, settings }) {
   let cfg = settings;
@@ -226,5 +225,5 @@ export function ContextView(parent, { actions, settings }) {
     setText(confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
   }
 
-  return { el, foot, bar, update, setSettings(s) { cfg = s; } };
+  return { el, foot, update, setSettings(s) { cfg = s; } };
 }
