@@ -1864,8 +1864,7 @@ function CapsulePanel(parent, ctx) {
 
   /** A Learn reply arrived: its facts go to the inbox for review. */
   async function learned(capsule) {
-    watcher = null;
-    mode('idle');
+    stopWaiting();
     const facts = parseMemories(capsule.body);
     if (!facts.length) return ctx.toast('Nothing new to remember in this chat');
     try { await addToInbox(ctx.storage, facts, ctx.page.provider); } catch (_) { return ctx.toast('Save failed'); }
