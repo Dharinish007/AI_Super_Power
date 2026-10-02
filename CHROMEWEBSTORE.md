@@ -46,7 +46,7 @@ Every declared permission serves a single necessary purpose.
 - **Justification:** Shows the extension's main view (Context · Brain (Memory · Capsules · Skills) · Settings) next to the chat. No data leaves the browser.
 
 ### `unlimitedStorage`
-- **Justification:** Lets the Capsules and Skills the user saves grow past the 10 MB `chrome.storage.local` quota (a Capsule can be up to 100,000 characters). Data stays on the device; the permission shows no install warning.
+- **Justification:** Lets the Capsules, Skills and Memories the user saves grow past the 10 MB `chrome.storage.local` quota (a Capsule can be up to 100,000 characters). Data stays on the device; the permission shows no install warning.
 
 ### Host Permission: `https://chatgpt.com/*` and `https://chat.openai.com/*`
 - **Justification:** Runs the content script on ChatGPT to read the open conversation, detect the model and plan, and draw the context meter. It reads the conversation through ChatGPT's own same-origin endpoints (`/api/auth/session`, `/backend-api/conversation/{id}`, `/backend-api/memories`). Those are the same requests the page itself makes, sent only to ChatGPT.

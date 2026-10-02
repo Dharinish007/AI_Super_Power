@@ -101,7 +101,7 @@ export function buildMemoryPrompt(selection = '', keys = []) {
 export function parseMemories(body) {
   const out = [];
   for (const line of String(body || '').split('\n')) {
-    const m = line.match(/^\s*[-*•]\s*(.+?)\s*\|\s*(.*?)\s*\|\s*(.+?)\s*$/);
+    const m = line.match(/^\s*(?:[-*•]|\d+[.)])?\s*(.+?)\s*\|\s*(.*?)\s*\|\s*(.+?)\s*$/);
     if (!m || m[1].toLowerCase() === 'category') continue; // Not a fact, or the format line echoed back
     const category = MEMORY_CATEGORIES.includes(m[1].toLowerCase()) ? m[1].toLowerCase() : 'other';
     const key = normalizeMemoryKey(m[2]);
@@ -126,7 +126,7 @@ export async function readInbox(area) {
  */
 export async function addToInbox(area, facts, source, now = Date.now()) {
   const same = (a, b) => (a.key && a.key === b.key) || a.text.toLowerCase() === b.text.toLowerCase();
-  const fresh = (facts || []).map((f, i) => ({ id: `${now.toString(36)}-${i}`, category: f.category, key: f.key, text: f.text, source, at: now }));
+  const fresh = (facts || []).map((f, i) => ({ id: globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${now.toString(36)}-${i}`, category: f.category, key: f.key, text: f.text, source, at: now }));
   const kept = (await readInbox(area)).filter(old => !fresh.some(f => same(old, f)));
   await area.set({ [MEMORY_INBOX_KEY]: [...fresh, ...kept].slice(0, INBOX_MAX) });
   return fresh.length;
@@ -139,13 +139,14 @@ export async function removeFromInbox(area, ids) {
 }
 
 /**
- * Saves an inbox fact. A stored memory with the same key is replaced (same id; tags, project and pin
+ * Saves an inbox fact. A stored memory with the same key (or, without a key match, the same text) is replaced (same id; tags, project and pin
  * kept), so a changed fact updates instead of piling up.
  * @param {CapsuleStore} store memoryStore(area)
  * @param {{ category: string, key: string|null, text: string, source?: string }} fact
  */
 export async function approveMemory(store, fact) {
-  const old = fact.key ? (await store.list()).find(m => m.key === fact.key) : null;
+  const list = await store.list();
+  const old = (fact.key && list.find(m => m.key === fact.key)) || list.find(m => m.body.trim().toLowerCase() === fact.text.trim().toLowerCase());
   const memory = await store.save({ id: old?.id, title: fact.text, body: fact.text, category: fact.category, key: fact.key, source: fact.source });
   return { memory, updated: Boolean(old) };
 }

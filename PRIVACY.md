@@ -23,10 +23,10 @@ AI Super Powers is a browser extension that shows how much of the AI model's con
 ## What it stores
 
 - `chrome.storage.local`: Settings (widget choices, Capsule method, display options), widget positions for each site, and your last Claude usage-limit percentages and reset times.
-- `chrome.storage.local`: Capsules you saved (title, text, site name, dates). You can edit or delete each one in the Capsules tab.
+- `chrome.storage.local`: Capsules you saved (title, text, site name, dates). You can edit or delete each one in Brain → Capsules.
 - `chrome.storage.local`: Memories (fact, category, topic key, project, tags, site name, dates) and the review inbox of learned facts (at most 50). You can edit or delete each one in Brain → Memory.
 - `chrome.storage.local`: Skills (instructions you write, plus three starter Skills you can edit or delete).
-- A Capsules or Skills file, only when you click Export: it is downloaded to your device by your browser and goes nowhere else. Import reads a file you pick.
+- A Capsules, Skills or Memories file, only when you click Export: it is downloaded to your device by your browser and goes nowhere else. Import reads a file you pick.
 - `chrome.storage.local`: at most one pending hand-off (Capsule prompt plus the conversation you chose to hand off), removed when used, dismissed, or after a day.
 
 - `chrome.storage.local`: for the sidebar badges, the usage percentage of up to 200 recent chats per site, keyed by the site's own chat ID (no titles or text).

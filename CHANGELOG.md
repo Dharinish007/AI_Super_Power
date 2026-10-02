@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to AI Context Monitor. Versions follow `manifest.json`; bump it (and `package.json`) when releasing.
+All notable changes to AI Super Powers. Versions follow `manifest.json`; bump it (and `package.json`) when releasing.
 
 ## [Unreleased]
 

@@ -287,24 +287,31 @@ export function CapsulePanel(parent, ctx) {
     mode(current);
   }
 
+  let busy = false; // Double clicks on Save / Ignore must not run the same facts twice
   async function approve(facts) {
-    let saved = 0;
-    let updated = 0;
-    const done = [];
-    for (const f of facts) {
-      try {
-        const r = await approveMemory(store, f);
-        done.push(f.id);
-        if (r.updated) updated++; else saved++;
-      } catch (e) { ctx.toast(e?.message || 'Save failed'); }
-    }
-    try { await removeFromInbox(ctx.storage, done); } catch (_) {}
-    if (done.length) ctx.toast(updated ? `Saved ${saved}, updated ${updated}` : `Saved ${saved}`);
+    if (busy) return;
+    busy = true;
+    try {
+      let saved = 0;
+      let updated = 0;
+      const done = [];
+      for (const f of facts) {
+        try {
+          const r = await approveMemory(store, f);
+          done.push(f.id);
+          if (r.updated) updated++; else saved++;
+        } catch (e) { ctx.toast(e?.message || 'Save failed'); }
+      }
+      try { await removeFromInbox(ctx.storage, done); } catch (_) {}
+      if (done.length) ctx.toast(updated ? `Saved ${saved}, updated ${updated}` : `Saved ${saved}`);
     refresh();
+    } finally { busy = false; }
   }
 
   async function ignore(facts) {
-    try { await removeFromInbox(ctx.storage, facts.map(f => f.id)); } catch (_) { return ctx.toast('Ignore failed'); }
+    if (busy) return;
+    busy = true;
+    try { await removeFromInbox(ctx.storage, facts.map(f => f.id)); } catch (_) { return ctx.toast('Ignore failed'); } finally { busy = false; }
     refresh();
   }
   textButton(inboxBtns, 'Save all', () => approve(inbox));

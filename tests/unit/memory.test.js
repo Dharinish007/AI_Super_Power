@@ -66,6 +66,9 @@ export async function runMemoryTests() {
   assert('Parser: unknown category → other, empty key → null', facts[2].category === 'other' && facts[2].key === null);
   assert('Parser: "- none" and an empty reply give nothing', parseMemories('- none').length === 0 && parseMemories('').length === 0);
 
+  const plain = parseMemories(['preference | preference.fruit | Likes mango', '1. project | | Builds ShopEasy', '2) other | | Uses Vim', 'only | one pipe'].join('\n'));
+  assert('Parser: un-bulleted and numbered lines parse, fewer than two pipes ignored', plain.length === 3 && plain[0].key === 'preference.fruit' && plain[1].text === 'Builds ShopEasy' && plain[2].text === 'Uses Vim');
+
   // Inbox
   const ia = fakeArea();
   assert('Empty inbox', (await readInbox(ia)).length === 0);
@@ -91,6 +94,10 @@ export async function runMemoryTests() {
   assert('Same key updates in place (same id, pin kept)', r2.updated === true && all.length === 1 && all[0].id === r1.memory.id && all[0].body === 'Favorite fruit is apple' && all[0].pinned === true);
   const r3 = await approveMemory(sa, { category: 'other', key: null, text: 'Eats spicy food', source: 'Gemini' });
   assert('No key: always a new memory', r3.updated === false && (await sa.list()).length === 2);
+
+  const u1 = await approveMemory(sa, { category: 'other', key: null, text: 'Plays chess', source: 'Claude' });
+  const u2 = await approveMemory(sa, { category: 'other', key: null, text: ' plays CHESS ', source: 'Claude' });
+  assert('Same un-keyed text twice: one memory, second is an update', u1.updated === false && u2.updated === true && u2.memory.id === u1.memory.id && (await sa.list()).length === 3);
 
   // Insert format
   const text = formatMemoriesForInsert([{ body: 'Likes mango' }, { body: 'Uses React\nand Node' }]);
