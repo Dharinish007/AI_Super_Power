@@ -12,18 +12,22 @@
   window.__CONTEXT_MONITOR_CLAUDE_LIMITS__ = true;
 
   const SOURCE = 'CONTEXT_MONITOR_CLAUDE_LIMIT';
-  const COMPLETION_RE = /\/api\/organizations\/[^/]+\/chat_conversations\/[^/]+\/(retry_)?completion(\?|$)/;
+  const COMPLETION_RE = /\/api\/organizations\/[^/]+\/chat_conversations\/[^/]+\/(retry_)?completion[0-9]*(\?|$)/;
 
   const send = (messageLimit) => {
     try { window.postMessage({ source: SOURCE, messageLimit }, window.location.origin); } catch (_) {}
   };
 
-  /** Finds a limits object ({ windows: ... }) in a rejected request's body (nested JSON in error.message). */
+  /** Finds a limits object in a rejected request's body or nested error details. */
   function limitFromError(text) {
     try {
       const body = JSON.parse(text);
-      const inner = typeof body?.error?.message === 'string' ? JSON.parse(body.error.message) : body?.error;
-      if (inner && inner.windows) send(inner);
+      const err = body?.error;
+      const inner = typeof err?.message === 'string' ? (() => { try { return JSON.parse(err.message); } catch (_) { return null; } })() : err;
+      const ml = (inner && (inner.windows ? inner : inner?.message_limit || inner?.extra?.details?.message_limit)) ||
+        (err && (err.windows ? err : err?.message_limit || err?.extra?.details?.message_limit)) ||
+        (body?.message_limit ? body.message_limit : null);
+      if (ml) send(ml);
     } catch (_) {}
   }
 
@@ -33,22 +37,51 @@
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let currentEvent = 'message';
+    let currentData = '';
+
+    const processEvent = () => {
+      if (!currentData) return;
+      const isLimitEvent = currentEvent === 'message_limit' ||
+        currentData.includes('message_limit') ||
+        currentData.includes('messageLimit') ||
+        currentData.includes('within_limit') ||
+        currentData.includes('exceeded_limit');
+      if (isLimitEvent) {
+        try {
+          const evt = JSON.parse(currentData);
+          const ml = evt?.message_limit ||
+            evt?.messageLimit ||
+            (evt?.windows ? evt : null) ||
+            (evt?.type ? evt : null);
+          if (ml) send(ml);
+        } catch (_) {}
+      }
+      currentEvent = 'message';
+      currentData = '';
+    };
+
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let nl;
       while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).trim();
+        let line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
-        // Cheap filter first: only the limit event is ever parsed
-        if (!line.startsWith('data:') || !line.includes('message_limit')) continue;
-        try {
-          const evt = JSON.parse(line.slice(5));
-          if (evt?.type === 'message_limit' && evt.message_limit) send(evt.message_limit);
-        } catch (_) {}
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        const trimmed = line.trim();
+        if (trimmed === '') {
+          processEvent();
+        } else if (trimmed.startsWith('event:')) {
+          currentEvent = trimmed.slice(6).trim();
+        } else if (trimmed.startsWith('data:')) {
+          const d = trimmed.slice(5).trim();
+          currentData = currentData ? `${currentData}\n${d}` : d;
+        }
       }
     }
+    processEvent();
   }
 
   const originalFetch = window.fetch;

@@ -222,13 +222,20 @@ export class ProviderCoordinator {
    * Limits to show: the newer of /usage (empty on some plans) and the last streamed value. A limit
    * past its reset time shows as 0%. Adapters that stream limits show a placeholder until the first reply.
    */
-  _currentLimits(apiLimits = []) {
+  _currentLimits(apiLimits = [], plan = null) {
     const streamed = this._streamLimits;
-    const useStream = streamed && (!apiLimits.length || streamed.at > (this._api?.at || 0));
+    // Prefer the fresh streamed value whenever the API copy is not newer; same millisecond on a real
+    // session means only two streams of activity are visible, so the newest entry wins over the older one.
+    const useStream = Boolean(streamed && (!apiLimits.length || (streamed.at || 0) >= (this._api?.at || 0)));
     const now = Date.now();
     const limits = (useStream ? streamed.limits : apiLimits)
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
-    if (!limits.length && this.provider.limitStreamSource) return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
+    if (!limits.length && this.provider.limitStreamSource) {
+      if (String(plan).toLowerCase() === 'free') {
+        return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
+      }
+      return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
+    }
     return limits;
   }
 
@@ -347,10 +354,14 @@ export class ProviderCoordinator {
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
       // Plan usage limits as the site reports them (Claude only); read with the conversation
-      state.limits = this._currentLimits(saved?.limits || []);
-      // Sites that only show a notice once a limit is hit (Gemini)
+      state.limits = this._currentLimits(saved?.limits || [], plan);
+      // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
-      if (reached) state.limits.push(reached);
+      if (reached) {
+        const idx = state.limits.findIndex(l => l.key === reached.key);
+        if (idx >= 0) state.limits[idx] = reached;
+        else state.limits.push(reached);
+      }
       if (p.longChatNoteAt && state.utilization.percentage >= p.longChatNoteAt) {
         state.limits.push({ key: 'long_chat', label: 'Long chat', note: `each message uses more of your ${p.name} limit; a new chat is lighter` });
       }

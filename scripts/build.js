@@ -102,7 +102,7 @@ ${PANEL_MODULES.map(m => `  // --- ${m} ---\n  ${readCleanModule(m)}`).join('\n\
 `;
 
 // Run directly (npm run build): validate, then write. Imported (tests): nothing is written.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   console.log('[Build] Packaging AI Context Monitor content script...');
   try {
     new Function(bundledContentScript);

@@ -108,7 +108,11 @@ export async function runProvidersTests() {
     const l2 = ClaudeProvider.resolveLimit('claude-sonnet-4-5-20250929', 'max');
     assert('Claude: Opus 5.5 on a paid plan = 1M (published), VERIFIED', l1.contextWindow === 1000000 && l1.status === 'VERIFIED' && /support\.claude\.com/.test(l1.source));
     assert('Claude: other models on paid plans = 200K (published)', l2.contextWindow === 200000 && l2.status === 'VERIFIED');
-    assert('Claude: Free plan window is not published -> UNKNOWN', ClaudeProvider.resolveLimit('Sonnet 5', 'free').contextWindow === null && ClaudeProvider.resolveLimit('Sonnet 5', 'free').status === 'UNKNOWN');
+    // Haiku 5.5 shares the 1M window with Opus 5.5, Sonnet 5, Sonnet 5.5, and Fable 5.1 on paid plans; 200K on free.
+    const lHaiku = ClaudeProvider.resolveLimit('claude-haiku-5-5', 'max');
+    assert('Claude: Haiku 5.5 on paid plans = 1M (published, VERIFIED)', lHaiku.contextWindow === 1000000 && lHaiku.status === 'VERIFIED' && /support\.claude\.com/.test(lHaiku.source));
+    assert('Claude: Haiku 5.5 on free plan = 200K (standard published)', ClaudeProvider.resolveLimit('claude-haiku-5-5', 'free').contextWindow === 200000 && ClaudeProvider.resolveLimit('claude-haiku-5-5', 'free').status === 'VERIFIED');
+    assert('Claude: Free plan window is 200K (standard published)', ClaudeProvider.resolveLimit('Sonnet 5', 'free').contextWindow === 200000 && ClaudeProvider.resolveLimit('Sonnet 5', 'free').status === 'VERIFIED');
     assert('Claude: unknown plan or unrecognized model -> UNKNOWN, never guessed',
       ClaudeProvider.resolveLimit('Opus 5.5', 'unknown').contextWindow === null && ClaudeProvider.resolveLimit('mystery', 'pro').recognized === false);
     assert('Claude plan from account capabilities',
@@ -167,10 +171,15 @@ export async function runProvidersTests() {
       const ml = ClaudeProvider.parseMessageLimit({ resetsAt: 1790000000, windows: { '5h': { utilization: 0.19 }, '7d': { utilization: 0.05, resets_at: '2026-10-02T12:00:00Z' } } });
       assert('message_limit: 5h/7d fractions -> Session/Weekly percent; epoch-seconds reset -> ms',
         ml.length === 2 && ml[0].key === 'session' && ml[0].percent === 19 && ml[0].resetsAt === 1790000000000 && ml[1].percent === 5 && ml[1].resetsAt === Date.parse('2026-10-02T12:00:00Z'));
+      const mlWithin = ClaudeProvider.parseMessageLimit({ type: 'within_limit' });
+      assert('message_limit: within_limit -> dynamic note', mlWithin.length === 1 && mlWithin[0].note === 'Within limit · Dynamic');
+      const mlExceeded = ClaudeProvider.parseMessageLimit({ type: 'exceeded_limit', resetsAt: 1790000000 });
+      assert('message_limit: exceeded_limit -> blocked with reset time', mlExceeded.length === 1 && mlExceeded[0].blocked === true && mlExceeded[0].resetsAt === 1790000000000);
       assert('message_limit: malformed -> nothing', ClaudeProvider.parseMessageLimit(null).length === 0 && ClaudeProvider.parseMessageLimit({ windows: { '5h': {} } }).length === 0);
 
       const coord = new ProviderCoordinator(ClaudeProvider);
       assert('Limits: nothing known yet -> placeholder session row (percent null)', coord._currentLimits([]).length === 1 && coord._currentLimits([])[0].percent === null);
+      assert('Limits: Free plan initial load -> dynamic limit note', coord._currentLimits([], 'Free')[0].note === 'Available · Dynamic limit');
       coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 19, resetsAt: Date.now() + 3600000 }], at: Date.now() };
       assert('Limits: streamed value used when /usage is empty', coord._currentLimits([])[0].percent === 19);
       coord._api = { at: Date.now() + 1000 };
@@ -179,6 +188,11 @@ export async function runProvidersTests() {
       coord._streamLimits.limits[0].resetsAt = Date.now() - 1000;
       assert('Limits: past the reset time -> 0%, no reset shown', coord._currentLimits([])[0].percent === 0 && coord._currentLimits([])[0].resetsAt === null);
       assert('Limits: providers without a stream source get no placeholder', new ProviderCoordinator(GeminiProvider)._currentLimits([]).length === 0);
+      // Streamed value keeps winning even when the timestamps land in the same millisecond and both show
+      // a smaller percentage than the API copy — this was the five-hour reduction bug.
+      coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 9, resetsAt: Date.now() + 3600000 }], at: Date.now() };
+      coord._api = { at: Date.now() };
+      assert('Limits: streamed value wins on equal milliseconds', coord._currentLimits([{ key: 'session', label: 'S', percent: 30, resetsAt: null }])[0].percent === 9);
 
       // Watcher (MAIN world): forwards only message_limit from a completion stream, page response untouched
       const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../../content/claude-limit-watcher.js'), 'utf8');

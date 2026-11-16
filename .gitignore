@@ -21,3 +21,6 @@ yarn-error.log*
 
 # Tokenizer source (32 MB); scripts/build-gemma-tokenizer.js downloads and checks it
 vendor/
+
+# Local testing and debug artifacts
+.playwright-mcp/

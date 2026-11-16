@@ -68,9 +68,11 @@ function topLevel(nodes) {
 // ============================================================================ Claude
 
 // support.claude.com/en/articles/8606394 (checked 2026-09-24): chatting on paid plans (Pro, Max,
-// Team, Enterprise) is 200K, except these models at 1M. The Free plan is not published.
+// Team, Enterprise) is 200K, except these models at 1M. Free plan has standard 200K context window.
 const CLAUDE_LIMIT_SOURCE = 'Claude Help Center: context window on paid plans (support.claude.com/en/articles/8606394)';
-const CLAUDE_1M_MODELS = new Set(['fable-5.1', 'opus-5.5', 'sonnet-5']);
+const CLAUDE_FREE_SOURCE = 'Claude Help Center: standard free context window (support.claude.com)';
+// Haiku 5.5 shares the 1M window with Opus 5.5, Sonnet 5, Sonnet 5.5 and Fable 5.1 on paid plans.
+const CLAUDE_1M_MODELS = new Set(['haiku-5.5', 'fable-5.1', 'opus-5.5', 'sonnet-5', 'sonnet-5.5']);
 const CLAUDE_PAID_PLANS = new Set(['pro', 'max', 'team', 'enterprise']);
 // Hidden-context estimates. claude.ai's prompt/tool sizes are not published; these follow the community
 // measurements in lugia19/Claude-Usage-Extension (checked 2026-09-28). Keyed by the account/conversation setting flag.
@@ -149,7 +151,7 @@ export const ClaudeProvider = {
 
   detectPlan(doc) {
     const el = doc.querySelector('[data-testid="user-menu-button"]');
-    const m = el ? (el.textContent || '').match(/\b(Free|Pro|Max|Team|Enterprise)\s+plan\b/i) : null;
+    const m = el ? (el.textContent || '').match(/\b(Free|Pro|Max|Team|Enterprise)(?:\s+plan)?\b/i) : null;
     return m ? { value: m[1].toLowerCase(), source: 'dom', evidenceType: 'OBSERVED' } : null;
   },
 
@@ -173,6 +175,7 @@ export const ClaudeProvider = {
   resolveLimit(rawModel, plan) {
     const key = claudeModelKey(rawModel);
     if (!key) return { contextWindow: null, status: 'UNKNOWN', source: 'Model not recognized', recognized: false };
+    if (plan === 'free') return { contextWindow: 200000, status: 'VERIFIED', source: CLAUDE_FREE_SOURCE, recognized: true };
     if (!plan || plan === 'unknown') return { contextWindow: null, status: 'UNKNOWN', source: 'Plan unknown', recognized: true };
     if (!CLAUDE_PAID_PLANS.has(plan)) return { contextWindow: null, status: 'UNKNOWN', source: `No published context window for the ${plan} plan`, recognized: true };
     return { contextWindow: CLAUDE_1M_MODELS.has(key) ? 1000000 : 200000, status: 'VERIFIED', source: CLAUDE_LIMIT_SOURCE, recognized: true };
@@ -215,23 +218,48 @@ export const ClaudeProvider = {
 
   /**
    * Plan limits from a reply stream's `message_limit` event (see claude-limit-watcher.js):
-   * { windows: { "5h": { utilization: 0..1, resets_at }, "7d": {...} }, resetsAt }.
-   * resets_at may be epoch seconds, epoch ms or ISO; utilization is a fraction (a value > 1 is taken as a percent).
-   * @returns {Array<{ key: string, label: string, percent: number, resetsAt: number|null }>}
+   * 1. Paid plans: { windows: { "5h": { utilization: 0..1, resets_at }, "7d": {...} }, resetsAt }.
+   * 2. Limit hit: { type: 'exceeded_limit', resetsAt } or { blocked: true }.
+   * 3. Approaching limit: { remaining, resetsAt }.
+   * 4. Free plan / within limit: { type: 'within_limit' }.
+   * @returns {Array<{ key: string, label: string, percent?: number, remaining?: number, blocked?: boolean, resetsAt?: number|null, note?: string }>}
    */
   parseMessageLimit(ml) {
-    const windows = ml && typeof ml === 'object' ? ml.windows : null;
-    if (!windows || typeof windows !== 'object') return [];
+    if (!ml || typeof ml !== 'object') return [];
     const toMs = (v) => (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : v ? Date.parse(v) || null : null);
-    const names = { '5h': ['session', 'Session (5h)'], '7d': ['weekly', 'Weekly'] };
-    const out = [];
-    for (const [win, [key, label]] of Object.entries(names)) {
-      const w = windows[win];
-      const u = w?.utilization;
-      if (typeof u !== 'number' || !isFinite(u)) continue;
-      out.push({ key, label, percent: Math.round(u > 1 ? u : u * 100), resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === 'session' ? ml.resetsAt : null)) });
+    const windows = ml.windows && typeof ml.windows === 'object' ? ml.windows : null;
+    if (windows) {
+      const names = { '5h': ['session', 'Session (5h)'], '7d': ['weekly', 'Weekly'] };
+      const out = [];
+      for (const [win, [key, label]] of Object.entries(names)) {
+        const w = windows[win];
+        const u = w?.utilization;
+        if (typeof u !== 'number' || !isFinite(u)) continue;
+        out.push({
+          key,
+          label,
+          percent: Math.round(u > 1 ? u : u * 100),
+          resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === 'session' ? ml.resetsAt : null))
+        });
+      }
+      if (out.length) return out;
     }
-    return out;
+
+    if (ml.type === 'exceeded_limit' || ml.blocked || ml.status === 'exceeded_limit') {
+      const resetsAt = toMs(ml.resetsAt ?? ml.resets_at);
+      return [{ key: 'session', label: 'Session', blocked: true, percent: 100, resetsAt, note: null }];
+    }
+
+    if (typeof ml.remaining === 'number') {
+      const resetsAt = toMs(ml.resetsAt ?? ml.resets_at);
+      return [{ key: 'session', label: 'Session', remaining: ml.remaining, resetsAt, note: null }];
+    }
+
+    if (ml.type === 'within_limit') {
+      return [{ key: 'session', label: 'Session', note: 'Within limit · Dynamic' }];
+    }
+
+    return [];
   },
 
   /**
@@ -372,6 +400,35 @@ export const ClaudeProvider = {
       rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
       attachments: { count: files, files: fileList, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
+  },
+
+  /**
+   * Detects limit reached banners or notices in Claude's DOM.
+   * @returns {{ key: string, label: string, blocked: boolean, percent: number, resetsAt: number|null }|null}
+   */
+  detectLimitReached(doc, now = Date.now()) {
+    const nodes = doc.querySelectorAll('[role="alert"], [role="status"], [class*="banner"], [class*="notice"], [data-testid*="limit"]');
+    for (const n of nodes) {
+      const text = (n?.textContent || '').replace(/\s+/g, ' ');
+      if (text.length > 300) continue;
+      if (!/(reached|hit|out of) (your|free)? messages?|message limit (reached|resets)|try again (at|after)/i.test(text)) continue;
+      return { key: 'session', label: 'Session', blocked: true, percent: 100, resetsAt: this.parseResetTime(text, now) };
+    }
+    return null;
+  },
+
+  /** "at 5:30 PM" / "after 17:30" -> next such time; "in 3 hours" / "in 45 minutes" -> now + that. */
+  parseResetTime(text, now = Date.now()) {
+    const rel = text.match(/in (\d+) (hour|minute)s?/i);
+    if (rel) return now + Number(rel[1]) * (/hour/i.test(rel[2]) ? 3600000 : 60000);
+    const t = text.match(/(?:at|after|until) (\d{1,2})(?::(\d{2}))?\s*([AP]\.?M\.?)?/i);
+    if (!t) return null;
+    let h = Number(t[1]) % 12 + (t[3] && /p/i.test(t[3]) ? 12 : 0);
+    if (!t[3]) h = Number(t[1]); // 24-hour clock
+    const d = new Date(now);
+    d.setHours(h, Number(t[2] || 0), 0, 0);
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+    return d.getTime();
   }
 };
 
