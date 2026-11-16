@@ -212,7 +212,16 @@ export function toWidgetState(s, opts = {}) {
     })),
     // Plan usage limits (Claude only; empty elsewhere): percent used and time until reset
     // Percent-based (Claude) or count-based (ChatGPT: `remaining`, `blocked`)
-    limits: (s.limits || []).map(l => ({ key: l.key, label: l.label, percent: l.percent, remaining: l.remaining, blocked: Boolean(l.blocked), note: l.note || null, resetIn: formatResetIn(l.resetsAt) })),
+    limits: (s.limits || []).map(l => ({
+      key: l.key,
+      label: l.label,
+      percent: l.percent,
+      remaining: l.remaining,
+      blocked: Boolean(l.blocked),
+      estimated: Boolean(l.estimated),
+      note: l.note || null,
+      resetIn: formatResetIn(l.resetsAt)
+    })),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
       : dataSource === 'dom_unsaved' ? 'Page text (not saved yet)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,

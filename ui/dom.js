@@ -79,12 +79,13 @@ export const TAG_TIPS = {
 
 /** "28% · resets in 3h 57m" / "5 left · resets in 30d" / "limit reached", or a note before the site reports it. */
 export const limitText = (l) => {
-  if (l.note) return l.note;
+  if (l.note && (l.percent === null || l.percent === undefined)) return l.note;
   const reset = l.resetIn ? ` · resets in ${l.resetIn}` : '';
   if (l.key === 'limit') return `limit reached${reset}`;
   if (l.remaining !== undefined && l.remaining !== null) return `${l.blocked ? 'used up' : `${l.remaining} left`}${reset}`;
-  if (l.percent === null || l.percent === undefined) return 'updates after your next message';
-  return `${l.percent}%${reset}`;
+  if (l.percent === null || l.percent === undefined) return l.note || 'updates after your next message';
+  const est = l.estimated ? '≈ ' : '';
+  return `${est}${l.percent}%${reset}`;
 };
 /** Headline limit: the session, else anything used up, else the allowance closest to running out. */
 export const headlineLimit = (limits = []) => limits.find(l => l.key === 'session') || limits.find(l => l.blocked) ||

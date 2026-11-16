@@ -12,6 +12,7 @@ import { ProviderCoordinator } from '../../content/provider-coordinator.js';
 import { ConfidenceEngine } from '../../engine/confidence-engine.js';
 import { Tokenizer } from '../../engine/tokenizer.js';
 import { toWidgetState, formatResetIn } from '../../content/widget-state.js';
+import { limitText } from '../../ui/dom.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLAUDE_CONV = '11111111-2222-4333-8444-555555555555';
@@ -179,7 +180,26 @@ export async function runProvidersTests() {
 
       const coord = new ProviderCoordinator(ClaudeProvider);
       assert('Limits: nothing known yet -> placeholder session row (percent null)', coord._currentLimits([]).length === 1 && coord._currentLimits([])[0].percent === null);
-      assert('Limits: Free plan initial load -> dynamic limit note', coord._currentLimits([], 'Free')[0].note === 'Available · Dynamic limit');
+      assert('Limits: Free plan initial load -> 5h window ready', coord._currentLimits([], 'Free')[0].note.includes('5h window ready'));
+
+      // 5-Hour session window calculation & pacing tests
+      const res0 = ClaudeProvider.resolveSessionWindow([], 'claude-haiku-5-5', now);
+      assert('Session window: empty -> 0% window ready', res0.limit.percent === 0 && res0.limit.resetsAt === null);
+      const t1 = now - 3600000; // 1 hour ago
+      const msgs = [
+        { role: 'user', createdAt: t1, tokens: 5000 },
+        { role: 'assistant', createdAt: t1 + 1000, tokens: 10000 },
+        { role: 'user', createdAt: now - 1800000, tokens: 5000 }
+      ];
+      const res1 = ClaudeProvider.resolveSessionWindow(msgs, 'claude-haiku-5-5', now);
+      assert('Session window: active turns -> resets in 4h and calculates pacing',
+        res1.limit.resetsAt === t1 + 5 * 3600 * 1000 && res1.limit.percent > 0 && res1.limit.estimated === true && res1.window.startedAt === t1);
+      const tOld = now - 6 * 3600 * 1000;
+      const resOld = ClaudeProvider.resolveSessionWindow([{ role: 'user', createdAt: tOld, tokens: 5000 }], 'claude-haiku-5-5', now);
+      assert('Session window: older than 5h -> rolls over to ready', resOld.limit.percent === 0 && resOld.limit.resetsAt === null);
+      assert('limitText: estimated percentage includes ≈ badge', limitText({ percent: 25, estimated: true, resetIn: '4h 12m' }) === '≈ 25% · resets in 4h 12m');
+      assert('limitText: exact percentage without ≈ badge', limitText({ percent: 25, estimated: false, resetIn: '4h 12m' }) === '25% · resets in 4h 12m');
+
       coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 19, resetsAt: Date.now() + 3600000 }], at: Date.now() };
       assert('Limits: streamed value used when /usage is empty', coord._currentLimits([])[0].percent === 19);
       coord._api = { at: Date.now() + 1000 };

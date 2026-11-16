@@ -208,6 +208,9 @@ export class ProviderCoordinator {
     const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
     const key = `limits:${p.name}`;
     store?.get(key).then(r => { if (r?.[key] && !this._streamLimits) this._streamLimits = r[key]; }).catch(() => {});
+    if (p.name === 'Claude') {
+      store?.get('limits:Claude:window').then(r => { if (r?.['limits:Claude:window'] && !this._storedWindow) this._storedWindow = r['limits:Claude:window']; }).catch(() => {});
+    }
     window.addEventListener('message', (e) => {
       if (e.source !== window || e.data?.source !== p.limitStreamSource) return;
       const limits = p.parseMessageLimit(e.data.messageLimit);
@@ -222,14 +225,33 @@ export class ProviderCoordinator {
    * Limits to show: the newer of /usage (empty on some plans) and the last streamed value. A limit
    * past its reset time shows as 0%. Adapters that stream limits show a placeholder until the first reply.
    */
-  _currentLimits(apiLimits = [], plan = null) {
+  _currentLimits(apiLimits = [], plan = null, messages = [], model = null) {
     const streamed = this._streamLimits;
     // Prefer the fresh streamed value whenever the API copy is not newer; same millisecond on a real
     // session means only two streams of activity are visible, so the newest entry wins over the older one.
     const useStream = Boolean(streamed && (!apiLimits.length || (streamed.at || 0) >= (this._api?.at || 0)));
     const now = Date.now();
-    const limits = (useStream ? streamed.limits : apiLimits)
+    const rawLimits = useStream ? streamed.limits : apiLimits;
+    const limits = rawLimits
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
+
+    // If exact limits arrived from API or stream with numerical values, use them
+    const hasExact = limits.some(l => typeof l.percent === 'number' && !l.estimated);
+    if (hasExact) return limits;
+
+    // For Claude on Free plan: calculate active 5-hour session window
+    if (this.provider.name === 'Claude' && String(plan).toLowerCase() === 'free') {
+      if (typeof this.provider.resolveSessionWindow === 'function') {
+        const { limit, window } = this.provider.resolveSessionWindow(messages, model, now, this._storedWindow);
+        if (window && typeof chrome !== 'undefined' && chrome.storage?.local) {
+          this._storedWindow = window;
+          chrome.storage.local.set({ 'limits:Claude:window': window }).catch(() => {});
+        }
+        return [limit];
+      }
+      return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
+    }
+
     if (!limits.length && this.provider.limitStreamSource) {
       if (String(plan).toLowerCase() === 'free') {
         return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
@@ -316,7 +338,16 @@ export class ProviderCoordinator {
       const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], encoding);
-        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming), preview: String(m.text || '').slice(0, 80) };
+        return {
+          id: m.id,
+          role: m.role,
+          tokens: scaled(r.tokens),
+          hasNonTextParts: r.hasNonTextParts,
+          nonTextParts: r.nonTextParts,
+          createdAt: m.createdAt || null,
+          isStreaming: Boolean(m.isStreaming),
+          preview: String(m.text || '').slice(0, 80)
+        };
       });
       const attachments = saved?.attachments || p.pageAttachments?.(document, modelRaw) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
@@ -354,7 +385,7 @@ export class ProviderCoordinator {
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
       // Plan usage limits as the site reports them (Claude only); read with the conversation
-      state.limits = this._currentLimits(saved?.limits || [], plan);
+      state.limits = this._currentLimits(saved?.limits || [], plan, tokenized, modelRaw);
       // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
       if (reached) {

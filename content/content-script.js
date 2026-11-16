@@ -4325,7 +4325,16 @@ function toWidgetState(s, opts = {}) {
     })),
     // Plan usage limits (Claude only; empty elsewhere): percent used and time until reset
     // Percent-based (Claude) or count-based (ChatGPT: `remaining`, `blocked`)
-    limits: (s.limits || []).map(l => ({ key: l.key, label: l.label, percent: l.percent, remaining: l.remaining, blocked: Boolean(l.blocked), note: l.note || null, resetIn: formatResetIn(l.resetsAt) })),
+    limits: (s.limits || []).map(l => ({
+      key: l.key,
+      label: l.label,
+      percent: l.percent,
+      remaining: l.remaining,
+      blocked: Boolean(l.blocked),
+      estimated: Boolean(l.estimated),
+      note: l.note || null,
+      resetIn: formatResetIn(l.resetsAt)
+    })),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
       : dataSource === 'dom_unsaved' ? 'Page text (not saved yet)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,
@@ -5204,12 +5213,13 @@ const TAG_TIPS = {
 
 /** "28% · resets in 3h 57m" / "5 left · resets in 30d" / "limit reached", or a note before the site reports it. */
 const limitText = (l) => {
-  if (l.note) return l.note;
+  if (l.note && (l.percent === null || l.percent === undefined)) return l.note;
   const reset = l.resetIn ? ` · resets in ${l.resetIn}` : '';
   if (l.key === 'limit') return `limit reached${reset}`;
   if (l.remaining !== undefined && l.remaining !== null) return `${l.blocked ? 'used up' : `${l.remaining} left`}${reset}`;
-  if (l.percent === null || l.percent === undefined) return 'updates after your next message';
-  return `${l.percent}%${reset}`;
+  if (l.percent === null || l.percent === undefined) return l.note || 'updates after your next message';
+  const est = l.estimated ? '≈ ' : '';
+  return `${est}${l.percent}%${reset}`;
 };
 /** Headline limit: the session, else anything used up, else the allowance closest to running out. */
 const headlineLimit = (limits = []) => limits.find(l => l.key === 'session') || limits.find(l => l.blocked) ||
@@ -7574,8 +7584,9 @@ const ClaudeProvider = {
       for (const f of stored) fileList.push({ name: f.file_name, type: f.file_kind || 'file' });
       files += stored.length;
       unknownFiles += stored.length;
-      if (text.length) messages.push({ id: m.uuid, role, text: text.join('\n\n'), parts: [{ type: 'text', text: text.join('\n\n') }], isStreaming: false });
-      if (tool.length) messages.push({ id: `${m.uuid}-tool`, role: 'tool', text: tool.join('\n\n'), parts: [{ type: 'text', text: tool.join('\n\n') }], isStreaming: false });
+      const createdAt = m.created_at ? (Date.parse(m.created_at) || null) : null;
+      if (text.length) messages.push({ id: m.uuid, role, text: text.join('\n\n'), parts: [{ type: 'text', text: text.join('\n\n') }], createdAt, isStreaming: false });
+      if (tool.length) messages.push({ id: `${m.uuid}-tool`, role: 'tool', text: tool.join('\n\n'), parts: [{ type: 'text', text: tool.join('\n\n') }], createdAt, isStreaming: false });
     }
     return {
       conversationId: conv?.uuid || null,
@@ -7585,6 +7596,75 @@ const ClaudeProvider = {
       rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
       attachments: { count: files, files: fileList, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
+  },
+
+  /**
+   * Computes the rolling 5-hour session window and estimated utilization on Free plans.
+   * Rolling window rule: 5-hour timer starts from the first prompt sent within the window.
+   */
+  resolveSessionWindow(messages = [], model = null, now = Date.now(), storedWindow = null) {
+    const WINDOW_MS = 5 * 3600 * 1000;
+    const userTurns = messages.filter(m => m.role === 'user' && m.createdAt && m.createdAt <= now);
+    const recentTurns = userTurns.filter(m => m.createdAt > now - WINDOW_MS);
+
+    let windowStart = null;
+    if (storedWindow?.startedAt && (now - storedWindow.startedAt < WINDOW_MS)) {
+      windowStart = storedWindow.startedAt;
+    }
+
+    if (recentTurns.length > 0) {
+      const earliestRecent = Math.min(...recentTurns.map(t => t.createdAt));
+      windowStart = windowStart ? Math.min(windowStart, earliestRecent) : earliestRecent;
+    }
+
+    if (!windowStart) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        window: null
+      };
+    }
+
+    const resetsAt = windowStart + WINDOW_MS;
+    if (now >= resetsAt) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        window: null
+      };
+    }
+
+    const turnsInWindow = Math.max(1, recentTurns.length || (storedWindow?.messageCount || 1));
+    const tokensInWindow = messages
+      .filter(m => m.createdAt && m.createdAt >= windowStart)
+      .reduce((sum, m) => sum + (m.tokens || 0), 0);
+
+    const modelKey = this.modelKey(model) || '';
+    const isHaiku = modelKey.includes('haiku');
+    const isSonnet = modelKey.includes('sonnet');
+    const maxTurns = isHaiku ? 45 : isSonnet ? 20 : 30;
+    const maxTokens = isHaiku ? 120000 : isSonnet ? 60000 : 80000;
+
+    const turnRatio = turnsInWindow / maxTurns;
+    const tokenRatio = tokensInWindow > 0 ? (tokensInWindow / maxTokens) : 0;
+    const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
+
+    const limit = {
+      key: 'session',
+      label: 'Session (5h)',
+      percent,
+      estimated: true,
+      resetsAt,
+      turns: turnsInWindow
+    };
+
+    const nextWindow = {
+      startedAt: windowStart,
+      resetsAt,
+      messageCount: turnsInWindow,
+      totalTokens: tokensInWindow,
+      model: modelKey
+    };
+
+    return { limit, window: nextWindow };
   },
 
   /**
@@ -8162,6 +8242,9 @@ class ProviderCoordinator {
     const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
     const key = `limits:${p.name}`;
     store?.get(key).then(r => { if (r?.[key] && !this._streamLimits) this._streamLimits = r[key]; }).catch(() => {});
+    if (p.name === 'Claude') {
+      store?.get('limits:Claude:window').then(r => { if (r?.['limits:Claude:window'] && !this._storedWindow) this._storedWindow = r['limits:Claude:window']; }).catch(() => {});
+    }
     window.addEventListener('message', (e) => {
       if (e.source !== window || e.data?.source !== p.limitStreamSource) return;
       const limits = p.parseMessageLimit(e.data.messageLimit);
@@ -8176,14 +8259,33 @@ class ProviderCoordinator {
    * Limits to show: the newer of /usage (empty on some plans) and the last streamed value. A limit
    * past its reset time shows as 0%. Adapters that stream limits show a placeholder until the first reply.
    */
-  _currentLimits(apiLimits = [], plan = null) {
+  _currentLimits(apiLimits = [], plan = null, messages = [], model = null) {
     const streamed = this._streamLimits;
     // Prefer the fresh streamed value whenever the API copy is not newer; same millisecond on a real
     // session means only two streams of activity are visible, so the newest entry wins over the older one.
     const useStream = Boolean(streamed && (!apiLimits.length || (streamed.at || 0) >= (this._api?.at || 0)));
     const now = Date.now();
-    const limits = (useStream ? streamed.limits : apiLimits)
+    const rawLimits = useStream ? streamed.limits : apiLimits;
+    const limits = rawLimits
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
+
+    // If exact limits arrived from API or stream with numerical values, use them
+    const hasExact = limits.some(l => typeof l.percent === 'number' && !l.estimated);
+    if (hasExact) return limits;
+
+    // For Claude on Free plan: calculate active 5-hour session window
+    if (this.provider.name === 'Claude' && String(plan).toLowerCase() === 'free') {
+      if (typeof this.provider.resolveSessionWindow === 'function') {
+        const { limit, window } = this.provider.resolveSessionWindow(messages, model, now, this._storedWindow);
+        if (window && typeof chrome !== 'undefined' && chrome.storage?.local) {
+          this._storedWindow = window;
+          chrome.storage.local.set({ 'limits:Claude:window': window }).catch(() => {});
+        }
+        return [limit];
+      }
+      return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
+    }
+
     if (!limits.length && this.provider.limitStreamSource) {
       if (String(plan).toLowerCase() === 'free') {
         return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
@@ -8270,7 +8372,16 @@ class ProviderCoordinator {
       const scaled = (n) => Math.round(n * scale);
       const tokenized = messages.map(m => {
         const r = this.tokenizer.countMessagePartsTokens(m.id, m.parts || [{ type: 'text', text: m.text }], encoding);
-        return { id: m.id, role: m.role, tokens: scaled(r.tokens), hasNonTextParts: r.hasNonTextParts, nonTextParts: r.nonTextParts, isStreaming: Boolean(m.isStreaming), preview: String(m.text || '').slice(0, 80) };
+        return {
+          id: m.id,
+          role: m.role,
+          tokens: scaled(r.tokens),
+          hasNonTextParts: r.hasNonTextParts,
+          nonTextParts: r.nonTextParts,
+          createdAt: m.createdAt || null,
+          isStreaming: Boolean(m.isStreaming),
+          preview: String(m.text || '').slice(0, 80)
+        };
       });
       const attachments = saved?.attachments || p.pageAttachments?.(document, modelRaw) || { count: 0, estimatedTokens: 0, hasUnknown: false };
       // Hidden context from the adapter (Claude): text items are counted here, fixed-cost items carry tokens.
@@ -8308,7 +8419,7 @@ class ProviderCoordinator {
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
       // Plan usage limits as the site reports them (Claude only); read with the conversation
-      state.limits = this._currentLimits(saved?.limits || [], plan);
+      state.limits = this._currentLimits(saved?.limits || [], plan, tokenized, modelRaw);
       // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
       if (reached) {
