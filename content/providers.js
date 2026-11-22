@@ -110,8 +110,14 @@ export function claudeModelKey(value) {
   let m = s.match(/\b(opus|sonnet|haiku|fable)[\s-]*(\d{1,2})(?:[.-](\d{1,2}))?(?!\d)/);
   if (!m) {
     const old = s.match(/claude-(\d+)(?:-(\d{1,2}))?-(opus|sonnet|haiku)/);
-    if (!old) return null;
-    m = [null, old[3], old[1], old[2]];
+    if (old) {
+      m = [null, old[3], old[1], old[2]];
+    } else {
+      // Future model families (e.g. claude-5-xyz or custom-named families)
+      const generic = s.match(/\bclaude-([a-z]+)-(\d{1,2})(?:[.-](\d{1,2}))?(?!\d)/);
+      if (generic) m = generic;
+      else return null;
+    }
   }
   const minor = m[3] && m[3] !== '0' ? `.${m[3]}` : '';
   return `${m[1]}-${m[2]}${minor}`;
@@ -181,12 +187,41 @@ export const ClaudeProvider = {
     return { contextWindow: CLAUDE_1M_MODELS.has(key) ? 1000000 : 200000, status: 'VERIFIED', source: CLAUDE_LIMIT_SOURCE, recognized: true };
   },
 
-  /** Organization id: the lastActiveOrg cookie, else the first organization of the account. */
-  async _orgId(fetchJson) {
+  /** Synchronous organization id from document.cookie, null if not present */
+  getOrgId() {
     const m = (typeof document !== 'undefined' ? document.cookie : '').match(/(?:^|;\s*)lastActiveOrg=([^;]+)/);
     if (m) return decodeURIComponent(m[1]);
-    const orgs = await fetchJson('/api/organizations');
-    return Array.isArray(orgs) && orgs[0]?.uuid ? orgs[0].uuid : null;
+    return null;
+  },
+
+  /** Organization id: the lastActiveOrg cookie, else the first organization of the account. */
+  async _orgId(fetchJson) {
+    const id = (typeof document !== 'undefined' ? document.cookie : '').match(/(?:^|;\s*)lastActiveOrg=([^;]+)/);
+    if (id) {
+      const cookieId = decodeURIComponent(id[1]);
+      if (/^[0-9a-f-]{36}$/i.test(cookieId)) return cookieId;
+    }
+    try {
+      const orgs = await fetchJson('/api/organizations');
+      const list = Array.isArray(orgs) ? orgs : (Array.isArray(orgs?.organizations) ? orgs.organizations : []);
+      const chatOrgs = list.filter(o => Array.isArray(o.capabilities) && o.capabilities.includes('chat'));
+      const target = chatOrgs[0] || list[0];
+      return target?.uuid || target?.organization_uuid || target?.id || null;
+    } catch (_) {
+      return null;
+    }
+  },
+
+  /** Standalone fetch for account-wide rate limits from /api/organizations/{org}/usage */
+  async fetchUsage(fetchJson) {
+    const org = await this._orgId(fetchJson);
+    if (!org) return [];
+    try {
+      const usage = await fetchJson(`/api/organizations/${org}/usage`);
+      return this.parseUsage(usage);
+    } catch (_) {
+      return [];
+    }
   },
 
   /**
@@ -227,6 +262,37 @@ export const ClaudeProvider = {
   parseMessageLimit(ml) {
     if (!ml || typeof ml !== 'object') return [];
     const toMs = (v) => (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : v ? Date.parse(v) || null : null);
+
+    // Directly normalized session / weekly objects (from stream watcher)
+    if (ml.session || ml.weekly) {
+      const out = [];
+      if (ml.session) {
+        const u = ml.session.utilization;
+        const pct = ml.session.percentage ?? (typeof u === 'number' ? Math.round(u > 1 ? u : u * 100) : null);
+        if (pct !== null) {
+          out.push({
+            key: 'session',
+            label: 'Session (5h)',
+            percent: pct,
+            resetsAt: ml.session.resetTime ?? toMs(ml.session.resets_at)
+          });
+        }
+      }
+      if (ml.weekly) {
+        const u = ml.weekly.utilization;
+        const pct = ml.weekly.percentage ?? (typeof u === 'number' ? Math.round(u > 1 ? u : u * 100) : null);
+        if (pct !== null) {
+          out.push({
+            key: 'weekly',
+            label: 'Weekly',
+            percent: pct,
+            resetsAt: ml.weekly.resetTime ?? toMs(ml.weekly.resets_at)
+          });
+        }
+      }
+      if (out.length) return out;
+    }
+
     const windows = ml.windows && typeof ml.windows === 'object' ? ml.windows : null;
     if (windows) {
       const names = { '5h': ['session', 'Session (5h)'], '7d': ['weekly', 'Weekly'] };
@@ -235,10 +301,12 @@ export const ClaudeProvider = {
         const w = windows[win];
         const u = w?.utilization;
         if (typeof u !== 'number' || !isFinite(u)) continue;
+        const exceeded = w?.status === 'exceeded_limit' || ml.status === 'exceeded_limit' || u >= 1;
+        const rawPct = Math.round(u > 1 ? u : u * 100);
         out.push({
           key,
           label,
-          percent: Math.round(u > 1 ? u : u * 100),
+          percent: exceeded ? 100 : (rawPct >= 100 ? 99 : rawPct),
           resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === 'session' ? ml.resetsAt : null))
         });
       }
@@ -270,22 +338,44 @@ export const ClaudeProvider = {
    */
   parseUsage(usage) {
     if (!usage || typeof usage !== 'object') return [];
-    const at = (iso) => (iso ? new Date(iso).getTime() || null : null);
-    const out = [];
-    const add = (key, label, percent, resetsAt) => {
-      if (typeof percent === 'number' && isFinite(percent)) out.push({ key, label, percent: Math.round(percent), resetsAt: at(resetsAt) });
+    const at = (iso) => {
+      if (!iso) return null;
+      if (typeof iso === 'number') return iso < 1e12 ? iso * 1000 : iso;
+      const t = Date.parse(iso);
+      return Number.isFinite(t) ? t : null;
     };
+    const out = [];
+    const add = (key, label, val, resetsAt) => {
+      const num = Number(val);
+      if (!Number.isFinite(num) || num < 0) return;
+      const pct = num <= 1 && num > 0 ? Math.round(num * 100) : Math.min(100, Math.round(num));
+      out.push({ key, label, percent: pct, resetsAt: at(resetsAt) });
+    };
+
     if (Array.isArray(usage.limits)) {
       for (const l of usage.limits) {
+        if (!l || typeof l !== 'object') continue;
         const model = l.scope?.model?.display_name;
         if (l.kind === 'session') add('session', 'Session (5h)', l.percent, l.resets_at);
         else if (l.kind === 'weekly_all') add('weekly', 'Weekly', l.percent, l.resets_at);
         else if (l.kind === 'weekly_scoped' && model) add(`weekly:${model}`, `Weekly · ${model}`, l.percent, l.resets_at);
       }
-    } else {
-      const top = [['five_hour', 'session', 'Session (5h)'], ['seven_day', 'weekly', 'Weekly'],
-        ['seven_day_opus', 'weekly:Opus', 'Weekly · Opus'], ['seven_day_sonnet', 'weekly:Sonnet', 'Weekly · Sonnet']];
-      for (const [field, key, label] of top) if (usage[field]) add(key, label, usage[field].utilization, usage[field].resets_at);
+    }
+
+    const top = [
+      ['five_hour', 'session', 'Session (5h)'],
+      ['seven_day', 'weekly', 'Weekly'],
+      ['seven_day_opus', 'weekly:Opus', 'Weekly · Opus'],
+      ['seven_day_sonnet', 'weekly:Sonnet', 'Weekly · Sonnet'],
+      ['seven_day_fable', 'weekly:Fable', 'Weekly · Fable'],
+      ['seven_day_omelette', 'weekly:Claude Design', 'Weekly · Claude Design']
+    ];
+    for (const [field, key, label] of top) {
+      if (usage[field] && !out.some(o => o.key === key)) {
+        const bucket = usage[field];
+        const val = bucket.utilization ?? bucket.percent;
+        add(key, label, val, bucket.resets_at);
+      }
     }
     return out;
   },
@@ -401,75 +491,6 @@ export const ClaudeProvider = {
       rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
       attachments: { count: files, files: fileList, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
-  },
-
-  /**
-   * Computes the rolling 5-hour session window and estimated utilization on Free plans.
-   * Rolling window rule: 5-hour timer starts from the first prompt sent within the window.
-   */
-  resolveSessionWindow(messages = [], model = null, now = Date.now(), storedWindow = null) {
-    const WINDOW_MS = 5 * 3600 * 1000;
-    const userTurns = messages.filter(m => m.role === 'user' && m.createdAt && m.createdAt <= now);
-    const recentTurns = userTurns.filter(m => m.createdAt > now - WINDOW_MS);
-
-    let windowStart = null;
-    if (storedWindow?.startedAt && (now - storedWindow.startedAt < WINDOW_MS)) {
-      windowStart = storedWindow.startedAt;
-    }
-
-    if (recentTurns.length > 0) {
-      const earliestRecent = Math.min(...recentTurns.map(t => t.createdAt));
-      windowStart = windowStart ? Math.min(windowStart, earliestRecent) : earliestRecent;
-    }
-
-    if (!windowStart) {
-      return {
-        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
-        window: null
-      };
-    }
-
-    const resetsAt = windowStart + WINDOW_MS;
-    if (now >= resetsAt) {
-      return {
-        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
-        window: null
-      };
-    }
-
-    const turnsInWindow = Math.max(1, recentTurns.length || (storedWindow?.messageCount || 1));
-    const tokensInWindow = messages
-      .filter(m => m.createdAt && m.createdAt >= windowStart)
-      .reduce((sum, m) => sum + (m.tokens || 0), 0);
-
-    const modelKey = this.modelKey(model) || '';
-    const isHaiku = modelKey.includes('haiku');
-    const isSonnet = modelKey.includes('sonnet');
-    const maxTurns = isHaiku ? 45 : isSonnet ? 20 : 30;
-    const maxTokens = isHaiku ? 120000 : isSonnet ? 60000 : 80000;
-
-    const turnRatio = turnsInWindow / maxTurns;
-    const tokenRatio = tokensInWindow > 0 ? (tokensInWindow / maxTokens) : 0;
-    const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
-
-    const limit = {
-      key: 'session',
-      label: 'Session (5h)',
-      percent,
-      estimated: true,
-      resetsAt,
-      turns: turnsInWindow
-    };
-
-    const nextWindow = {
-      startedAt: windowStart,
-      resetsAt,
-      messageCount: turnsInWindow,
-      totalTokens: tokensInWindow,
-      model: modelKey
-    };
-
-    return { limit, window: nextWindow };
   },
 
   /**

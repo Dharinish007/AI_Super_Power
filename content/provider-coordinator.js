@@ -73,6 +73,10 @@ export class ProviderCoordinator {
     this._wasStreaming = false;
     this._sessionStartTokens = new Map();
     this._sendBadge = badgeSender();
+    this._activeOrgId = undefined;
+    this._streamLimits = null;
+    this._accountLimits = null;
+    this._accountLimitsAt = 0;
   }
 
   init() {
@@ -88,6 +92,7 @@ export class ProviderCoordinator {
     this.tokenizer.warm(); // Build the BPE tables while the first read is in flight
     this._loadSiteTokenizer();
     this._listenForLimits();
+    this._fetchAccountLimits();
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
     if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
       this.panel = servePanel({
@@ -186,6 +191,7 @@ export class ProviderCoordinator {
   }
 
   async refresh() {
+    await this._fetchAccountLimits(true);
     await this.handleDOMChange({ isRefresh: true, forceApi: true });
   }
 
@@ -198,58 +204,112 @@ export class ProviderCoordinator {
     return diagnosticsSnapshot(this.latestState, currentRef, { provider: this.provider.name });
   }
 
+  _getOrgScope() {
+    const p = this.provider;
+    return typeof p.getOrgId === 'function' ? p.getOrgId() : null;
+  }
+
+  _limitKey(suffix = '') {
+    const p = this.provider;
+    const org = this._getOrgScope();
+    const base = org ? `limits:${p.name}:${org}` : `limits:${p.name}`;
+    return suffix ? `${base}:${suffix}` : base;
+  }
+
+  _loadStoredLimits() {
+    const p = this.provider;
+    if (!p.limitStreamSource) return;
+    const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
+    if (!store) return;
+    const key = this._limitKey();
+    const accountKey = this._limitKey('account');
+    const fallbackStreamKey = `limits:${p.name}`;
+    const fallbackAccountKey = `limits:${p.name}:account`;
+
+    store.get([key, accountKey, fallbackStreamKey, fallbackAccountKey]).then(r => {
+      const streamData = r?.[key] || r?.[fallbackStreamKey];
+      if (streamData && (!this._streamLimits || (streamData.at || 0) >= (this._streamLimits.at || 0))) {
+        this._streamLimits = streamData;
+      }
+      const accountData = r?.[accountKey] || r?.[fallbackAccountKey];
+      if (accountData && (!this._accountLimits || (accountData.at || 0) >= (this._accountLimitsAt || 0))) {
+        this._accountLimits = accountData.limits;
+        this._accountLimitsAt = accountData.at;
+      }
+      if (streamData || accountData) this.handleDOMChange();
+    }).catch(() => {});
+  }
+
+  /**
+   * Fetches account-wide usage limits from /api/organizations/{org}/usage.
+   * Scoped to the current organization and cached locally.
+   */
+  async _fetchAccountLimits(force = false) {
+    if (!this.provider.fetchUsage || typeof this.provider.fetchUsage !== 'function') return;
+    const now = Date.now();
+    if (!force && this._accountLimitsAt && (now - this._accountLimitsAt < API_TTL_MS)) return;
+    try {
+      const limits = await this.provider.fetchUsage((p) => this._fetchJson(p));
+      if (Array.isArray(limits) && limits.length > 0) {
+        this._accountLimits = limits;
+        this._accountLimitsAt = now;
+        const key = this._limitKey('account');
+        const fallbackKey = `limits:${this.provider.name}:account`;
+        const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
+        store?.set({ [key]: { limits, at: now }, [fallbackKey]: { limits, at: now } }).catch(() => {});
+        this.handleDOMChange();
+      }
+    } catch (_) {}
+  }
+
   /**
    * Plan limits streamed with each reply (adapters with `limitStreamSource`, i.e. Claude). The last
-   * value (percent + reset time only) is kept in extension storage so other chats and reloads show it.
+   * value (percent + reset time only) is kept in extension storage scoped to account/org so other chats and reloads show it.
    */
   _listenForLimits() {
     const p = this.provider;
-    if (!p.limitStreamSource || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
     const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
-    const key = `limits:${p.name}`;
-    store?.get(key).then(r => { if (r?.[key] && !this._streamLimits) this._streamLimits = r[key]; }).catch(() => {});
-    if (p.name === 'Claude') {
-      store?.get('limits:Claude:window').then(r => { if (r?.['limits:Claude:window'] && !this._storedWindow) this._storedWindow = r['limits:Claude:window']; }).catch(() => {});
-    }
+    this._loadStoredLimits();
     window.addEventListener('message', (e) => {
-      if (e.source !== window || e.data?.source !== p.limitStreamSource) return;
-      const limits = p.parseMessageLimit(e.data.messageLimit);
-      if (!limits.length) return;
+      if (e.origin && typeof location !== 'undefined' && e.origin !== location.origin) return;
+      const data = e.data;
+      if (!data || typeof data !== 'object') return;
+      const isOurWatcher = data.source === p.limitStreamSource || data.source === 'CONTEXT_MONITOR_CLAUDE_LIMIT';
+      const isClaudeMonitor = data.source === 'claude-usage-monitor';
+      if (!isOurWatcher && !isClaudeMonitor) return;
+
+      const rawLimits = data.messageLimit || data.limits;
+      const limits = p.parseMessageLimit(rawLimits);
+      if (!limits || !limits.length) return;
       this._streamLimits = { limits, at: Date.now() };
-      store?.set({ [key]: this._streamLimits }).catch(() => {});
+      const key = this._limitKey();
+      const fallbackKey = `limits:${p.name}`;
+      store?.set({ [key]: this._streamLimits, [fallbackKey]: this._streamLimits }).catch(() => {});
       this.handleDOMChange();
     });
   }
 
   /**
-   * Limits to show: the newer of /usage (empty on some plans) and the last streamed value. A limit
-   * past its reset time shows as 0%. Adapters that stream limits show a placeholder until the first reply.
+   * Limits to show: the newer of /usage and the last streamed value. A limit
+   * past its reset time shows as 0%. Pure API / stream authoritative model with zero synthetic math.
    */
-  _currentLimits(apiLimits = [], plan = null, messages = [], model = null) {
+  _currentLimits(apiLimits = [], plan = null) {
     const streamed = this._streamLimits;
-    // Prefer the fresh streamed value whenever the API copy is not newer; same millisecond on a real
-    // session means only two streams of activity are visible, so the newest entry wins over the older one.
-    const useStream = Boolean(streamed && (!apiLimits.length || (streamed.at || 0) >= (this._api?.at || 0)));
+    const serverLimits = apiLimits.length ? apiLimits : (this._accountLimits || []);
+    const useStream = Boolean(streamed && (!serverLimits.length || (streamed.at || 0) >= (this._accountLimitsAt || this._api?.at || 0)));
     const now = Date.now();
-    const rawLimits = useStream ? streamed.limits : apiLimits;
+    const rawLimits = useStream ? streamed.limits : serverLimits;
     const limits = rawLimits
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
 
-    // If exact limits arrived from API or stream with numerical values, use them
-    const hasExact = limits.some(l => typeof l.percent === 'number' && !l.estimated);
-    if (hasExact) return limits;
+    if (limits.length) return limits;
 
-    // For Claude on Free plan: calculate active 5-hour session window
-    if (this.provider.name === 'Claude' && String(plan).toLowerCase() === 'free') {
-      if (typeof this.provider.resolveSessionWindow === 'function') {
-        const { limit, window } = this.provider.resolveSessionWindow(messages, model, now, this._storedWindow);
-        if (window && typeof chrome !== 'undefined' && chrome.storage?.local) {
-          this._storedWindow = window;
-          chrome.storage.local.set({ 'limits:Claude:window': window }).catch(() => {});
-        }
-        return [limit];
+    if (this.provider.name === 'Claude') {
+      if (String(plan).toLowerCase() === 'free') {
+        return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
       }
-      return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
+      return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
     }
 
     if (!limits.length && this.provider.limitStreamSource) {
@@ -265,6 +325,20 @@ export class ProviderCoordinator {
     const runSeq = ++this._runSeq;
     const p = this.provider;
     try {
+      const currentOrg = this._getOrgScope();
+      if (this._activeOrgId !== undefined && currentOrg && this._activeOrgId !== currentOrg) {
+        this._activeOrgId = currentOrg;
+        this._streamLimits = null;
+        this._accountLimits = null;
+        this._accountLimitsAt = 0;
+        this._api = null;
+        this._apiFailure = null;
+        this._loadStoredLimits();
+        this._fetchAccountLimits(true);
+      } else if (this._activeOrgId === undefined && currentOrg) {
+        this._activeOrgId = currentOrg;
+      }
+
       const conversationId = p.conversationId(location.href);
       if (conversationId !== this.activeConversationId) {
         // Another saved conversation: show loading, never the previous one's numbers
@@ -385,7 +459,7 @@ export class ProviderCoordinator {
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
       // Plan usage limits as the site reports them (Claude only); read with the conversation
-      state.limits = this._currentLimits(saved?.limits || [], plan, tokenized, modelRaw);
+      state.limits = this._currentLimits(saved?.limits || [], plan);
       // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
       if (reached) {

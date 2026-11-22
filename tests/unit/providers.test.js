@@ -180,23 +180,24 @@ export async function runProvidersTests() {
 
       const coord = new ProviderCoordinator(ClaudeProvider);
       assert('Limits: nothing known yet -> placeholder session row (percent null)', coord._currentLimits([]).length === 1 && coord._currentLimits([])[0].percent === null);
-      assert('Limits: Free plan initial load -> 5h window ready', coord._currentLimits([], 'Free')[0].note.includes('5h window ready'));
+      assert('Limits: Free plan initial load -> dynamic limit note', coord._currentLimits([], 'Free')[0].note === 'Available · Dynamic limit');
 
-      // 5-Hour session window calculation & pacing tests
-      const res0 = ClaudeProvider.resolveSessionWindow([], 'claude-haiku-5-5', now);
-      assert('Session window: empty -> 0% window ready', res0.limit.percent === 0 && res0.limit.resetsAt === null);
-      const t1 = now - 3600000; // 1 hour ago
-      const msgs = [
-        { role: 'user', createdAt: t1, tokens: 5000 },
-        { role: 'assistant', createdAt: t1 + 1000, tokens: 10000 },
-        { role: 'user', createdAt: now - 1800000, tokens: 5000 }
-      ];
-      const res1 = ClaudeProvider.resolveSessionWindow(msgs, 'claude-haiku-5-5', now);
-      assert('Session window: active turns -> resets in 4h and calculates pacing',
-        res1.limit.resetsAt === t1 + 5 * 3600 * 1000 && res1.limit.percent > 0 && res1.limit.estimated === true && res1.window.startedAt === t1);
-      const tOld = now - 6 * 3600 * 1000;
-      const resOld = ClaudeProvider.resolveSessionWindow([{ role: 'user', createdAt: tOld, tokens: 5000 }], 'claude-haiku-5-5', now);
-      assert('Session window: older than 5h -> rolls over to ready', resOld.limit.percent === 0 && resOld.limit.resetsAt === null);
+      // Account-wide fetchUsage testing
+      const fakeFetch = async (url) => {
+        if (url === '/api/organizations') return [{ uuid: 'org-test', capabilities: ['chat'] }];
+        if (url === '/api/organizations/org-test/usage') {
+          return { five_hour: { utilization: 0.65, resets_at: '2026-11-22T20:00:00Z' }, seven_day: { utilization: 0.07, resets_at: '2026-11-29T20:00:00Z' } };
+        }
+        throw new Error('404');
+      };
+      const fetchedLimits = await ClaudeProvider.fetchUsage(fakeFetch);
+      assert('fetchUsage: parses 5h and 7d from /api/organizations/{org}/usage',
+        fetchedLimits.length === 2 && fetchedLimits[0].percent === 65 && fetchedLimits[1].percent === 7);
+
+      // Storage key scoping by organization
+      assert('Limit keys: un-scoped when org is null', coord._limitKey() === 'limits:Claude' && coord._limitKey('account') === 'limits:Claude:account');
+      const scopedCoord = new ProviderCoordinator({ ...ClaudeProvider, getOrgId: () => 'user-org-uuid' });
+      assert('Limit keys: scoped by org when present', scopedCoord._limitKey() === 'limits:Claude:user-org-uuid' && scopedCoord._limitKey('account') === 'limits:Claude:user-org-uuid:account');
       assert('limitText: estimated percentage includes ≈ badge', limitText({ percent: 25, estimated: true, resetIn: '4h 12m' }) === '≈ 25% · resets in 4h 12m');
       assert('limitText: exact percentage without ≈ badge', limitText({ percent: 25, estimated: false, resetIn: '4h 12m' }) === '25% · resets in 4h 12m');
 
