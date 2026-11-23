@@ -37,7 +37,7 @@ function readCleanModule(file) {
 const MODULES = [
   'engine/tokenizer.js', 'engine/gemma-tokenizer.js', 'engine/context-classifier.js', 'engine/evidence-merger.js',
   'engine/confidence-engine.js', 'engine/context-calculator.js', 'engine/context-advisor.js',
-  'engine/export/types.js', 'engine/export/markdown-exporter.js',
+  'engine/export/types.js', 'engine/export/markdown-exporter.js', 'ui/print-styles.js', 'engine/export/print-html-exporter.js',
   'network/request-observer.js',
   'content/conversation-client.js', 'content/message-extractor.js', 'content/plan-detector.js', 'content/model-detector.js',
   'content/attachment-detector.js', 'content/tool-detector.js', 'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/page-actions.js', 'content/panel-channel.js',

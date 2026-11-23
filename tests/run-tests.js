@@ -35,6 +35,7 @@ import { runPreSendTests } from './unit/pre-send.test.js';
 import { runCheckpointExportTests } from './unit/checkpoint-export.test.js';
 import { runExportParserTests } from './unit/export-parser.test.js';
 import { runMarkdownExporterTests } from './unit/markdown-exporter.test.js';
+import { runPrintHtmlExporterTests } from './unit/print-html-exporter.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -69,7 +70,8 @@ const SUITES = [
   runPreSendTests, // Pre-send draft token estimate
   runCheckpointExportTests, // Checkpoint Markdown export
   runExportParserTests, // Chat Export types & message parsers (P1)
-  runMarkdownExporterTests // Chat Export toMarkdown exporter (P2)
+  runMarkdownExporterTests, // Chat Export toMarkdown exporter (P2)
+  runPrintHtmlExporterTests // Chat Export toPrintHtml exporter (P4)
 ];
 
 console.log('========================================================');

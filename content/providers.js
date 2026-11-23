@@ -882,7 +882,7 @@ export const GeminiProvider = {
   /**
    * Computes the rolling 5-hour session window and estimated utilization on Gemini.
    */
-  resolveSessionWindow(messages = [], model = null, now = Date.now(), storedWindow = null) {
+  resolveSessionWindow(messages = [], _model = null, now = Date.now(), storedWindow = null) {
     const WINDOW_MS = 5 * 3600 * 1000;
     const userTurns = messages.filter(m => m.role === 'user');
     const userTurnsWithTime = userTurns.filter(m => m.createdAt && m.createdAt <= now);
