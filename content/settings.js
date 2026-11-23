@@ -20,11 +20,23 @@ export const CONTEXT_FIELDS = [
 const CAPSULE_METHODS = ['ask-ai', 'quick'];
 const THEMES = ['auto', 'dark', 'light'];
 
+export const DEFAULT_FEATURES = Object.freeze({
+  countdown: true,           // Feature 1: default ON
+  alerts: true,              // Feature 2: default ON
+  newChatSuggestion: true,   // Feature 3: default ON
+  biggestItem: false,        // Feature 4: default OFF until verified
+  usageHistory: false,       // Feature 5: default OFF until verified
+  preSendEstimate: false,    // Feature 6: default OFF until verified
+  checkpointExport: false    // Feature 7: default OFF until verified
+});
+
 export const DEFAULT_SETTINGS = Object.freeze({
+  version: 2,
   widgets: { context: { enabled: true, fields: ['tokens', 'percent', 'model', 'exchangesLeft'] }, capsule: { enabled: true } },
   capsule: { method: 'ask-ai' },
   context: { alerts: true },
-  display: { theme: 'auto', compact: false, badges: true }
+  display: { theme: 'auto', compact: false, badges: true },
+  features: DEFAULT_FEATURES
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -39,11 +51,24 @@ export function normalizeSettings(raw) {
   const keys = CONTEXT_FIELDS.map(f => f.key);
   const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
   const d = obj(r.display);
+  const feat = obj(r.features);
+  const alertsVal = bool(feat.alerts, bool(obj(r.context).alerts, DEFAULT_FEATURES.alerts));
+
   return {
+    version: 2,
     widgets: { context: { enabled: bool(wc.enabled, true), fields }, capsule: { enabled: bool(obj(w.capsule).enabled, true) } },
     capsule: { method: oneOf(obj(r.capsule).method, CAPSULE_METHODS) },
-    context: { alerts: bool(obj(r.context).alerts, true) },
-    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) }
+    context: { alerts: alertsVal },
+    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) },
+    features: {
+      countdown: bool(feat.countdown, DEFAULT_FEATURES.countdown),
+      alerts: alertsVal,
+      newChatSuggestion: bool(feat.newChatSuggestion, DEFAULT_FEATURES.newChatSuggestion),
+      biggestItem: bool(feat.biggestItem, DEFAULT_FEATURES.biggestItem),
+      usageHistory: bool(feat.usageHistory, DEFAULT_FEATURES.usageHistory),
+      preSendEstimate: bool(feat.preSendEstimate, DEFAULT_FEATURES.preSendEstimate),
+      checkpointExport: bool(feat.checkpointExport, DEFAULT_FEATURES.checkpointExport)
+    }
   };
 }
 
@@ -57,11 +82,31 @@ export async function writeSettings(area, patch) {
   const cur = await readSettings(area);
   const p = obj(patch);
   const next = normalizeSettings({
+    version: 2,
     widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
     capsule: { ...cur.capsule, ...obj(p.capsule) },
     context: { ...cur.context, ...obj(p.context) },
-    display: { ...cur.display, ...obj(p.display) }
+    display: { ...cur.display, ...obj(p.display) },
+    features: { ...cur.features, ...obj(p.features) }
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+/**
+ * Migrates settings to v2 if version is missing or < 2.
+ * Automatically saves migrated settings back to storage if needed.
+ */
+export async function migrateSettings(area) {
+  try {
+    const raw = (await area.get(SETTINGS_KEY))?.[SETTINGS_KEY];
+    if (!raw || typeof raw !== 'object' || raw.version !== 2) {
+      const migrated = normalizeSettings(raw);
+      await area.set({ [SETTINGS_KEY]: migrated });
+      return { migrated: true, settings: migrated };
+    }
+    return { migrated: false, settings: normalizeSettings(raw) };
+  } catch (_) {
+    return { migrated: false, settings: normalizeSettings() };
+  }
 }

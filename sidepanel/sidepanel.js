@@ -29,11 +29,23 @@ const CONTEXT_FIELDS = [
 const CAPSULE_METHODS = ['ask-ai', 'quick'];
 const THEMES = ['auto', 'dark', 'light'];
 
+const DEFAULT_FEATURES = Object.freeze({
+  countdown: true,           // Feature 1: default ON
+  alerts: true,              // Feature 2: default ON
+  newChatSuggestion: true,   // Feature 3: default ON
+  biggestItem: false,        // Feature 4: default OFF until verified
+  usageHistory: false,       // Feature 5: default OFF until verified
+  preSendEstimate: false,    // Feature 6: default OFF until verified
+  checkpointExport: false    // Feature 7: default OFF until verified
+});
+
 const DEFAULT_SETTINGS = Object.freeze({
+  version: 2,
   widgets: { context: { enabled: true, fields: ['tokens', 'percent', 'model', 'exchangesLeft'] }, capsule: { enabled: true } },
   capsule: { method: 'ask-ai' },
   context: { alerts: true },
-  display: { theme: 'auto', compact: false, badges: true }
+  display: { theme: 'auto', compact: false, badges: true },
+  features: DEFAULT_FEATURES
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -48,11 +60,24 @@ function normalizeSettings(raw) {
   const keys = CONTEXT_FIELDS.map(f => f.key);
   const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
   const d = obj(r.display);
+  const feat = obj(r.features);
+  const alertsVal = bool(feat.alerts, bool(obj(r.context).alerts, DEFAULT_FEATURES.alerts));
+
   return {
+    version: 2,
     widgets: { context: { enabled: bool(wc.enabled, true), fields }, capsule: { enabled: bool(obj(w.capsule).enabled, true) } },
     capsule: { method: oneOf(obj(r.capsule).method, CAPSULE_METHODS) },
-    context: { alerts: bool(obj(r.context).alerts, true) },
-    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) }
+    context: { alerts: alertsVal },
+    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) },
+    features: {
+      countdown: bool(feat.countdown, DEFAULT_FEATURES.countdown),
+      alerts: alertsVal,
+      newChatSuggestion: bool(feat.newChatSuggestion, DEFAULT_FEATURES.newChatSuggestion),
+      biggestItem: bool(feat.biggestItem, DEFAULT_FEATURES.biggestItem),
+      usageHistory: bool(feat.usageHistory, DEFAULT_FEATURES.usageHistory),
+      preSendEstimate: bool(feat.preSendEstimate, DEFAULT_FEATURES.preSendEstimate),
+      checkpointExport: bool(feat.checkpointExport, DEFAULT_FEATURES.checkpointExport)
+    }
   };
 }
 
@@ -66,13 +91,33 @@ async function writeSettings(area, patch) {
   const cur = await readSettings(area);
   const p = obj(patch);
   const next = normalizeSettings({
+    version: 2,
     widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
     capsule: { ...cur.capsule, ...obj(p.capsule) },
     context: { ...cur.context, ...obj(p.context) },
-    display: { ...cur.display, ...obj(p.display) }
+    display: { ...cur.display, ...obj(p.display) },
+    features: { ...cur.features, ...obj(p.features) }
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+/**
+ * Migrates settings to v2 if version is missing or < 2.
+ * Automatically saves migrated settings back to storage if needed.
+ */
+async function migrateSettings(area) {
+  try {
+    const raw = (await area.get(SETTINGS_KEY))?.[SETTINGS_KEY];
+    if (!raw || typeof raw !== 'object' || raw.version !== 2) {
+      const migrated = normalizeSettings(raw);
+      await area.set({ [SETTINGS_KEY]: migrated });
+      return { migrated: true, settings: migrated };
+    }
+    return { migrated: false, settings: normalizeSettings(raw) };
+  } catch (_) {
+    return { migrated: false, settings: normalizeSettings() };
+  }
 }
 
 
@@ -299,6 +344,7 @@ function toWidgetState(s, opts = {}) {
       blocked: Boolean(l.blocked),
       estimated: Boolean(l.estimated),
       note: l.note || null,
+      resetsAt: l.resetsAt || null,
       resetIn: formatResetIn(l.resetsAt)
     })),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
@@ -1045,6 +1091,167 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 }
 
 
+  // --- ui/formatters.js ---
+  /**
+ * Context Monitor - Pure UI Formatters & Thresholds
+ *
+ * Single source of truth for formatting percentages, remaining messages,
+ * reset timestamps, and token counts across all surfaces (Strip component, Detail drawer, Side panel).
+ * Pure functions: formatting only, no recalculation.
+ */
+
+/**
+ * Returns threshold state for a percentage:
+ * - under 50%: 'ok' ('good', green #10a37f, 🟢)
+ * - 50-80%: 'warn' ('warn', amber #f59e0b, 🟡)
+ * - over 80%: 'danger' ('bad', red #ef4444, 🔴, symbol ⚠)
+ * @param {number|null|undefined} pct
+ * @returns {{ state: 'ok'|'warn'|'danger'|'unknown', level: 'good'|'warn'|'bad'|'', color: string|null, emoji: '🟢'|'🟡'|'🔴'|'', symbol: string }}
+ */
+function threshold(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) {
+    return { state: 'unknown', level: '', color: null, emoji: '', symbol: '' };
+  }
+  const rounded = Math.round(pct);
+  if (rounded > 80) {
+    return { state: 'danger', level: 'bad', color: '#ef4444', emoji: '🔴', symbol: '⚠' };
+  }
+  if (rounded >= 50) {
+    return { state: 'warn', level: 'warn', color: '#f59e0b', emoji: '🟡', symbol: '' };
+  }
+  return { state: 'ok', level: 'good', color: '#10a37f', emoji: '🟢', symbol: '' };
+}
+
+/**
+ * Formats a context usage percentage with color, state, and status level.
+ * Always pairs color with text. At 80%+ includes the ⚠ symbol.
+ * @param {number|null|undefined} pct
+ * @returns {{ text: string, display: string, level: 'good'|'warn'|'bad', state: 'ok'|'warn'|'danger', emoji: '🟢'|'🟡'|'🔴', color: string, symbol: string, raw: number }|null}
+ */
+function formatPercent(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  const rounded = Math.round(pct);
+  const t = threshold(pct);
+  return {
+    text: `${rounded}%`,
+    display: t.symbol ? `${rounded}% ${t.symbol}` : `${rounded}%`,
+    level: t.level,
+    state: t.state,
+    emoji: t.emoji,
+    color: t.color,
+    symbol: t.symbol,
+    raw: pct
+  };
+}
+
+/**
+ * Returns color string for a percentage: green (<50%), amber (50-80%), red (>80%).
+ * @param {number|null|undefined} pct
+ * @returns {string|null}
+ */
+function colorForPercent(pct) {
+  const p = formatPercent(pct);
+  return p ? p.color : null;
+}
+
+/**
+ * Returns status level for a percentage: 'good' (<50%), 'warn' (50-80%), 'bad' (>80%).
+ * @param {number|null|undefined} pct
+ * @returns {'good'|'warn'|'bad'|''}
+ */
+function levelForPercent(pct) {
+  const p = formatPercent(pct);
+  return p ? p.level : '';
+}
+
+/**
+ * Formats remaining messages/exchanges left.
+ * e.g., "~28 msgs left".
+ * @param {number|null|undefined} count
+ * @param {{ est?: boolean, split?: boolean }} [options]
+ * @returns {string|{ top: string, bottom: string }|null}
+ */
+function formatMsgs(count, options = {}) {
+  if (count === null || count === undefined || !Number.isFinite(count) || count < 0) {
+    return null;
+  }
+  const num = Math.round(count);
+  if (options.split) {
+    return { top: `~${num} msgs`, bottom: 'left' };
+  }
+  if (options.est) {
+    return `~${num} msgs left · est.`;
+  }
+  return `~${num} msgs left`;
+}
+
+/**
+ * Backwards compatible alias for formatMsgs.
+ * @param {number|null|undefined} exchangesLeft
+ * @returns {string|null}
+ */
+function formatLeft(exchangesLeft) {
+  return formatMsgs(exchangesLeft);
+}
+
+/**
+ * Formats reset time:
+ * - If under 24 hours: "resets 7:20 PM" (or "resets in 2h 10m" if options.relative is true)
+ * - If 24 hours or more: "resets in 1d 8h"
+ * Returns null if missing, invalid, or in the past.
+ * @param {number|string|null|undefined} resetsAt Timestamp (ms/s) or ISO date string
+ * @param {number} [now] Current timestamp
+ * @param {{ relative?: boolean }} [options]
+ * @returns {string|null}
+ */
+function formatReset(resetsAt, now = Date.now(), options = {}) {
+  if (!resetsAt) return null;
+  const ts = typeof resetsAt === 'number'
+    ? (resetsAt < 1e12 ? resetsAt * 1000 : resetsAt)
+    : typeof resetsAt === 'string'
+      ? Date.parse(resetsAt)
+      : null;
+  if (!ts || !Number.isFinite(ts) || ts <= now) return null;
+
+  const diffMs = ts - now;
+  const minTotal = Math.round(diffMs / 60000);
+  if (options.relative || diffMs >= 24 * 3600 * 1000) {
+    if (diffMs < 3600 * 1000) {
+      return `resets in ${Math.max(1, minTotal)}m`;
+    }
+    if (diffMs < 24 * 3600 * 1000) {
+      const hr = Math.floor(minTotal / 60);
+      const min = minTotal % 60;
+      return min > 0 ? `resets in ${hr}h ${min}m` : `resets in ${hr}h`;
+    }
+    const d = Math.floor(minTotal / 1440);
+    const hr = Math.floor((minTotal % 1440) / 60);
+    return `resets in ${d}d ${hr}h`;
+  }
+  const d = new Date(ts);
+  const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `resets ${timeStr}`;
+}
+
+/**
+ * Formats token count with rounded K/M suffixes.
+ * Avoids false precision like "96,009" -> "96K" or "~96K".
+ * Returns null if missing/invalid (never "N/A").
+ * @param {number|null|undefined} tokens
+ * @param {{ approx?: boolean }} [options]
+ * @returns {string|null}
+ */
+function formatTokens(tokens, options = {}) {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens)) return null;
+  const prefix = options.approx ? '~' : '';
+  if (tokens < 1000) return `${prefix}${Math.round(tokens)}`;
+  if (tokens < 1e6) {
+    return `${prefix}${(Math.round(tokens / 100) / 10).toString().replace(/\.0$/, '')}K`;
+  }
+  return `${prefix}${(Math.round(tokens / 1e4) / 100).toString().replace(/\.0$/, '')}M`;
+}
+
+
   // --- ui/dom.js ---
   /**
  * Context Monitor - shared DOM helpers and components (h, icons, Section, RowList, HiddenStack, formatters).
@@ -1054,7 +1261,8 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 const ICONS = {
   chevron: 'M4 6l4 4 4-4',
   refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
-  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z'
+  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
+  gear: 'M6.5 1.5h3l.4 1.5a5 5 0 0 1 1.2.7l1.5-.5 2.1 2.1-.5 1.5c.3.4.5.8.7 1.2l1.5.4v3l-1.5.4a5 5 0 0 1-.7 1.2l.5 1.5-2.1 2.1-1.5-.5a5 5 0 0 1-1.2.7l-.4 1.5h-3l-.4-1.5a5 5 0 0 1-1.2-.7l-1.5.5-2.1-2.1.5-1.5a5 5 0 0 1-.7-1.2l-1.5-.4v-3l1.5-.4a5 5 0 0 1 .7-1.2l-.5-1.5 2.1-2.1 1.5.5a5 5 0 0 1 1.2-.7l.4-1.5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'
 };
 
 const fmtK = (n) => {
@@ -1255,23 +1463,33 @@ function download(parent, base, ext, text, type = 'text/plain') {
  */
 
 const STYLES = `
-  :host { all: initial; }
+  :host { all: initial; display: block; width: 100%; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  .root {
-    --bg: #0F1115; --surface: #171A21; --glass: rgba(23, 26, 33, .85); --border: #262A33; --text: #E6E8EC; --muted: #8A91A0;
-    --accent: #D97757; --good: #4ADE80; --warn: #FBBF24; --warn-text: #FBBF24; --danger: #F87171; --track: #262A33; --hover: rgba(255, 255, 255, .06);
-    --s1: #D97757; --s2: #60A5FA; --s3: #A78BFA; --s4: #34D399; --s5: #F472B6; --s6: #FBBF24; --s7: #22D3EE; --s8: #94A3B8;
-    --shadow: 0 8px 30px rgba(0, 0, 0, .25); --on-accent: #0F1115;
+  :host, .root, .glance-container {
+    --bg: #0F1117; --surface: #1E222B; --surface-hover: #272C37; --glass: rgba(30, 34, 43, .90);
+    --border: rgba(255, 255, 255, .18); --border-hover: rgba(255, 255, 255, .35);
+    --text: #FFFFFF; --muted: #D1D5DB;
+    --accent: #E07A5F; --good: #4ADE80; --warn: #FBBF24; --warn-text: #FDE047; --danger: #F87171;
+    --track: rgba(255, 255, 255, .15); --hover: rgba(255, 255, 255, .10);
+    --s1: #E07A5F; --s2: #60A5FA; --s3: #A78BFA; --s4: #34D399; --s5: #F472B6; --s6: #FBBF24; --s7: #22D3EE; --s8: #94A3B8;
+    --shadow: 0 4px 20px -2px rgba(0, 0, 0, .60), 0 0 0 1px rgba(255, 255, 255, .15);
+    --shadow-hover: 0 6px 24px -2px rgba(0, 0, 0, .75), 0 0 0 1px rgba(255, 255, 255, .25);
+    --on-accent: #0F1117;
     --ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     position: relative; font: 12.5px/1.45 var(--ui); color: var(--text); color-scheme: dark;
     -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
   }
-  .root.light {
-    --bg: #FAF9F6; --surface: #FFFFFF; --glass: rgba(255, 255, 255, .85); --border: #E7E4DD; --text: #1F2328; --muted: #6B7280;
-    --accent: #C15F3C; --good: #16A34A; --warn: #D97706; --warn-text: #B45309; --danger: #DC2626; --track: #EFECE6; --hover: rgba(0, 0, 0, .04);
+  :host(.light), .root.light, .glance-container.light {
+    --bg: #FFFFFF; --surface: #F8F9FA; --surface-hover: #F1F3F5; --glass: rgba(248, 249, 250, .94);
+    --border: rgba(0, 0, 0, .15); --border-hover: rgba(0, 0, 0, .30);
+    --text: #0F172A; --muted: #475569;
+    --accent: #C15F3C; --good: #059669; --warn: #D97706; --warn-text: #B45309; --danger: #DC2626;
+    --track: rgba(0, 0, 0, 0.08); --hover: rgba(0, 0, 0, 0.05);
     --s1: #C15F3C; --s2: #2563EB; --s3: #7C3AED; --s4: #059669; --s5: #DB2777; --s6: #D97706; --s7: #0891B2; --s8: #64748B;
-    --shadow: 0 8px 30px rgba(0, 0, 0, .12); --on-accent: #FFFFFF; color-scheme: light;
+    --shadow: 0 4px 16px -2px rgba(0, 0, 0, .08), 0 0 0 1px rgba(0, 0, 0, .08);
+    --shadow-hover: 0 6px 20px -2px rgba(0, 0, 0, .12), 0 0 0 1px rgba(0, 0, 0, .12);
+    --on-accent: #FFFFFF; color: var(--text); color-scheme: light;
   }
   button { all: unset; box-sizing: border-box; cursor: pointer; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
@@ -1417,6 +1635,132 @@ const STYLES = `
   .settings legend { margin-bottom: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
   .settings .row { justify-content: flex-start; align-items: center; gap: 8px; cursor: pointer; }
   .settings input { flex: none; accent-color: var(--accent); }
+
+  /* Glance Strip & Detail Drawer */
+  .glance-container { display: flex; flex-direction: column; width: 100%; max-width: 768px; margin: 0 auto 6px; box-sizing: border-box; }
+  .glance-strip {
+    display: inline-flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%;
+    padding: 4px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+    font: 500 12px/1.4 var(--ui); color: var(--text); cursor: pointer; user-select: none;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .glance-strip:hover { background: var(--hover); border-color: var(--muted); }
+  .glance-strip.good { border-color: rgba(74, 222, 128, .3); }
+  .glance-strip.warn { border-color: rgba(251, 191, 36, .3); }
+  .glance-strip.bad { border-color: rgba(248, 113, 113, .3); }
+  .glance-strip.good .glance-pct { color: var(--good); font-weight: 600; }
+  .glance-strip.warn .glance-pct { color: var(--warn-text); font-weight: 600; }
+  .glance-strip.bad .glance-pct { color: var(--danger); font-weight: 600; }
+  .glance-dot { flex: none; font-size: 11px; }
+  .glance-sep { color: var(--muted); opacity: .6; }
+  .glance-left { color: var(--text); }
+  .glance-reset { color: var(--muted); }
+
+  .detail-drawer {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 6px; box-shadow: var(--shadow); box-sizing: border-box;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .detail-drawer[hidden] { display: none; }
+  .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .drawer-title { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--text); }
+  .model-caption { font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .drawer-gear { opacity: .7; } .drawer-gear:hover { opacity: 1; }
+
+  /* Stacked Bar */
+  .stack-bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--track); width: 100%; margin: 4px 0 2px; }
+  .stack-bar .seg { display: block; height: 100%; transition: width .3s ease; }
+  .stack-bar .seg-user { background: var(--s2); }
+  .stack-bar .seg-asst { background: var(--s1); }
+  .stack-bar .seg-sys { background: var(--s3); }
+
+  .drawer-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); flex-wrap: wrap; margin-top: 2px; }
+  .drawer-legend .sep { opacity: .4; }
+  .drawer-legend span[data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
+
+  .drawer-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 2px 0; }
+  .drawer-row .k { color: var(--muted); }
+  .drawer-row .v { color: var(--text); font-weight: 500; font-family: var(--mono); }
+  .biggest-row { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 2px; }
+
+  .drawer-usage { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 2px; display: flex; flex-direction: column; gap: 4px; }
+  .usage-row { font-size: 12px; color: var(--text); }
+
+  .dev-view { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .dev-view[hidden] { display: none; }
+  .sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+
+  /* Strip Box (2-column usage & context strip) */
+  .strip-box {
+    display: flex; justify-content: space-between; align-items: center; width: 100%;
+    padding: 8px 14px; border-radius: 10px; background: var(--surface);
+    border: 1px solid var(--border); box-shadow: var(--shadow); user-select: none;
+    box-sizing: border-box; cursor: pointer; color: var(--text);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+  }
+  .strip-box:hover { background: var(--surface-hover); border-color: var(--border-hover); box-shadow: var(--shadow-hover); }
+  .strip-left { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+  .strip-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }
+  .u-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .u-label {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 700; font-size: 10.5px;
+    letter-spacing: 0.03em; min-width: 28px; padding: 1px 6px; border-radius: 4px;
+    color: var(--text); background: var(--track); border: 1px solid var(--border);
+    flex: none;
+  }
+  .u-bar-track {
+    width: 120px; height: 7px; border-radius: 999px; background: var(--track);
+    overflow: hidden; flex: none; box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+  }
+  .u-bar-fill { height: 100%; border-radius: 999px; transition: width .35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .u-bar-fill.solid-ok { background: var(--good); }
+  .u-bar-fill.solid-warn { background: var(--warn); }
+  .u-bar-fill.solid-danger { background: var(--danger); }
+  .u-bar-fill.hatched-ok {
+    background: repeating-linear-gradient(45deg, var(--good), var(--good) 3px, transparent 3px, transparent 6px);
+    background-color: rgba(74, 222, 128, 0.25);
+  }
+  .u-bar-fill.hatched-warn {
+    background: repeating-linear-gradient(45deg, var(--warn), var(--warn) 3px, transparent 3px, transparent 6px);
+    background-color: rgba(251, 191, 36, 0.25);
+  }
+  .u-bar-fill.hatched-danger {
+    background: repeating-linear-gradient(45deg, var(--danger), var(--danger) 3px, transparent 3px, transparent 6px);
+    background-color: rgba(248, 113, 113, 0.25);
+  }
+  .u-bar-fill.neutral { background: var(--muted); opacity: .4; }
+  .u-pct { font-family: var(--mono); font-weight: 700; font-size: 11.5px; min-width: 40px; text-align: right; }
+  .u-pct.ok { color: var(--good); }
+  .u-pct.warn { color: var(--warn-text); }
+  .u-pct.danger { color: var(--danger); }
+  .u-pct.neutral { color: var(--muted); }
+  .u-reset { font-family: var(--mono); color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .u-note { color: var(--muted); font-size: 11px; font-weight: 500; }
+
+  .ctx-msgs { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.15; text-align: right; font-weight: 500; }
+  .ctx-row { display: flex; align-items: center; gap: 7px; color: var(--text); }
+  .ctx-ring-btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; border-radius: 6px; padding: 1px 3px; }
+  .ctx-ring-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ctx-ring-svg { width: 22px; height: 22px; transform: rotate(-90deg); flex: none; }
+  .ctx-ring-track { fill: none; stroke: var(--track); stroke-width: 2.75; }
+  .ctx-ring-arc { fill: none; stroke-width: 2.75; stroke-linecap: round; transition: stroke-dashoffset .35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .ctx-ring-arc.ok { stroke: var(--good); }
+  .ctx-ring-arc.warn { stroke: var(--warn); }
+  .ctx-ring-arc.danger { stroke: var(--danger); }
+  .ctx-ring-arc.hatched { stroke-dasharray: 2.5 2 !important; }
+  .ctx-pct { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+  .ctx-pct.ok { color: var(--good); }
+  .ctx-pct.warn { color: var(--warn-text); }
+  .ctx-pct.danger { color: var(--danger); }
+  .ctx-pct.neutral { color: var(--text); }
+
+  .new-chat-suggestion { color: var(--warn-text); font-size: 11.5px; padding: 4px 0; border-top: 1px solid var(--border); margin-top: 2px; }
+  .sparkline-row { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); padding-top: 4px; margin-top: 2px; }
+  .drawer-sparkline { width: 120px; height: 24px; stroke: var(--accent); stroke-width: 1.5; fill: none; stroke-linecap: round; }
+  .draft-estimate { display: inline-flex; align-items: center; font-size: 11px; color: var(--muted); padding: 2px 8px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); margin-bottom: 4px; width: fit-content; }
+  .visible-only-badge { font-size: 10px; color: var(--muted); margin-left: 4px; font-weight: normal; }
 
   .hide { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -1906,77 +2250,98 @@ function CapsulePanel(parent, ctx) {
 
   // --- ui/context-view.js ---
   /**
- * Context Monitor - Context view: hero (tokens, bar, window, model), stats, Save-as-Capsule card,
- * sections (Breakdown, Biggest messages, Growth, Attachments, Hidden context, Usage limits) and
- * Diagnostics (closed by default), then the footer (confidence, Copy diagnostics, Refresh).
- * Moved out of content/overlay-ui.js. Renders a view state; knows nothing about where it is shown:
- * anything that reads the AI site goes through `actions`.
+ * Context Monitor - Simplified Context view
+ *
+ * Answers two questions:
+ * 1. Can I keep going in this chat?
+ * 2. When do I hit the limit, and when does it reset?
+ *
+ * Structure:
+ * - Header: "Context 96K / 200K · est." + small model caption + Gear button
+ * - Stacked bar with legend: You 4% | Claude & tools 55% | System & memory 41%
+ *   Tooltip on "System & memory": system prompt, memory, tool definitions
+ * - "Biggest item: <name> · <tokens>" row (shown only when data exists)
+ * - Usage section with exactly two rows:
+ *   Session 67% · resets 7:20 PM
+ *   Weekly 7% · resets in 1d 8h
+ * - Dev view (growth sparkline, diagnostics, exact raw numbers; hidden by default, toggled by gear)
+ * - Footer: Copy diagnostics & Refresh buttons (confidence score removed)
  */
+
 
 
 
 
 /**
- * Builds a scrolling `.body` and a `.foot` under `parent` (siblings, so the footer stays put while the body scrolls).
+ * Builds a scrolling `.body` and a `.foot` under `parent`.
  * @param {HTMLElement} parent
  * @param {{ actions: { refresh: () => any, copyDiagnostics: () => any, exportChat: (format: string) => any, saveAsCapsule: () => any },
  *   settings: { display: { compact: boolean } } }} opts
  * @returns {{ el: HTMLElement, foot: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
  */
-function ContextView(parent, { actions, settings }) {
-  let cfg = settings;
-  let shownTokens = null;
-  let countRaf = null;
+function ContextView(parent, { actions }) {
+  let devOpen = false;
 
   const el = h('div', 'body', parent);
+
+  // --- Main Header & Stacked Bar (Hero) ---
   const hero = h('div', 'hero', el);
-  const top = h('div', 'top', hero);
-  const big = h('span', 'big', top, '—');
-  h('span', 'unit', top, 'tokens');
-  const pct = h('span', 'pct', top);
-  const bar = h('div', 'bar', hero);
-  bar.setAttribute('role', 'progressbar');
-  bar.setAttribute('aria-label', 'Context window used');
-  bar.setAttribute('aria-valuemin', '0');
-  bar.setAttribute('aria-valuemax', '100');
-  const fill = h('b', null, bar);
-  const meta = h('div', 'meta', hero);
-  const windowText = h('span', null, meta);
-  const windowBadge = approx(meta, 'Window size is not known for this model/plan');
-  const modelText = h('span', 'model', meta);
-  const limitLine = h('div', 'line', hero);
-  const warnLine = h('div', 'line warn', hero);
-  warnLine.setAttribute('role', 'status');
-  // At 80% full: save the chat as a Capsule now, and continue in a new chat with it
+
+  const topRow = h('div', 'drawer-header', hero);
+  const titleBox = h('div', 'top', topRow);
+  const titleEl = h('span', 'drawer-title', titleBox, 'Context —');
+  const modelCaption = h('span', 'model-caption', titleBox);
+  const gearBtn = iconButton(topRow, ICONS.gear, 'Developer diagnostics');
+  gearBtn.b.classList.add('drawer-gear');
+  gearBtn.b.setAttribute('aria-expanded', 'false');
+
+  // Save card when chat is full (>= 80%)
   const saveCard = h('div', 'card warn hide', hero);
   const saveText = h('div', 't', saveCard);
   h('div', 'm', saveCard, 'Save it as a Capsule, then insert it in a new chat to keep going.');
   textButton(h('div', 'btns', saveCard), '📦 Save as Capsule', () => actions.saveAsCapsule());
 
-  const stats = h('div', 'stats', el);
-  const stat = (label) => {
-    const c = h('div', 'stat', stats);
-    const k = h('div', 'k', c, label);
-    return { k, v: h('div', 'v', c, '—') };
-  };
-  const sUser = stat('You');
-  const sAsst = stat('');
-  const sHidden = stat('Hidden');
+  // One stacked bar
+  const stackBar = h('div', 'stack-bar', hero);
+  stackBar.setAttribute('role', 'progressbar');
+  stackBar.setAttribute('aria-label', 'Context distribution');
+  const segUser = h('span', 'seg seg-user', stackBar);
+  const segAsst = h('span', 'seg seg-asst', stackBar);
+  const segSys = h('span', 'seg seg-sys', stackBar);
 
-  const brk = Section(el, 'Breakdown');
-  const brkRows = RowList(brk.body);
-  h('div', 'divider', brk.body);
-  const totals = RowList(brk.body);
+  // Legend
+  const legend = h('div', 'drawer-legend', hero);
+  const legUser = h('span', null, legend);
+  h('span', 'sep', legend, '|');
+  const legAsst = h('span', null, legend);
+  h('span', 'sep', legend, '|');
+  const legSys = h('span', null, legend);
+  const sysTip = 'System prompt, memory, tool definitions';
+  legSys.dataset.tip = sysTip;
+  legSys.title = sysTip;
 
-  const bigSec = Section(el, 'Biggest messages');
-  const bigRows = RowList(bigSec.body);
-  h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
-  const exportBtns = h('div', 'btns', bigSec.body);
-  for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
-    textButton(exportBtns, label).addEventListener('click', () => actions.exportChat(format));
-  }
+  const warnLine = h('div', 'line warn hide', hero);
+  warnLine.setAttribute('role', 'status');
 
-  const growth = Section(el, 'Growth');
+  // --- Main Content: Biggest Item & Usage ---
+  const mainSec = h('div', 'drawer-main', el);
+  mainSec.style.cssText = 'padding: 0 16px 12px;';
+
+  // "Biggest item: <name> · <tokens>" row (shown only when data exists)
+  const bigRow = h('div', 'drawer-row biggest-row hide', mainSec);
+  h('span', 'k', bigRow, 'Biggest item:');
+  const bigVal = h('span', 'v', bigRow);
+
+  // Usage section with exactly two rows (Session & Weekly)
+  const usageSec = h('div', 'drawer-usage hide', mainSec);
+  const sessionRow = h('div', 'drawer-row usage-row hide', usageSec);
+  const weeklyRow = h('div', 'drawer-row usage-row hide', usageSec);
+
+  // --- Developer View (Hidden by default, opened by gear icon) ---
+  const devView = h('div', 'dev-view hide', mainSec);
+  h('div', 'sec-title', devView, 'Developer Diagnostics & Growth');
+
+  // Growth sparkline
   const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   spark.setAttribute('viewBox', '0 0 200 40');
   spark.setAttribute('preserveAspectRatio', 'none');
@@ -1984,67 +2349,51 @@ function ContextView(parent, { actions, settings }) {
   spark.setAttribute('role', 'img');
   const sparkLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
   spark.appendChild(sparkLine);
-  growth.body.appendChild(spark);
-  const growthText = h('div', 'fine', growth.body);
+  devView.appendChild(spark);
+  const growthText = h('div', 'fine', devView);
 
-  const att = Section(el, 'Attachments');
-  const attRows = RowList(att.body);
-  h('div', 'fine', att.body, 'Images use an estimate; documents the site reads server-side have no known cost here.');
+  // Raw numbers
+  h('div', 'sec-title', devView, 'Exact Raw Counts');
+  const rawRows = RowList(devView);
 
-  const hid = Section(el, 'Hidden context');
-  const hidStack = HiddenStack(hid.body);
-  const hidFine = h('div', 'fine', hid.body);
+  // Export chat buttons
+  h('div', 'sec-title', devView, 'Export Chat');
+  const exportBtns = h('div', 'btns', devView);
+  for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
+    textButton(exportBtns, label).addEventListener('click', () => actions.exportChat(format));
+  }
 
-  const lim = Section(el, 'Usage limits');
-  const limRows = RowList(lim.body);
+  // Diagnostics metadata
+  h('div', 'sec-title', devView, 'Diagnostics');
+  const diagRows = RowList(devView);
+  const evidence = h('ul', 'evidence', devView);
 
-  const diag = Section(el, 'Diagnostics');
-  const diagWarn = h('div', 'line warn', diag.body);
-  const diagRows = RowList(diag.body);
-  const evidence = h('ul', 'evidence', diag.body);
-  h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not. Everything runs in your browser: nothing is sent anywhere.');
+  // Toggle Dev View
+  gearBtn.b.addEventListener('click', () => {
+    devOpen = !devOpen;
+    show(devView, devOpen);
+    gearBtn.b.setAttribute('aria-expanded', String(devOpen));
+  });
 
+  // --- Footer ---
   const foot = h('div', 'foot', parent);
-  const conf = h('div', 'conf', foot);
-  const confDot = h('span', 'dot', conf);
-  const confText = h('span', null, conf);
+  const footNote = h('span', 'fine', foot, 'Context Monitor');
+  footNote.style.flex = '1';
   const copyBtn = iconButton(foot, ICONS.copy, 'Copy diagnostics');
   const refreshBtn = iconButton(foot, ICONS.refresh, 'Refresh');
+
   copyBtn.b.addEventListener('click', () => actions.copyDiagnostics());
   refreshBtn.b.addEventListener('click', async () => {
     if (refreshBtn.b.disabled) return;
     refreshBtn.b.disabled = true;
     refreshBtn.b.classList.add('spin');
-    try { await actions.refresh(); } catch (_) { /* the next automatic pass still updates */ } finally {
+    try { await actions.refresh(); } catch (_) {} finally {
       refreshBtn.b.disabled = false;
       refreshBtn.b.classList.remove('spin');
     }
   });
 
-  const num = (n) => (cfg.display.compact ? fmtK(Math.round(n)) : fmtInt(n));
-
-  /** Token count animates from the last shown value (instant with reduced motion). */
-  function countTo(target) {
-    if (countRaf) cancelAnimationFrame(countRaf);
-    if (target === null) { setText(big, '—'); shownTokens = null; return; }
-    const from = shownTokens;
-    if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
-      shownTokens = target;
-      setText(big, num(target));
-      return;
-    }
-    const start = performance.now();
-    const step = (t) => {
-      const k = Math.min(1, (t - start) / 400);
-      const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
-      setText(big, num(v));
-      shownTokens = k < 1 ? v : target;
-      countRaf = k < 1 ? requestAnimationFrame(step) : null;
-    };
-    countRaf = requestAnimationFrame(step);
-  }
-
-  /** Tokens by turn as a line, scaled to the window when known (so the slope reads as "how fast it fills"). */
+  /** Tokens by turn sparkline */
   function renderSpark(vm, ready) {
     const g = ready ? vm.growth : null;
     if (!g || g.points.length < 2) {
@@ -2059,65 +2408,125 @@ function ContextView(parent, { actions, settings }) {
     setText(growthText, `${g.turns} turns · ${fmtInt(g.total)} message tokens${vm.contextLimit ? ` of ${fmtK(vm.contextLimit)}` : ''}`);
   }
 
-  /** @param {Object} vm Output of toWidgetState() */
+  /** Update view with latest view state */
   function update(vm) {
-    const ready = vm.ready !== false;
-    countTo(ready ? vm.usedTokens : null);
-    setText(pct, ready && vm.percentage !== null ? `${vm.percentage === 0 && vm.usedTokens > 0 ? '<0.1' : vm.percentage}%` : '');
-    const known = ready && vm.percentage !== null;
-    setClass(bar, `bar ${known ? tone(vm.percentage) : 'unknown'}`.trim());
-    const width = known ? `${Math.min(100, vm.percentage)}%` : '';
-    if (fill.style.width !== width) fill.style.width = width;
-    if (known) setAttr(bar, 'aria-valuenow', String(vm.percentage)); else bar.removeAttribute('aria-valuenow');
-    setText(windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
-    show(windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
-    windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
-    const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
-    setText(modelText, model);
-    setAttr(modelText, 'title', `${vm.provider}: ${model}`);
-    const head = headlineLimit(vm.limits);
-    setText(limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
-    setText(warnLine, vm.warning || '');
+    const ready = Boolean(vm) && vm.ready !== false;
+
+    // 1. Header: "Context 96K / 200K · est."
+    const used = ready ? formatTokens(vm.usedTokens) : null;
+    const limit = ready ? formatTokens(vm.contextLimit) : null;
+    const est = ready && vm.limitStatus !== 'VERIFIED' ? ' · est.' : '';
+    const titleStr = ready && used
+      ? (limit ? `Context ${used} / ${limit}${est}` : `Context ${used}${est}`)
+      : 'Context —';
+    setText(titleEl, titleStr);
+
+    // Small model caption
+    const modelStr = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
+    setText(modelCaption, modelStr ? `(${modelStr})` : '');
+
+    // Warning
+    if (vm.warning) {
+      setText(warnLine, vm.warning);
+      show(warnLine, true);
+    } else {
+      show(warnLine, false);
+    }
+
+    // Save Capsule card at >= 80%
     const full = ready && vm.percentage !== null && alertLevel(vm.percentage) >= 80;
     show(saveCard, full);
     if (full) setText(saveText, `💡 This chat is ${vm.percentage}% full`);
 
+    // 2. Stacked Bar & Legend
     const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
-    setText(sAsst.k, `${vm.provider} + tools`);
-    setText(sUser.v, ready ? fmtK(st.user) : '—');
-    setText(sAsst.v, ready ? fmtK(st.assistant) : '—');
-    setText(sHidden.v, ready ? fmtK(st.hidden) : '—');
+    const total = (st.user + st.assistant + st.hidden) || vm.usedTokens || 1;
+    const youPct = Math.round((st.user / total) * 100);
+    const asstPct = Math.round((st.assistant / total) * 100);
+    const sysPct = Math.max(0, 100 - youPct - asstPct);
 
-    const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
-    bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
+    segUser.style.width = `${youPct}%`;
+    segAsst.style.width = `${asstPct}%`;
+    segSys.style.width = `${sysPct}%`;
+
+    setText(legUser, `You ${youPct}%`);
+    setText(legAsst, `${vm.provider || 'Assistant'} & tools ${asstPct}%`);
+    setText(legSys, `System & memory ${sysPct}%`);
+
+    // 3. Biggest item row (shown only when data exists)
+    const big = vm.biggest?.[0];
+    if (ready && big && big.tokens > 0) {
+      const role = big.role === 'user' ? 'You' : (vm.provider || 'Assistant');
+      const name = `${role} (#${big.turn})`;
+      setText(bigVal, `${name} · ${formatTokens(big.tokens)}`);
+      show(bigRow, true);
+    } else {
+      show(bigRow, false);
+    }
+
+    // 4. Usage section with exactly two rows (Session & Weekly)
+    const limits = vm.limits || [];
+    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session'));
+    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
+    let hasUsage = false;
+
+    if (session) {
+      const sPct = session.percent !== null && session.percent !== undefined
+        ? formatPercent(session.percent)?.text
+        : (session.remaining !== undefined && session.remaining !== null ? `${session.remaining} left` : null);
+      const sReset = formatReset(session.resetsAt) || (session.resetIn ? `resets in ${session.resetIn}` : null);
+      const parts = [sPct, sReset].filter(Boolean);
+      if (parts.length) {
+        setText(sessionRow, `Session ${parts.join(' · ')}`);
+        show(sessionRow, true);
+        hasUsage = true;
+      } else {
+        show(sessionRow, false);
+      }
+    } else {
+      show(sessionRow, false);
+    }
+
+    if (weekly) {
+      const wPct = weekly.percent !== null && weekly.percent !== undefined
+        ? formatPercent(weekly.percent)?.text
+        : (weekly.remaining !== undefined && weekly.remaining !== null ? `${weekly.remaining} left` : null);
+      const wReset = formatReset(weekly.resetsAt) || (weekly.resetIn ? `resets in ${weekly.resetIn}` : null);
+      const parts = [wPct, wReset].filter(Boolean);
+      if (parts.length) {
+        setText(weeklyRow, `Weekly ${parts.join(' · ')}`);
+        show(weeklyRow, true);
+        hasUsage = true;
+      } else {
+        show(weeklyRow, false);
+      }
+    } else {
+      show(weeklyRow, false);
+    }
+
+    show(usageSec, hasUsage);
+
+    // 5. Dev View details (growth, exact raw numbers, diagnostics)
     renderSpark(vm, ready);
-    show(att.el, (vm.attachmentFiles || []).length > 0);
-    attRows.update((vm.attachmentFiles || []).map(f => ({
-      label: f.name,
-      value: f.tokens !== null ? `~${f.tokens.toLocaleString()}` : f.inText ? 'in message text' : 'cost unknown'
-    })));
-    totals.update([
-      { label: 'Used', value: tokens(vm.usedTokens) },
-      { label: 'Remaining', value: tokens(vm.remainingTokens) },
-      { label: 'Window', value: vm.contextLimit ? vm.contextLimit.toLocaleString() : 'Unknown', tip: vm.contextLimit && vm.limitStatus === 'VERIFIED' ? null : (vm.contextLimit ? TAG_TIPS.UNVERIFIED : TAG_TIPS.UNKNOWN) }
+
+    const numExact = (n) => (n !== null && n !== undefined ? n.toLocaleString() : 'Unknown');
+    rawRows.update([
+      { label: 'Used tokens', value: numExact(vm.usedTokens) },
+      { label: 'Remaining tokens', value: numExact(vm.remainingTokens) },
+      { label: 'Window size', value: numExact(vm.contextLimit) },
+      { label: 'You', value: numExact(st.user) },
+      { label: 'Assistant + tools', value: numExact(st.assistant) },
+      { label: 'System & hidden', value: numExact(st.hidden) }
     ]);
 
-    const items = vm.hiddenItems || [];
-    show(hid.el, items.length > 0);
-    hidStack.update(items);
-    setText(hidFine, `Read from ${vm.provider}'s own data. ≈ marks estimates; anything else ${vm.provider} adds on its servers is not visible.`);
-    show(lim.el, (vm.limits || []).length > 0);
-    limRows.update((vm.limits || []).map(l => ({ label: l.label, value: limitText(l) })));
-
-    setText(diagWarn, vm.warning || '');
     diagRows.update([
-      { label: 'Provider', value: vm.provider },
-      { label: 'Model', value: model || '—' },
+      { label: 'Provider', value: vm.provider || '—' },
+      { label: 'Model', value: modelStr || '—' },
       { label: 'Plan', value: vm.plan || 'Unknown' },
       { label: 'Source', value: vm.source || '—' },
       { label: 'Turns', value: ready ? String(vm.turns) : '—' }
     ]);
+
     const evSig = JSON.stringify(vm.evidence || []);
     if (evidence.dataset.sig !== evSig) {
       evidence.dataset.sig = evSig;
@@ -2128,11 +2537,9 @@ function ContextView(parent, { actions, settings }) {
         h('span', null, li, e.text);
       }
     }
-    setClass(confDot, `dot ${ready ? vm.confidenceLevel : 'LOW'}`);
-    setText(confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
   }
 
-  return { el, foot, update, setSettings(s) { cfg = s; } };
+  return { el, foot, update, setSettings(_s) {} };
 }
 
 

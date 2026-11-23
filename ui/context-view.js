@@ -1,75 +1,96 @@
 /**
- * Context Monitor - Context view: hero (tokens, bar, window, model), stats, Save-as-Capsule card,
- * sections (Breakdown, Biggest messages, Growth, Attachments, Hidden context, Usage limits) and
- * Diagnostics (closed by default), then the footer (confidence, Copy diagnostics, Refresh).
- * Moved out of content/overlay-ui.js. Renders a view state; knows nothing about where it is shown:
- * anything that reads the AI site goes through `actions`.
+ * Context Monitor - Simplified Context view
+ *
+ * Answers two questions:
+ * 1. Can I keep going in this chat?
+ * 2. When do I hit the limit, and when does it reset?
+ *
+ * Structure:
+ * - Header: "Context 96K / 200K · est." + small model caption + Gear button
+ * - Stacked bar with legend: You 4% | Claude & tools 55% | System & memory 41%
+ *   Tooltip on "System & memory": system prompt, memory, tool definitions
+ * - "Biggest item: <name> · <tokens>" row (shown only when data exists)
+ * - Usage section with exactly two rows:
+ *   Session 67% · resets 7:20 PM
+ *   Weekly 7% · resets in 1d 8h
+ * - Dev view (growth sparkline, diagnostics, exact raw numbers; hidden by default, toggled by gear)
+ * - Footer: Copy diagnostics & Refresh buttons (confidence score removed)
  */
 
 import { alertLevel } from '../content/widget-state.js';
-import { h, Section, RowList, HiddenStack, textButton, iconButton, approx, TAG_TIPS, ICONS, setText, setAttr, setClass, show, fmtK, fmtInt, tone, levelName, reducedMotion, limitText, headlineLimit } from './dom.js';
+import { h, RowList, textButton, iconButton, ICONS, setText, show, fmtK, fmtInt } from './dom.js';
+import { formatTokens, formatPercent, formatReset } from './formatters.js';
 
 /**
- * Builds a scrolling `.body` and a `.foot` under `parent` (siblings, so the footer stays put while the body scrolls).
+ * Builds a scrolling `.body` and a `.foot` under `parent`.
  * @param {HTMLElement} parent
  * @param {{ actions: { refresh: () => any, copyDiagnostics: () => any, exportChat: (format: string) => any, saveAsCapsule: () => any },
  *   settings: { display: { compact: boolean } } }} opts
  * @returns {{ el: HTMLElement, foot: HTMLElement, update: (vm: Object) => void, setSettings: (s: Object) => void }}
  */
-export function ContextView(parent, { actions, settings }) {
-  let cfg = settings;
-  let shownTokens = null;
-  let countRaf = null;
+export function ContextView(parent, { actions }) {
+  let devOpen = false;
 
   const el = h('div', 'body', parent);
+
+  // --- Main Header & Stacked Bar (Hero) ---
   const hero = h('div', 'hero', el);
-  const top = h('div', 'top', hero);
-  const big = h('span', 'big', top, '—');
-  h('span', 'unit', top, 'tokens');
-  const pct = h('span', 'pct', top);
-  const bar = h('div', 'bar', hero);
-  bar.setAttribute('role', 'progressbar');
-  bar.setAttribute('aria-label', 'Context window used');
-  bar.setAttribute('aria-valuemin', '0');
-  bar.setAttribute('aria-valuemax', '100');
-  const fill = h('b', null, bar);
-  const meta = h('div', 'meta', hero);
-  const windowText = h('span', null, meta);
-  const windowBadge = approx(meta, 'Window size is not known for this model/plan');
-  const modelText = h('span', 'model', meta);
-  const limitLine = h('div', 'line', hero);
-  const warnLine = h('div', 'line warn', hero);
-  warnLine.setAttribute('role', 'status');
-  // At 80% full: save the chat as a Capsule now, and continue in a new chat with it
+
+  const topRow = h('div', 'drawer-header', hero);
+  const titleBox = h('div', 'top', topRow);
+  const titleEl = h('span', 'drawer-title', titleBox, 'Context —');
+  const modelCaption = h('span', 'model-caption', titleBox);
+  const gearBtn = iconButton(topRow, ICONS.gear, 'Developer diagnostics');
+  gearBtn.b.classList.add('drawer-gear');
+  gearBtn.b.setAttribute('aria-expanded', 'false');
+
+  // Save card when chat is full (>= 80%)
   const saveCard = h('div', 'card warn hide', hero);
   const saveText = h('div', 't', saveCard);
   h('div', 'm', saveCard, 'Save it as a Capsule, then insert it in a new chat to keep going.');
   textButton(h('div', 'btns', saveCard), '📦 Save as Capsule', () => actions.saveAsCapsule());
 
-  const stats = h('div', 'stats', el);
-  const stat = (label) => {
-    const c = h('div', 'stat', stats);
-    const k = h('div', 'k', c, label);
-    return { k, v: h('div', 'v', c, '—') };
-  };
-  const sUser = stat('You');
-  const sAsst = stat('');
-  const sHidden = stat('Hidden');
+  // One stacked bar
+  const stackBar = h('div', 'stack-bar', hero);
+  stackBar.setAttribute('role', 'progressbar');
+  stackBar.setAttribute('aria-label', 'Context distribution');
+  const segUser = h('span', 'seg seg-user', stackBar);
+  const segAsst = h('span', 'seg seg-asst', stackBar);
+  const segSys = h('span', 'seg seg-sys', stackBar);
 
-  const brk = Section(el, 'Breakdown');
-  const brkRows = RowList(brk.body);
-  h('div', 'divider', brk.body);
-  const totals = RowList(brk.body);
+  // Legend
+  const legend = h('div', 'drawer-legend', hero);
+  const legUser = h('span', null, legend);
+  h('span', 'sep', legend, '|');
+  const legAsst = h('span', null, legend);
+  h('span', 'sep', legend, '|');
+  const legSys = h('span', null, legend);
+  const sysTip = 'System prompt, memory, tool definitions';
+  legSys.dataset.tip = sysTip;
+  legSys.title = sysTip;
 
-  const bigSec = Section(el, 'Biggest messages');
-  const bigRows = RowList(bigSec.body);
-  h('div', 'fine', bigSec.body, 'The largest turns in this chat. Trim them, or save them to a file, to free room.');
-  const exportBtns = h('div', 'btns', bigSec.body);
-  for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
-    textButton(exportBtns, label).addEventListener('click', () => actions.exportChat(format));
-  }
+  const warnLine = h('div', 'line warn hide', hero);
+  warnLine.setAttribute('role', 'status');
 
-  const growth = Section(el, 'Growth');
+  // --- Main Content: Biggest Item & Usage ---
+  const mainSec = h('div', 'drawer-main', el);
+  mainSec.style.cssText = 'padding: 0 16px 12px;';
+
+  // "Biggest item: <name> · <tokens>" row (shown only when data exists)
+  const bigRow = h('div', 'drawer-row biggest-row hide', mainSec);
+  h('span', 'k', bigRow, 'Biggest item:');
+  const bigVal = h('span', 'v', bigRow);
+
+  // Usage section with exactly two rows (Session & Weekly)
+  const usageSec = h('div', 'drawer-usage hide', mainSec);
+  const sessionRow = h('div', 'drawer-row usage-row hide', usageSec);
+  const weeklyRow = h('div', 'drawer-row usage-row hide', usageSec);
+
+  // --- Developer View (Hidden by default, opened by gear icon) ---
+  const devView = h('div', 'dev-view hide', mainSec);
+  h('div', 'sec-title', devView, 'Developer Diagnostics & Growth');
+
+  // Growth sparkline
   const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   spark.setAttribute('viewBox', '0 0 200 40');
   spark.setAttribute('preserveAspectRatio', 'none');
@@ -77,67 +98,51 @@ export function ContextView(parent, { actions, settings }) {
   spark.setAttribute('role', 'img');
   const sparkLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
   spark.appendChild(sparkLine);
-  growth.body.appendChild(spark);
-  const growthText = h('div', 'fine', growth.body);
+  devView.appendChild(spark);
+  const growthText = h('div', 'fine', devView);
 
-  const att = Section(el, 'Attachments');
-  const attRows = RowList(att.body);
-  h('div', 'fine', att.body, 'Images use an estimate; documents the site reads server-side have no known cost here.');
+  // Raw numbers
+  h('div', 'sec-title', devView, 'Exact Raw Counts');
+  const rawRows = RowList(devView);
 
-  const hid = Section(el, 'Hidden context');
-  const hidStack = HiddenStack(hid.body);
-  const hidFine = h('div', 'fine', hid.body);
+  // Export chat buttons
+  h('div', 'sec-title', devView, 'Export Chat');
+  const exportBtns = h('div', 'btns', devView);
+  for (const [label, format] of [['📄 Markdown', 'md'], ['📝 Text', 'txt'], ['🧾 JSON', 'json']]) {
+    textButton(exportBtns, label).addEventListener('click', () => actions.exportChat(format));
+  }
 
-  const lim = Section(el, 'Usage limits');
-  const limRows = RowList(lim.body);
+  // Diagnostics metadata
+  h('div', 'sec-title', devView, 'Diagnostics');
+  const diagRows = RowList(devView);
+  const evidence = h('ul', 'evidence', devView);
 
-  const diag = Section(el, 'Diagnostics');
-  const diagWarn = h('div', 'line warn', diag.body);
-  const diagRows = RowList(diag.body);
-  const evidence = h('ul', 'evidence', diag.body);
-  h('div', 'fine', diag.body, 'Counts visible text, hidden context the site exposes, and estimates where it does not. Everything runs in your browser: nothing is sent anywhere.');
+  // Toggle Dev View
+  gearBtn.b.addEventListener('click', () => {
+    devOpen = !devOpen;
+    show(devView, devOpen);
+    gearBtn.b.setAttribute('aria-expanded', String(devOpen));
+  });
 
+  // --- Footer ---
   const foot = h('div', 'foot', parent);
-  const conf = h('div', 'conf', foot);
-  const confDot = h('span', 'dot', conf);
-  const confText = h('span', null, conf);
+  const footNote = h('span', 'fine', foot, 'Context Monitor');
+  footNote.style.flex = '1';
   const copyBtn = iconButton(foot, ICONS.copy, 'Copy diagnostics');
   const refreshBtn = iconButton(foot, ICONS.refresh, 'Refresh');
+
   copyBtn.b.addEventListener('click', () => actions.copyDiagnostics());
   refreshBtn.b.addEventListener('click', async () => {
     if (refreshBtn.b.disabled) return;
     refreshBtn.b.disabled = true;
     refreshBtn.b.classList.add('spin');
-    try { await actions.refresh(); } catch (_) { /* the next automatic pass still updates */ } finally {
+    try { await actions.refresh(); } catch (_) {} finally {
       refreshBtn.b.disabled = false;
       refreshBtn.b.classList.remove('spin');
     }
   });
 
-  const num = (n) => (cfg.display.compact ? fmtK(Math.round(n)) : fmtInt(n));
-
-  /** Token count animates from the last shown value (instant with reduced motion). */
-  function countTo(target) {
-    if (countRaf) cancelAnimationFrame(countRaf);
-    if (target === null) { setText(big, '—'); shownTokens = null; return; }
-    const from = shownTokens;
-    if (from === null || from === target || reducedMotion() || typeof requestAnimationFrame !== 'function') {
-      shownTokens = target;
-      setText(big, num(target));
-      return;
-    }
-    const start = performance.now();
-    const step = (t) => {
-      const k = Math.min(1, (t - start) / 400);
-      const v = from + (target - from) * (1 - Math.pow(1 - k, 3));
-      setText(big, num(v));
-      shownTokens = k < 1 ? v : target;
-      countRaf = k < 1 ? requestAnimationFrame(step) : null;
-    };
-    countRaf = requestAnimationFrame(step);
-  }
-
-  /** Tokens by turn as a line, scaled to the window when known (so the slope reads as "how fast it fills"). */
+  /** Tokens by turn sparkline */
   function renderSpark(vm, ready) {
     const g = ready ? vm.growth : null;
     if (!g || g.points.length < 2) {
@@ -152,65 +157,125 @@ export function ContextView(parent, { actions, settings }) {
     setText(growthText, `${g.turns} turns · ${fmtInt(g.total)} message tokens${vm.contextLimit ? ` of ${fmtK(vm.contextLimit)}` : ''}`);
   }
 
-  /** @param {Object} vm Output of toWidgetState() */
+  /** Update view with latest view state */
   function update(vm) {
-    const ready = vm.ready !== false;
-    countTo(ready ? vm.usedTokens : null);
-    setText(pct, ready && vm.percentage !== null ? `${vm.percentage === 0 && vm.usedTokens > 0 ? '<0.1' : vm.percentage}%` : '');
-    const known = ready && vm.percentage !== null;
-    setClass(bar, `bar ${known ? tone(vm.percentage) : 'unknown'}`.trim());
-    const width = known ? `${Math.min(100, vm.percentage)}%` : '';
-    if (fill.style.width !== width) fill.style.width = width;
-    if (known) setAttr(bar, 'aria-valuenow', String(vm.percentage)); else bar.removeAttribute('aria-valuenow');
-    setText(windowText, !ready ? 'Reading conversation…' : vm.contextLimit ? `of ${fmtK(vm.contextLimit)} window${vm.exchangesLeft !== null && vm.exchangesLeft !== undefined ? ` · ~${vm.exchangesLeft} exchanges left` : ''}` : 'window unknown');
-    show(windowBadge, ready && (!vm.contextLimit || vm.limitStatus !== 'VERIFIED'));
-    windowBadge.dataset.tip = vm.contextLimit ? TAG_TIPS.UNVERIFIED : `Window size is not known${vm.plan ? '' : ' (plan not detected)'}`;
-    const model = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
-    setText(modelText, model);
-    setAttr(modelText, 'title', `${vm.provider}: ${model}`);
-    const head = headlineLimit(vm.limits);
-    setText(limitLine, head ? `${head.key === 'session' ? 'Session' : head.label} ${limitText(head)}` : '');
-    setText(warnLine, vm.warning || '');
+    const ready = Boolean(vm) && vm.ready !== false;
+
+    // 1. Header: "Context 96K / 200K · est."
+    const used = ready ? formatTokens(vm.usedTokens) : null;
+    const limit = ready ? formatTokens(vm.contextLimit) : null;
+    const est = ready && vm.limitStatus !== 'VERIFIED' ? ' · est.' : '';
+    const titleStr = ready && used
+      ? (limit ? `Context ${used} / ${limit}${est}` : `Context ${used}${est}`)
+      : 'Context —';
+    setText(titleEl, titleStr);
+
+    // Small model caption
+    const modelStr = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
+    setText(modelCaption, modelStr ? `(${modelStr})` : '');
+
+    // Warning
+    if (vm.warning) {
+      setText(warnLine, vm.warning);
+      show(warnLine, true);
+    } else {
+      show(warnLine, false);
+    }
+
+    // Save Capsule card at >= 80%
     const full = ready && vm.percentage !== null && alertLevel(vm.percentage) >= 80;
     show(saveCard, full);
     if (full) setText(saveText, `💡 This chat is ${vm.percentage}% full`);
 
+    // 2. Stacked Bar & Legend
     const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
-    setText(sAsst.k, `${vm.provider} + tools`);
-    setText(sUser.v, ready ? fmtK(st.user) : '—');
-    setText(sAsst.v, ready ? fmtK(st.assistant) : '—');
-    setText(sHidden.v, ready ? fmtK(st.hidden) : '—');
+    const total = (st.user + st.assistant + st.hidden) || vm.usedTokens || 1;
+    const youPct = Math.round((st.user / total) * 100);
+    const asstPct = Math.round((st.assistant / total) * 100);
+    const sysPct = Math.max(0, 100 - youPct - asstPct);
 
-    const tokens = (n) => (!ready || n === null || n === undefined ? '—' : `${n.toLocaleString()}`);
-    brkRows.update((vm.breakdown || []).map(b => ({ label: b.label, value: b.value, tip: b.tag ? b.why || TAG_TIPS[b.tag] || b.tag : null, mark: b.tag === 'EXACT' || b.tag === 'OBSERVED' ? '✓' : undefined })));
-    bigRows.update((vm.biggest || []).map(m => ({ label: `#${m.turn} ${m.role === 'user' ? 'You' : vm.provider}: ${m.preview.slice(0, 32)}`, value: fmtK(m.tokens) })));
+    segUser.style.width = `${youPct}%`;
+    segAsst.style.width = `${asstPct}%`;
+    segSys.style.width = `${sysPct}%`;
+
+    setText(legUser, `You ${youPct}%`);
+    setText(legAsst, `${vm.provider || 'Assistant'} & tools ${asstPct}%`);
+    setText(legSys, `System & memory ${sysPct}%`);
+
+    // 3. Biggest item row (shown only when data exists)
+    const big = vm.biggest?.[0];
+    if (ready && big && big.tokens > 0) {
+      const role = big.role === 'user' ? 'You' : (vm.provider || 'Assistant');
+      const name = `${role} (#${big.turn})`;
+      setText(bigVal, `${name} · ${formatTokens(big.tokens)}`);
+      show(bigRow, true);
+    } else {
+      show(bigRow, false);
+    }
+
+    // 4. Usage section with exactly two rows (Session & Weekly)
+    const limits = vm.limits || [];
+    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session'));
+    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
+    let hasUsage = false;
+
+    if (session) {
+      const sPct = session.percent !== null && session.percent !== undefined
+        ? formatPercent(session.percent)?.text
+        : (session.remaining !== undefined && session.remaining !== null ? `${session.remaining} left` : null);
+      const sReset = formatReset(session.resetsAt) || (session.resetIn ? `resets in ${session.resetIn}` : null);
+      const parts = [sPct, sReset].filter(Boolean);
+      if (parts.length) {
+        setText(sessionRow, `Session ${parts.join(' · ')}`);
+        show(sessionRow, true);
+        hasUsage = true;
+      } else {
+        show(sessionRow, false);
+      }
+    } else {
+      show(sessionRow, false);
+    }
+
+    if (weekly) {
+      const wPct = weekly.percent !== null && weekly.percent !== undefined
+        ? formatPercent(weekly.percent)?.text
+        : (weekly.remaining !== undefined && weekly.remaining !== null ? `${weekly.remaining} left` : null);
+      const wReset = formatReset(weekly.resetsAt) || (weekly.resetIn ? `resets in ${weekly.resetIn}` : null);
+      const parts = [wPct, wReset].filter(Boolean);
+      if (parts.length) {
+        setText(weeklyRow, `Weekly ${parts.join(' · ')}`);
+        show(weeklyRow, true);
+        hasUsage = true;
+      } else {
+        show(weeklyRow, false);
+      }
+    } else {
+      show(weeklyRow, false);
+    }
+
+    show(usageSec, hasUsage);
+
+    // 5. Dev View details (growth, exact raw numbers, diagnostics)
     renderSpark(vm, ready);
-    show(att.el, (vm.attachmentFiles || []).length > 0);
-    attRows.update((vm.attachmentFiles || []).map(f => ({
-      label: f.name,
-      value: f.tokens !== null ? `~${f.tokens.toLocaleString()}` : f.inText ? 'in message text' : 'cost unknown'
-    })));
-    totals.update([
-      { label: 'Used', value: tokens(vm.usedTokens) },
-      { label: 'Remaining', value: tokens(vm.remainingTokens) },
-      { label: 'Window', value: vm.contextLimit ? vm.contextLimit.toLocaleString() : 'Unknown', tip: vm.contextLimit && vm.limitStatus === 'VERIFIED' ? null : (vm.contextLimit ? TAG_TIPS.UNVERIFIED : TAG_TIPS.UNKNOWN) }
+
+    const numExact = (n) => (n !== null && n !== undefined ? n.toLocaleString() : 'Unknown');
+    rawRows.update([
+      { label: 'Used tokens', value: numExact(vm.usedTokens) },
+      { label: 'Remaining tokens', value: numExact(vm.remainingTokens) },
+      { label: 'Window size', value: numExact(vm.contextLimit) },
+      { label: 'You', value: numExact(st.user) },
+      { label: 'Assistant + tools', value: numExact(st.assistant) },
+      { label: 'System & hidden', value: numExact(st.hidden) }
     ]);
 
-    const items = vm.hiddenItems || [];
-    show(hid.el, items.length > 0);
-    hidStack.update(items);
-    setText(hidFine, `Read from ${vm.provider}'s own data. ≈ marks estimates; anything else ${vm.provider} adds on its servers is not visible.`);
-    show(lim.el, (vm.limits || []).length > 0);
-    limRows.update((vm.limits || []).map(l => ({ label: l.label, value: limitText(l) })));
-
-    setText(diagWarn, vm.warning || '');
     diagRows.update([
-      { label: 'Provider', value: vm.provider },
-      { label: 'Model', value: model || '—' },
+      { label: 'Provider', value: vm.provider || '—' },
+      { label: 'Model', value: modelStr || '—' },
       { label: 'Plan', value: vm.plan || 'Unknown' },
       { label: 'Source', value: vm.source || '—' },
       { label: 'Turns', value: ready ? String(vm.turns) : '—' }
     ]);
+
     const evSig = JSON.stringify(vm.evidence || []);
     if (evidence.dataset.sig !== evSig) {
       evidence.dataset.sig = evSig;
@@ -221,9 +286,7 @@ export function ContextView(parent, { actions, settings }) {
         h('span', null, li, e.text);
       }
     }
-    setClass(confDot, `dot ${ready ? vm.confidenceLevel : 'LOW'}`);
-    setText(confText, ready ? `${levelName(vm.confidenceLevel)} confidence · ${vm.confidence}%` : 'Reading…');
   }
 
-  return { el, foot, update, setSettings(s) { cfg = s; } };
+  return { el, foot, update, setSettings(_s) {} };
 }

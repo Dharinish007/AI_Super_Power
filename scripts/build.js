@@ -40,7 +40,8 @@ const MODULES = [
   'network/request-observer.js',
   'content/conversation-client.js', 'content/message-extractor.js', 'content/plan-detector.js', 'content/model-detector.js',
   'content/attachment-detector.js', 'content/tool-detector.js', 'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/page-actions.js', 'content/panel-channel.js',
-  'ui/dom.js', 'ui/styles.js', 'content/widgets.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
+  'content/alerts.js', 'content/countdown.js', 'content/biggest-item.js', 'content/history.js', 'content/pre-send.js', 'content/checkpoint-export.js',
+  'ui/formatters.js', 'ui/dom.js', 'ui/styles.js', 'ui/strip-component.js', 'content/strip-adapters.js', 'content/widgets.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
   'content/providers.js', 'content/provider-coordinator.js'
 ];
 
@@ -86,7 +87,7 @@ ${MODULES.map(m => `  // --- ${m} ---\n  ${readCleanModule(m)}`).join('\n\n')}
 // Side panel: an extension page, so no tokenizer and no site adapters; only the views and the channel
 const PANEL_MODULES = [
   'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/panel-channel.js',
-  'ui/dom.js', 'ui/styles.js', 'ui/capsule-panel.js', 'ui/context-view.js', 'ui/settings-view.js', 'sidepanel/main.js'
+  'ui/formatters.js', 'ui/dom.js', 'ui/styles.js', 'ui/capsule-panel.js', 'ui/context-view.js', 'ui/settings-view.js', 'sidepanel/main.js'
 ];
 
 export const bundledSidePanel = `/**

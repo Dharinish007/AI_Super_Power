@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Claude AI Conversation Fixture</title>
+</head>
+<body>
+  <!-- Header / Navigation -->
+  <header>
+    <div data-testid="user-menu-button">
+      <span>Pro plan</span>
+    </div>
+    <div data-testid="model-selector-dropdown">
+      Claude 3.5 Sonnet
+    </div>
+  </header>
+
+  <!-- Chat conversation -->
+  <main class="chat-container">
+    <div data-testid="user-message">
+      Can you review this API design and suggest improvements?
+    </div>
+    <div class="font-claude-response font-claude-message">
+      The API design looks solid. Here are three key recommendations:
+      1. Use consistent pagination parameters (limit and cursor).
+      2. Ensure idempotent behavior for retryable endpoints.
+      3. Standardize error response payloads with structured codes.
+    </div>
+  </main>
+
+  <!-- Chat input composer -->
+  <div class="composer-container">
+    <div class="ProseMirror" contenteditable="true" role="textbox" data-testid="chat-input">
+      <p><br></p>
+    </div>
+  </div>
+</body>
+</html>

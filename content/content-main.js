@@ -117,7 +117,27 @@ export class ContentScriptCoordinator {
     // UI adapter: the only ChatGPT-specific UI knowledge is the name and where the input is
     this.overlayUI = new Widgets({
       provider: 'ChatGPT',
-      findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
+      findInput: () => {
+        const selectors = [
+          '#prompt-textarea',
+          '[data-testid="prompt-textarea"]',
+          'div#prompt-textarea',
+          'div[contenteditable="true"][id*="prompt"]',
+          'div[contenteditable="true"][role="textbox"]',
+          'form [contenteditable="true"]',
+          'form textarea',
+          'textarea[placeholder*="message" i]',
+          'textarea[placeholder*="ChatGPT" i]',
+          'textarea[data-id]',
+          '[data-id="root"] textarea',
+          '[data-id="root"] [contenteditable="true"]'
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) return el;
+        }
+        return document.querySelector('form textarea') || document.querySelector('form');
+      },
       replySelector: "[data-message-author-role='assistant']",
       userSelector: "[data-message-author-role='user']",
       countTokens: (text) => this.tokenizer.countTokens(text)

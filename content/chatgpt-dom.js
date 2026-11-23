@@ -18,7 +18,7 @@ export class ChatGPTDOMObserver {
     this.debounceMs = options.debounceMs || 120;
     this._streamCheckAt = 0;
     // The chat input of the site (typing there never changes the conversation's context)
-    this.composerSelector = options.composerSelector || '#prompt-textarea';
+    this.composerSelector = options.composerSelector || '#prompt-textarea, [data-testid="prompt-textarea"], div[contenteditable="true"][role="textbox"], form textarea';
     // Upper bound on how long a burst of mutations can postpone an update. Without it, a page that
     // never stops mutating (initial render, animations) kept pushing the trailing debounce back.
     this.maxWaitMs = options.maxWaitMs || 400;

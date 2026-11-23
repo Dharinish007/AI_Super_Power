@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Google Gemini Conversation Fixture</title>
+</head>
+<body>
+  <!-- Header with Model Picker -->
+  <header role="banner">
+    <div class="top-bar-actions">
+      <span>Google AI Pro</span>
+    </div>
+    <button aria-label="Open mode picker, currently 3.5 Flash">
+      3.5 Flash
+    </button>
+  </header>
+
+  <!-- Chat conversation -->
+  <main class="conversation-container">
+    <user-query>
+      <div class="query-text">
+        Explain the difference between WebSockets and Server-Sent Events.
+      </div>
+    </user-query>
+    <model-response>
+      <div class="message-content">
+        <p><strong>WebSockets</strong> provide bidirectional, full-duplex communication over a single TCP connection.</p>
+        <p><strong>Server-Sent Events (SSE)</strong> provide unidirectional streaming from server to client over standard HTTP.</p>
+      </div>
+    </model-response>
+  </main>
+
+  <!-- Input composer -->
+  <div class="input-area">
+    <rich-textarea>
+      <div class="ql-editor" contenteditable="true" role="textbox"></div>
+    </rich-textarea>
+  </div>
+</body>
+</html>

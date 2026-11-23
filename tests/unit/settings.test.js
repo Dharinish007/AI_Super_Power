@@ -1,6 +1,6 @@
 /** Unit Tests for content/settings.js: defaults, repair of bad values, partial writes. */
 
-import { SETTINGS_KEY, DEFAULT_SETTINGS, CONTEXT_FIELDS, normalizeSettings, readSettings, writeSettings } from '../../content/settings.js';
+import { SETTINGS_KEY, DEFAULT_SETTINGS, DEFAULT_FEATURES, CONTEXT_FIELDS, normalizeSettings, readSettings, writeSettings, migrateSettings } from '../../content/settings.js';
 
 function fakeArea(init = {}) {
   const data = structuredClone(init);
@@ -35,6 +35,23 @@ export async function runSettingsTests() {
   const w2 = await writeSettings(area, { capsule: { method: 'quick' } });
   assert('Second write keeps the first', w2.widgets.capsule.enabled === false && w2.capsule.method === 'quick');
   assert('Read survives a throwing area', (await readSettings({ get: () => { throw new Error('x'); } })).capsule.method === 'ask-ai');
+
+  // Schema v2 & Feature Flags
+  assert('DEFAULT_FEATURES is frozen', Object.isFrozen(DEFAULT_FEATURES));
+  assert('Normalized settings include version 2', d.version === 2);
+  assert('Default features 1-3 are ON', d.features.countdown === true && d.features.alerts === true && d.features.newChatSuggestion === true);
+  assert('Default features 4-7 are OFF', d.features.biggestItem === false && d.features.usageHistory === false && d.features.preSendEstimate === false && d.features.checkpointExport === false);
+
+  // Migration from legacy v1 (no version field)
+  const legacyArea = fakeArea({ [SETTINGS_KEY]: { widgets: { context: { enabled: true } }, capsule: { method: 'quick' } } });
+  const migResult = await migrateSettings(legacyArea);
+  assert('migrateSettings migrates legacy v1 to v2', migResult.migrated === true && migResult.settings.version === 2);
+  assert('migrateSettings preserves user choices from v1', migResult.settings.capsule.method === 'quick');
+  assert('migrateSettings writes back to storage', legacyArea.data[SETTINGS_KEY].version === 2);
+
+  // Re-migrating v2 is a no-op
+  const noopResult = await migrateSettings(legacyArea);
+  assert('migrateSettings on v2 returns migrated=false', noopResult.migrated === false);
 
   return { passed, failed };
 }

@@ -17,7 +17,7 @@ import { servePanel } from './panel-channel.js';
 import { mergeLiveTurns } from './turn-merger.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { invalidateText, trustTextCache } from './providers.js';
-import { badgeSender, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
+import { conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
 
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
 const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
@@ -72,7 +72,7 @@ export class ProviderCoordinator {
     this._apiInFlight = null;
     this._wasStreaming = false;
     this._sessionStartTokens = new Map();
-    this._sendBadge = badgeSender();
+    this._sendBadge = () => {}; // Toolbar badges removed per design simplification
     this._activeOrgId = undefined;
     this._streamLimits = null;
     this._accountLimits = null;

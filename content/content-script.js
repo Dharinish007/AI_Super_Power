@@ -4063,11 +4063,23 @@ const CONTEXT_FIELDS = [
 const CAPSULE_METHODS = ['ask-ai', 'quick'];
 const THEMES = ['auto', 'dark', 'light'];
 
+const DEFAULT_FEATURES = Object.freeze({
+  countdown: true,           // Feature 1: default ON
+  alerts: true,              // Feature 2: default ON
+  newChatSuggestion: true,   // Feature 3: default ON
+  biggestItem: false,        // Feature 4: default OFF until verified
+  usageHistory: false,       // Feature 5: default OFF until verified
+  preSendEstimate: false,    // Feature 6: default OFF until verified
+  checkpointExport: false    // Feature 7: default OFF until verified
+});
+
 const DEFAULT_SETTINGS = Object.freeze({
+  version: 2,
   widgets: { context: { enabled: true, fields: ['tokens', 'percent', 'model', 'exchangesLeft'] }, capsule: { enabled: true } },
   capsule: { method: 'ask-ai' },
   context: { alerts: true },
-  display: { theme: 'auto', compact: false, badges: true }
+  display: { theme: 'auto', compact: false, badges: true },
+  features: DEFAULT_FEATURES
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -4082,11 +4094,24 @@ function normalizeSettings(raw) {
   const keys = CONTEXT_FIELDS.map(f => f.key);
   const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
   const d = obj(r.display);
+  const feat = obj(r.features);
+  const alertsVal = bool(feat.alerts, bool(obj(r.context).alerts, DEFAULT_FEATURES.alerts));
+
   return {
+    version: 2,
     widgets: { context: { enabled: bool(wc.enabled, true), fields }, capsule: { enabled: bool(obj(w.capsule).enabled, true) } },
     capsule: { method: oneOf(obj(r.capsule).method, CAPSULE_METHODS) },
-    context: { alerts: bool(obj(r.context).alerts, true) },
-    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) }
+    context: { alerts: alertsVal },
+    display: { theme: oneOf(d.theme, THEMES), compact: bool(d.compact, false), badges: bool(d.badges, true) },
+    features: {
+      countdown: bool(feat.countdown, DEFAULT_FEATURES.countdown),
+      alerts: alertsVal,
+      newChatSuggestion: bool(feat.newChatSuggestion, DEFAULT_FEATURES.newChatSuggestion),
+      biggestItem: bool(feat.biggestItem, DEFAULT_FEATURES.biggestItem),
+      usageHistory: bool(feat.usageHistory, DEFAULT_FEATURES.usageHistory),
+      preSendEstimate: bool(feat.preSendEstimate, DEFAULT_FEATURES.preSendEstimate),
+      checkpointExport: bool(feat.checkpointExport, DEFAULT_FEATURES.checkpointExport)
+    }
   };
 }
 
@@ -4100,13 +4125,33 @@ async function writeSettings(area, patch) {
   const cur = await readSettings(area);
   const p = obj(patch);
   const next = normalizeSettings({
+    version: 2,
     widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
     capsule: { ...cur.capsule, ...obj(p.capsule) },
     context: { ...cur.context, ...obj(p.context) },
-    display: { ...cur.display, ...obj(p.display) }
+    display: { ...cur.display, ...obj(p.display) },
+    features: { ...cur.features, ...obj(p.features) }
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+/**
+ * Migrates settings to v2 if version is missing or < 2.
+ * Automatically saves migrated settings back to storage if needed.
+ */
+async function migrateSettings(area) {
+  try {
+    const raw = (await area.get(SETTINGS_KEY))?.[SETTINGS_KEY];
+    if (!raw || typeof raw !== 'object' || raw.version !== 2) {
+      const migrated = normalizeSettings(raw);
+      await area.set({ [SETTINGS_KEY]: migrated });
+      return { migrated: true, settings: migrated };
+    }
+    return { migrated: false, settings: normalizeSettings(raw) };
+  } catch (_) {
+    return { migrated: false, settings: normalizeSettings() };
+  }
 }
 
 
@@ -4333,6 +4378,7 @@ function toWidgetState(s, opts = {}) {
       blocked: Boolean(l.blocked),
       estimated: Boolean(l.estimated),
       note: l.note || null,
+      resetsAt: l.resetsAt || null,
       resetIn: formatResetIn(l.resetsAt)
     })),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
@@ -5131,6 +5177,834 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 }
 
 
+  // --- content/alerts.js ---
+  /**
+ * Context Monitor - Threshold Alerts & Hysteresis Engine
+ *
+ * Manages threshold alerts with hysteresis:
+ * - Triggers toast alert when context or session usage reaches 80%+.
+ * - Fires once per threshold per chat.
+ * - Re-arms only after dropping strictly below 70%.
+ * - Uses softer phrasing for estimated values ("est. ~80%").
+ * - Disabled via settings.features.alerts (or settings.context.alerts).
+ */
+
+class AlertManager {
+  constructor(options = {}) {
+    this.toastFn = options.toastFn || (() => {});
+    // Track state per chat: Map<chatId, { contextAlerted: boolean, sessionAlerted: boolean }>
+    this.chatState = new Map();
+  }
+
+  /**
+   * Resets alert history for a specific chat or all chats.
+   * @param {string} [chatId]
+   */
+  reset(chatId) {
+    if (chatId) this.chatState.delete(chatId);
+    else this.chatState.clear();
+  }
+
+  /**
+   * Evaluates current state and triggers toast if threshold crossed.
+   * @param {{
+   *   chatId?: string,
+   *   contextPct?: number|null,
+   *   contextSource?: 'measured'|'estimated',
+   *   sessionPct?: number|null,
+   *   sessionSource?: 'measured'|'estimated',
+   *   enabled?: boolean
+   * }} params
+   * @returns {{ fired: boolean, type?: 'context'|'session', message?: string }}
+   */
+  evaluate({ chatId = 'global', contextPct = null, contextSource = 'measured', sessionPct = null, sessionSource = 'measured', enabled = true } = {}) {
+    if (!enabled) return { fired: false };
+
+    let state = this.chatState.get(chatId);
+    if (!state) {
+      state = { contextAlerted: false, sessionAlerted: false };
+      this.chatState.set(chatId, state);
+    }
+
+    // 1. Context alert check
+    if (typeof contextPct === 'number' && Number.isFinite(contextPct)) {
+      if (contextPct >= 80 && !state.contextAlerted) {
+        state.contextAlerted = true;
+        const isEst = contextSource === 'estimated';
+        const msg = isEst
+          ? `Context usage is est. ~${Math.round(contextPct)}%`
+          : `Context usage reached ${Math.round(contextPct)}%`;
+        this.toastFn(msg);
+        return { fired: true, type: 'context', message: msg };
+      } else if (contextPct < 70) {
+        // Re-arm when dropping below 70%
+        state.contextAlerted = false;
+      }
+    }
+
+    // 2. Session alert check
+    if (typeof sessionPct === 'number' && Number.isFinite(sessionPct)) {
+      if (sessionPct >= 80 && !state.sessionAlerted) {
+        state.sessionAlerted = true;
+        const isEst = sessionSource === 'estimated';
+        const msg = isEst
+          ? `Session usage is est. ~${Math.round(sessionPct)}%`
+          : `Session usage reached ${Math.round(sessionPct)}%`;
+        this.toastFn(msg);
+        return { fired: true, type: 'session', message: msg };
+      } else if (sessionPct < 70) {
+        // Re-arm when dropping below 70%
+        state.sessionAlerted = false;
+      }
+    }
+
+    return { fired: false };
+  }
+}
+
+/**
+ * Checks whether the "Consider a new chat" line should be displayed in the drawer.
+ * Rules:
+ * - Never in the strip.
+ * - At 80% context for measured values.
+ * - Don't show for estimated values below 85% (only at 85%+).
+ * @param {number|null|undefined} pct
+ * @param {'measured'|'estimated'} [source]
+ * @param {boolean} [enabled]
+ * @returns {boolean}
+ */
+function shouldShowNewChatSuggestion(pct, source = 'measured', enabled = true) {
+  if (!enabled || pct === null || pct === undefined || !Number.isFinite(pct)) return false;
+  const rounded = Math.round(pct);
+  if (source === 'estimated') {
+    return rounded >= 85;
+  }
+  return rounded >= 80;
+}
+
+
+  // --- content/countdown.js ---
+  /**
+ * Context Monitor - Reset Countdown Engine
+ *
+ * Computes remaining time from `resetsAt` timestamp.
+ * - Updates every 60s via interval timer.
+ * - Recalculates immediately on tab focus or visibilitychange.
+ * - Cleans up intervals and event listeners on destroy().
+ */
+
+
+
+class ResetCountdown {
+  /**
+   * @param {{
+   *   resetsAt?: number|string|null,
+   *   onTick?: (formatted: string|null) => void,
+   *   nowFn?: () => number
+   * }} options
+   */
+  constructor(options = {}) {
+    this.resetsAt = options.resetsAt || null;
+    this.onTick = options.onTick || (() => {});
+    this.nowFn = options.nowFn || (() => Date.now());
+    this._interval = null;
+    this._onFocus = () => this.tick();
+    this._onVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        this.tick();
+      }
+    };
+    this.currentText = null;
+    this._attached = false;
+  }
+
+  start(resetsAt) {
+    if (resetsAt !== undefined) this.resetsAt = resetsAt;
+    this.stop();
+    this.tick();
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('focus', this._onFocus);
+      this._attached = true;
+    }
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', this._onVisibility);
+      this._attached = true;
+    }
+
+    this._interval = setInterval(() => this.tick(), 60000);
+  }
+
+  tick() {
+    if (!this.resetsAt) {
+      this.currentText = null;
+      this.onTick(null);
+      return null;
+    }
+    const formatted = formatReset(this.resetsAt, this.nowFn(), { relative: true });
+    this.currentText = formatted;
+    this.onTick(formatted);
+    return formatted;
+  }
+
+  update(resetsAt) {
+    this.resetsAt = resetsAt || null;
+    return this.tick();
+  }
+
+  stop() {
+    if (this._interval) {
+      clearInterval(this._interval);
+      this._interval = null;
+    }
+    if (this._attached) {
+      if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+        window.removeEventListener('focus', this._onFocus);
+      }
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('visibilitychange', this._onVisibility);
+      }
+      this._attached = false;
+    }
+  }
+
+  destroy() {
+    this.stop();
+    this.onTick = () => {};
+  }
+}
+
+
+  // --- content/biggest-item.js ---
+  /**
+ * Context Monitor - Biggest Item Extractor & Ranker
+ *
+ * Identifies and ranks messages/attachments/tools in the current chat:
+ * - Ranks items by token count descending.
+ * - Distinguishes between:
+ *   - 'message': user or assistant turns
+ *   - 'attachment': uploaded files/images
+ *   - 'tool': tool executions (e.g. web search, code interpreter, artifacts)
+ * - Flags if derived from visible DOM only ("visible messages only").
+ * - Returns target DOM element (or selector/turn index) so clicking can scroll to it.
+ */
+
+function extractBiggestItem(conversationData = {}) {
+  const { messages = [], attachments = [], tools = [], isDomPartial = false, domTurns = [] } = conversationData;
+  const candidates = [];
+
+  // 1. Evaluate messages
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m) continue;
+    const tokens = typeof m.tokens === 'number' ? m.tokens : 0;
+    if (tokens <= 0) continue;
+    const role = m.role === 'user' ? 'You' : (m.role === 'assistant' ? (m.provider || 'Assistant') : 'System');
+    const turnNum = m.turn ?? (i + 1);
+    candidates.push({
+      type: 'message',
+      label: `${role} (#${turnNum})`,
+      tokens,
+      role: m.role,
+      turn: turnNum,
+      id: m.id || null,
+      element: m.element || null,
+      visibleOnly: Boolean(isDomPartial)
+    });
+  }
+
+  // 2. Evaluate attachments
+  for (const a of attachments) {
+    if (!a) continue;
+    const tokens = typeof a.tokens === 'number' ? a.tokens : 0;
+    if (tokens <= 0) continue;
+    candidates.push({
+      type: 'attachment',
+      label: `Attachment: ${a.name || 'file'}`,
+      name: a.name || 'file',
+      tokens,
+      element: a.element || null,
+      visibleOnly: Boolean(isDomPartial)
+    });
+  }
+
+  // 3. Evaluate tools
+  for (const t of tools) {
+    if (!t) continue;
+    const tokens = typeof t.tokens === 'number' ? t.tokens : 0;
+    if (tokens <= 0) continue;
+    candidates.push({
+      type: 'tool',
+      label: `Tool: ${t.name || 'output'}`,
+      name: t.name || 'output',
+      tokens,
+      element: t.element || null,
+      visibleOnly: Boolean(isDomPartial)
+    });
+  }
+
+  // Fallback: If no structured messages, scan domTurns
+  if (candidates.length === 0 && Array.isArray(domTurns)) {
+    for (let i = 0; i < domTurns.length; i++) {
+      const dt = domTurns[i];
+      if (!dt || !dt.tokens) continue;
+      candidates.push({
+        type: 'message',
+        label: `${dt.role === 'user' ? 'You' : 'Assistant'} (#${i + 1})`,
+        tokens: dt.tokens,
+        role: dt.role,
+        turn: i + 1,
+        element: dt.element || null,
+        visibleOnly: true
+      });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  // Sort descending by tokens
+  candidates.sort((a, b) => b.tokens - a.tokens);
+  return candidates[0];
+}
+
+/**
+ * Formats biggest item for display in the drawer.
+ * @param {Object|null} item
+ * @param {Function} [formatTokensFn]
+ * @returns {{ text: string, sub: string, item: Object }|null}
+ */
+function formatBiggestItemDisplay(item, formatTokensFn) {
+  if (!item || !item.tokens) return null;
+  const tokenStr = formatTokensFn ? formatTokensFn(item.tokens) : `${Math.round(item.tokens / 100) / 10}K`;
+  const text = `${item.label} · ~${tokenStr}`;
+  const sub = item.visibleOnly ? 'visible messages only' : '';
+  return {
+    text,
+    sub,
+    item
+  };
+}
+
+/**
+ * Scrolls the DOM element into view smoothly when clicked.
+ * @param {Element|null} element
+ */
+function scrollToItem(element) {
+  if (!element || typeof element.scrollIntoView !== 'function') return false;
+  element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  return true;
+}
+
+
+  // --- content/history.js ---
+  /**
+ * Context Monitor - Usage History & Downsampling Engine
+ *
+ * Records periodic context/session usage samples:
+ * - Samples usage every 5 minutes.
+ * - Rolling 7-day window in chrome.storage.local under 'usage_history:${hostname}'.
+ * - Points older than 24 hours are downsampled to 1 sample per hour (hourly average).
+ * - Downtime gaps (> 15 minutes between samples) are tagged as breaks (gap: true).
+ * - SVG sparkline path generator: draws gaps as broken segments, NEVER drops to zero.
+ */
+
+const HISTORY_KEY_PREFIX = 'usage_history:';
+const SAMPLE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const ROLLING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const DOWNSAMPLE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+const GAP_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes = gap break
+
+/**
+ * Downsamples an array of usage points:
+ * - Discards points older than 7 days.
+ * - For points older than 24h, aggregates by hour slot.
+ * - Tags gaps (>15 min) with gap: true.
+ * @param {Array<{ t: number, pct: number, gap?: boolean }>} points
+ * @param {number} [now]
+ * @returns {Array<{ t: number, pct: number, gap?: boolean }>}
+ */
+function downsampleHistory(points = [], now = Date.now()) {
+  if (!Array.isArray(points) || points.length === 0) return [];
+  const cutoff7d = now - ROLLING_WINDOW_MS;
+  const cutoff24h = now - DOWNSAMPLE_THRESHOLD_MS;
+
+  // Filter out older than 7 days and sort chronologically
+  const valid = points
+    .filter(p => p && typeof p.t === 'number' && Number.isFinite(p.t) && p.t >= cutoff7d && typeof p.pct === 'number' && Number.isFinite(p.pct))
+    .sort((a, b) => a.t - b.t);
+
+  if (valid.length === 0) return [];
+
+  const olderPoints = [];
+  const recentPoints = [];
+
+  for (const p of valid) {
+    if (p.t < cutoff24h) olderPoints.push(p);
+    else recentPoints.push(p);
+  }
+
+  // Downsample older points into hourly buckets
+  const hourlyBuckets = new Map();
+  for (const p of olderPoints) {
+    const hourKey = Math.floor(p.t / (3600 * 1000)) * (3600 * 1000);
+    let bucket = hourlyBuckets.get(hourKey);
+    if (!bucket) {
+      bucket = { sum: 0, count: 0, t: hourKey + 1800000 };
+      hourlyBuckets.set(hourKey, bucket);
+    }
+    bucket.sum += p.pct;
+    bucket.count++;
+  }
+
+  const downsampledOlder = [];
+  for (const [, b] of hourlyBuckets.entries()) {
+    downsampledOlder.push({
+      t: b.t,
+      pct: Math.round((b.sum / b.count) * 10) / 10
+    });
+  }
+  downsampledOlder.sort((a, b) => a.t - b.t);
+
+  const merged = [...downsampledOlder, ...recentPoints];
+
+  // Detect and tag gaps (>15m between adjacent points)
+  for (let i = 1; i < merged.length; i++) {
+    const prev = merged[i - 1];
+    const curr = merged[i];
+    if (curr.t - prev.t > GAP_THRESHOLD_MS) {
+      curr.gap = true; // Mark as starting a new segment after a gap
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Adds a new sample point to existing history, downsamples, and returns new history array.
+ * @param {Array<{ t: number, pct: number, gap?: boolean }>} history
+ * @param {number} pct
+ * @param {number} [now]
+ * @returns {Array<{ t: number, pct: number, gap?: boolean }>}
+ */
+function addSample(history = [], pct, now = Date.now()) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return history;
+  const newPoint = { t: now, pct: Math.round(pct * 10) / 10 };
+  const updated = [...history, newPoint];
+  return downsampleHistory(updated, now);
+}
+
+/**
+ * Builds SVG `<path>` data for rendering a sparkline with gaps as breaks.
+ * Never drops to zero during gaps.
+ * @param {Array<{ t: number, pct: number, gap?: boolean }>} points
+ * @param {number} [width=120]
+ * @param {number} [height=24]
+ * @returns {string} SVG path 'd' string
+ */
+function generateSparklinePath(points = [], width = 120, height = 24) {
+  if (!points || points.length === 0) return '';
+  if (points.length === 1) {
+    const y = Math.round(height * (1 - points[0].pct / 100));
+    return `M 0 ${y} L ${width} ${y}`;
+  }
+
+  const tMin = points[0].t;
+  const tMax = points[points.length - 1].t;
+  const tSpan = Math.max(1, tMax - tMin);
+
+  let d = '';
+  let inSegment = false;
+
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const x = Math.round(((p.t - tMin) / tSpan) * width * 10) / 10;
+    const clampedPct = Math.max(0, Math.min(100, p.pct));
+    const y = Math.round((height - (clampedPct / 100) * (height - 4) - 2) * 10) / 10;
+
+    if (!inSegment || p.gap) {
+      d += ` M ${x} ${y}`;
+      inSegment = true;
+    } else {
+      d += ` L ${x} ${y}`;
+    }
+  }
+
+  return d.trim();
+}
+
+
+  // --- content/pre-send.js ---
+  /**
+ * Context Monitor - Pre-Send Token Estimator
+ *
+ * Privacy & Safety Guarantees:
+ * - Measures token count of user's active draft in the composer.
+ * - Debounced by 300ms.
+ * - Shows the draft's own size only: "draft ≈ N tokens".
+ * - Never shows prediction of total context.
+ * - NEVER stores, logs, or transmits draft text.
+ * - Text is discarded immediately after token count calculation.
+ */
+
+class PreSendEstimator {
+  /**
+   * @param {{
+   *   tokenizer?: (text: string) => number,
+   *   onEstimate?: (tokens: number|null) => void,
+   *   debounceMs?: number
+   * }} options
+   */
+  constructor(options = {}) {
+    this.tokenizer = options.tokenizer || ((text) => Math.ceil((text || '').length / 4));
+    this.onEstimate = options.onEstimate || (() => {});
+    this.debounceMs = options.debounceMs ?? 300;
+    this._timer = null;
+    this._inputElement = null;
+    this._listener = () => this._onInput();
+  }
+
+  attach(inputElement) {
+    this.detach();
+    if (!inputElement) return;
+    this._inputElement = inputElement;
+    inputElement.addEventListener('input', this._listener);
+    inputElement.addEventListener('keyup', this._listener);
+  }
+
+  detach() {
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+    if (this._inputElement) {
+      this._inputElement.removeEventListener('input', this._listener);
+      this._inputElement.removeEventListener('keyup', this._listener);
+      this._inputElement = null;
+    }
+  }
+
+  _onInput() {
+    if (this._timer) clearTimeout(this._timer);
+    this._timer = setTimeout(() => {
+      this._timer = null;
+      this.estimateNow();
+    }, this.debounceMs);
+  }
+
+  /**
+   * Computes token count immediately without storing text.
+   * @param {string} [overrideText]
+   * @returns {number|null}
+   */
+  estimateNow(overrideText) {
+    let text = '';
+    if (typeof overrideText === 'string') {
+      text = overrideText;
+    } else if (this._inputElement) {
+      text = this._inputElement.value || this._inputElement.innerText || this._inputElement.textContent || '';
+    }
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+      this.onEstimate(null);
+      return null;
+    }
+
+    // Measure tokens in memory - do NOT log, store, or serialize text
+    let tokens;
+    try {
+      tokens = this.tokenizer(trimmed);
+    } catch (_) {
+      tokens = Math.ceil(trimmed.length / 4);
+    }
+
+    this.onEstimate(tokens);
+    return tokens;
+  }
+
+  destroy() {
+    this.detach();
+    this.onEstimate = () => {};
+  }
+}
+
+/**
+ * Formats pre-send estimate string.
+ * @param {number|null} tokens
+ * @param {Function} [formatTokensFn]
+ * @returns {string|null}
+ */
+function formatPreSendEstimate(tokens, formatTokensFn) {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens) || tokens <= 0) {
+    return null;
+  }
+  const tStr = formatTokensFn ? formatTokensFn(tokens) : String(Math.round(tokens));
+  return `draft ≈ ${tStr} tokens`;
+}
+
+
+  // --- content/checkpoint-export.js ---
+  /**
+ * Context Monitor - Checkpoint Export Engine
+ *
+ * Exports user's selected message range (default last 20 user messages) as Markdown:
+ * - Version 1 uses NO AI.
+ * - Exports ONLY user's own visible messages.
+ * - Preserves code fences (```) verbatim.
+ * - Includes a "carry-over" summary header.
+ */
+
+/**
+ * Builds checkpoint Markdown text.
+ * @param {Array<{ role: string, text: string, turn?: number, tokens?: number }>} messages
+ * @param {{
+ *   title?: string,
+ *   model?: string,
+ *   usedTokens?: number|null,
+ *   contextLimit?: number|null,
+ *   percentage?: number|null,
+ *   range?: number,
+ *   timestamp?: number
+ * }} [options]
+ * @returns {string} Markdown text
+ */
+function buildCheckpointMarkdown(messages = [], options = {}) {
+  const {
+    title = 'Conversation Checkpoint',
+    model = 'Unknown Model',
+    usedTokens = null,
+    contextLimit = null,
+    percentage = null,
+    range = 20,
+    timestamp = Date.now()
+  } = options;
+
+  // Filter ONLY user's own messages
+  const userMessages = (messages || []).filter(m => m && m.role === 'user' && typeof m.text === 'string' && m.text.trim().length > 0);
+
+  // Take the last `range` messages (default 20)
+  const sliceStart = Math.max(0, userMessages.length - range);
+  const selected = userMessages.slice(sliceStart);
+
+  const dateStr = new Date(timestamp).toLocaleString();
+  const pctStr = percentage !== null && percentage !== undefined ? `${Math.round(percentage)}%` : 'Unknown %';
+  const usedStr = usedTokens ? `${Math.round(usedTokens).toLocaleString()} tokens` : 'Unknown';
+  const limitStr = contextLimit ? `${Math.round(contextLimit).toLocaleString()} tokens` : 'Unknown limit';
+
+  let md = `# Checkpoint Export: ${title}\n`;
+  md += `*Generated on ${dateStr} by AI Context Monitor (Local Checkpoint)*\n\n`;
+
+  // Carry-over section
+  md += `## Carry-over Summary\n`;
+  md += `- **Model**: ${model}\n`;
+  md += `- **Context Utilization**: ${usedStr} / ${limitStr} (${pctStr})\n`;
+  md += `- **Exported Messages**: ${selected.length} user message(s) (last ${Math.min(range, selected.length)})\n\n`;
+  md += `---\n\n`;
+
+  // Selected Messages
+  md += `## Selected Messages\n\n`;
+
+  if (selected.length === 0) {
+    md += `*(No visible user messages found in selected range)*\n`;
+  } else {
+    for (let i = 0; i < selected.length; i++) {
+      const msg = selected[i];
+      const num = i + 1;
+      const turnLabel = msg.turn ? ` (Turn #${msg.turn})` : '';
+      md += `### ${num}. You${turnLabel}\n\n`;
+      md += `${msg.text.trim()}\n\n`;
+    }
+  }
+
+  return md;
+}
+
+/**
+ * Triggers a file download in the browser for the markdown content.
+ * @param {string} markdown
+ * @param {string} [filename]
+ * @returns {boolean}
+ */
+function downloadMarkdownFile(markdown, filename = 'context-checkpoint.md') {
+  if (typeof document === 'undefined' || typeof Blob === 'undefined') return false;
+  try {
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+
+  // --- ui/formatters.js ---
+  /**
+ * Context Monitor - Pure UI Formatters & Thresholds
+ *
+ * Single source of truth for formatting percentages, remaining messages,
+ * reset timestamps, and token counts across all surfaces (Strip component, Detail drawer, Side panel).
+ * Pure functions: formatting only, no recalculation.
+ */
+
+/**
+ * Returns threshold state for a percentage:
+ * - under 50%: 'ok' ('good', green #10a37f, 🟢)
+ * - 50-80%: 'warn' ('warn', amber #f59e0b, 🟡)
+ * - over 80%: 'danger' ('bad', red #ef4444, 🔴, symbol ⚠)
+ * @param {number|null|undefined} pct
+ * @returns {{ state: 'ok'|'warn'|'danger'|'unknown', level: 'good'|'warn'|'bad'|'', color: string|null, emoji: '🟢'|'🟡'|'🔴'|'', symbol: string }}
+ */
+function threshold(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) {
+    return { state: 'unknown', level: '', color: null, emoji: '', symbol: '' };
+  }
+  const rounded = Math.round(pct);
+  if (rounded > 80) {
+    return { state: 'danger', level: 'bad', color: '#ef4444', emoji: '🔴', symbol: '⚠' };
+  }
+  if (rounded >= 50) {
+    return { state: 'warn', level: 'warn', color: '#f59e0b', emoji: '🟡', symbol: '' };
+  }
+  return { state: 'ok', level: 'good', color: '#10a37f', emoji: '🟢', symbol: '' };
+}
+
+/**
+ * Formats a context usage percentage with color, state, and status level.
+ * Always pairs color with text. At 80%+ includes the ⚠ symbol.
+ * @param {number|null|undefined} pct
+ * @returns {{ text: string, display: string, level: 'good'|'warn'|'bad', state: 'ok'|'warn'|'danger', emoji: '🟢'|'🟡'|'🔴', color: string, symbol: string, raw: number }|null}
+ */
+function formatPercent(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  const rounded = Math.round(pct);
+  const t = threshold(pct);
+  return {
+    text: `${rounded}%`,
+    display: t.symbol ? `${rounded}% ${t.symbol}` : `${rounded}%`,
+    level: t.level,
+    state: t.state,
+    emoji: t.emoji,
+    color: t.color,
+    symbol: t.symbol,
+    raw: pct
+  };
+}
+
+/**
+ * Returns color string for a percentage: green (<50%), amber (50-80%), red (>80%).
+ * @param {number|null|undefined} pct
+ * @returns {string|null}
+ */
+function colorForPercent(pct) {
+  const p = formatPercent(pct);
+  return p ? p.color : null;
+}
+
+/**
+ * Returns status level for a percentage: 'good' (<50%), 'warn' (50-80%), 'bad' (>80%).
+ * @param {number|null|undefined} pct
+ * @returns {'good'|'warn'|'bad'|''}
+ */
+function levelForPercent(pct) {
+  const p = formatPercent(pct);
+  return p ? p.level : '';
+}
+
+/**
+ * Formats remaining messages/exchanges left.
+ * e.g., "~28 msgs left".
+ * @param {number|null|undefined} count
+ * @param {{ est?: boolean, split?: boolean }} [options]
+ * @returns {string|{ top: string, bottom: string }|null}
+ */
+function formatMsgs(count, options = {}) {
+  if (count === null || count === undefined || !Number.isFinite(count) || count < 0) {
+    return null;
+  }
+  const num = Math.round(count);
+  if (options.split) {
+    return { top: `~${num} msgs`, bottom: 'left' };
+  }
+  if (options.est) {
+    return `~${num} msgs left · est.`;
+  }
+  return `~${num} msgs left`;
+}
+
+/**
+ * Backwards compatible alias for formatMsgs.
+ * @param {number|null|undefined} exchangesLeft
+ * @returns {string|null}
+ */
+function formatLeft(exchangesLeft) {
+  return formatMsgs(exchangesLeft);
+}
+
+/**
+ * Formats reset time:
+ * - If under 24 hours: "resets 7:20 PM" (or "resets in 2h 10m" if options.relative is true)
+ * - If 24 hours or more: "resets in 1d 8h"
+ * Returns null if missing, invalid, or in the past.
+ * @param {number|string|null|undefined} resetsAt Timestamp (ms/s) or ISO date string
+ * @param {number} [now] Current timestamp
+ * @param {{ relative?: boolean }} [options]
+ * @returns {string|null}
+ */
+function formatReset(resetsAt, now = Date.now(), options = {}) {
+  if (!resetsAt) return null;
+  const ts = typeof resetsAt === 'number'
+    ? (resetsAt < 1e12 ? resetsAt * 1000 : resetsAt)
+    : typeof resetsAt === 'string'
+      ? Date.parse(resetsAt)
+      : null;
+  if (!ts || !Number.isFinite(ts) || ts <= now) return null;
+
+  const diffMs = ts - now;
+  const minTotal = Math.round(diffMs / 60000);
+  if (options.relative || diffMs >= 24 * 3600 * 1000) {
+    if (diffMs < 3600 * 1000) {
+      return `resets in ${Math.max(1, minTotal)}m`;
+    }
+    if (diffMs < 24 * 3600 * 1000) {
+      const hr = Math.floor(minTotal / 60);
+      const min = minTotal % 60;
+      return min > 0 ? `resets in ${hr}h ${min}m` : `resets in ${hr}h`;
+    }
+    const d = Math.floor(minTotal / 1440);
+    const hr = Math.floor((minTotal % 1440) / 60);
+    return `resets in ${d}d ${hr}h`;
+  }
+  const d = new Date(ts);
+  const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `resets ${timeStr}`;
+}
+
+/**
+ * Formats token count with rounded K/M suffixes.
+ * Avoids false precision like "96,009" -> "96K" or "~96K".
+ * Returns null if missing/invalid (never "N/A").
+ * @param {number|null|undefined} tokens
+ * @param {{ approx?: boolean }} [options]
+ * @returns {string|null}
+ */
+function formatTokens(tokens, options = {}) {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens)) return null;
+  const prefix = options.approx ? '~' : '';
+  if (tokens < 1000) return `${prefix}${Math.round(tokens)}`;
+  if (tokens < 1e6) {
+    return `${prefix}${(Math.round(tokens / 100) / 10).toString().replace(/\.0$/, '')}K`;
+  }
+  return `${prefix}${(Math.round(tokens / 1e4) / 100).toString().replace(/\.0$/, '')}M`;
+}
+
+
   // --- ui/dom.js ---
   /**
  * Context Monitor - shared DOM helpers and components (h, icons, Section, RowList, HiddenStack, formatters).
@@ -5140,7 +6014,8 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 const ICONS = {
   chevron: 'M4 6l4 4 4-4',
   refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
-  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z'
+  copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
+  gear: 'M6.5 1.5h3l.4 1.5a5 5 0 0 1 1.2.7l1.5-.5 2.1 2.1-.5 1.5c.3.4.5.8.7 1.2l1.5.4v3l-1.5.4a5 5 0 0 1-.7 1.2l.5 1.5-2.1 2.1-1.5-.5a5 5 0 0 1-1.2.7l-.4 1.5h-3l-.4-1.5a5 5 0 0 1-1.2-.7l-1.5.5-2.1-2.1.5-1.5a5 5 0 0 1-.7-1.2l-1.5-.4v-3l1.5-.4a5 5 0 0 1 .7-1.2l-.5-1.5 2.1-2.1 1.5.5a5 5 0 0 1 1.2-.7l.4-1.5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'
 };
 
 const fmtK = (n) => {
@@ -5341,23 +6216,33 @@ function download(parent, base, ext, text, type = 'text/plain') {
  */
 
 const STYLES = `
-  :host { all: initial; }
+  :host { all: initial; display: block; width: 100%; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  .root {
-    --bg: #0F1115; --surface: #171A21; --glass: rgba(23, 26, 33, .85); --border: #262A33; --text: #E6E8EC; --muted: #8A91A0;
-    --accent: #D97757; --good: #4ADE80; --warn: #FBBF24; --warn-text: #FBBF24; --danger: #F87171; --track: #262A33; --hover: rgba(255, 255, 255, .06);
-    --s1: #D97757; --s2: #60A5FA; --s3: #A78BFA; --s4: #34D399; --s5: #F472B6; --s6: #FBBF24; --s7: #22D3EE; --s8: #94A3B8;
-    --shadow: 0 8px 30px rgba(0, 0, 0, .25); --on-accent: #0F1115;
+  :host, .root, .glance-container {
+    --bg: #0F1117; --surface: #1E222B; --surface-hover: #272C37; --glass: rgba(30, 34, 43, .90);
+    --border: rgba(255, 255, 255, .18); --border-hover: rgba(255, 255, 255, .35);
+    --text: #FFFFFF; --muted: #D1D5DB;
+    --accent: #E07A5F; --good: #4ADE80; --warn: #FBBF24; --warn-text: #FDE047; --danger: #F87171;
+    --track: rgba(255, 255, 255, .15); --hover: rgba(255, 255, 255, .10);
+    --s1: #E07A5F; --s2: #60A5FA; --s3: #A78BFA; --s4: #34D399; --s5: #F472B6; --s6: #FBBF24; --s7: #22D3EE; --s8: #94A3B8;
+    --shadow: 0 4px 20px -2px rgba(0, 0, 0, .60), 0 0 0 1px rgba(255, 255, 255, .15);
+    --shadow-hover: 0 6px 24px -2px rgba(0, 0, 0, .75), 0 0 0 1px rgba(255, 255, 255, .25);
+    --on-accent: #0F1117;
     --ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     position: relative; font: 12.5px/1.45 var(--ui); color: var(--text); color-scheme: dark;
     -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
   }
-  .root.light {
-    --bg: #FAF9F6; --surface: #FFFFFF; --glass: rgba(255, 255, 255, .85); --border: #E7E4DD; --text: #1F2328; --muted: #6B7280;
-    --accent: #C15F3C; --good: #16A34A; --warn: #D97706; --warn-text: #B45309; --danger: #DC2626; --track: #EFECE6; --hover: rgba(0, 0, 0, .04);
+  :host(.light), .root.light, .glance-container.light {
+    --bg: #FFFFFF; --surface: #F8F9FA; --surface-hover: #F1F3F5; --glass: rgba(248, 249, 250, .94);
+    --border: rgba(0, 0, 0, .15); --border-hover: rgba(0, 0, 0, .30);
+    --text: #0F172A; --muted: #475569;
+    --accent: #C15F3C; --good: #059669; --warn: #D97706; --warn-text: #B45309; --danger: #DC2626;
+    --track: rgba(0, 0, 0, 0.08); --hover: rgba(0, 0, 0, 0.05);
     --s1: #C15F3C; --s2: #2563EB; --s3: #7C3AED; --s4: #059669; --s5: #DB2777; --s6: #D97706; --s7: #0891B2; --s8: #64748B;
-    --shadow: 0 8px 30px rgba(0, 0, 0, .12); --on-accent: #FFFFFF; color-scheme: light;
+    --shadow: 0 4px 16px -2px rgba(0, 0, 0, .08), 0 0 0 1px rgba(0, 0, 0, .08);
+    --shadow-hover: 0 6px 20px -2px rgba(0, 0, 0, .12), 0 0 0 1px rgba(0, 0, 0, .12);
+    --on-accent: #FFFFFF; color: var(--text); color-scheme: light;
   }
   button { all: unset; box-sizing: border-box; cursor: pointer; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
@@ -5504,24 +6389,992 @@ const STYLES = `
   .settings .row { justify-content: flex-start; align-items: center; gap: 8px; cursor: pointer; }
   .settings input { flex: none; accent-color: var(--accent); }
 
+  /* Glance Strip & Detail Drawer */
+  .glance-container { display: flex; flex-direction: column; width: 100%; max-width: 768px; margin: 0 auto 6px; box-sizing: border-box; }
+  .glance-strip {
+    display: inline-flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%;
+    padding: 4px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+    font: 500 12px/1.4 var(--ui); color: var(--text); cursor: pointer; user-select: none;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .glance-strip:hover { background: var(--hover); border-color: var(--muted); }
+  .glance-strip.good { border-color: rgba(74, 222, 128, .3); }
+  .glance-strip.warn { border-color: rgba(251, 191, 36, .3); }
+  .glance-strip.bad { border-color: rgba(248, 113, 113, .3); }
+  .glance-strip.good .glance-pct { color: var(--good); font-weight: 600; }
+  .glance-strip.warn .glance-pct { color: var(--warn-text); font-weight: 600; }
+  .glance-strip.bad .glance-pct { color: var(--danger); font-weight: 600; }
+  .glance-dot { flex: none; font-size: 11px; }
+  .glance-sep { color: var(--muted); opacity: .6; }
+  .glance-left { color: var(--text); }
+  .glance-reset { color: var(--muted); }
+
+  .detail-drawer {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 6px; box-shadow: var(--shadow); box-sizing: border-box;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .detail-drawer[hidden] { display: none; }
+  .drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .drawer-title { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--text); }
+  .model-caption { font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .drawer-gear { opacity: .7; } .drawer-gear:hover { opacity: 1; }
+
+  /* Stacked Bar */
+  .stack-bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--track); width: 100%; margin: 4px 0 2px; }
+  .stack-bar .seg { display: block; height: 100%; transition: width .3s ease; }
+  .stack-bar .seg-user { background: var(--s2); }
+  .stack-bar .seg-asst { background: var(--s1); }
+  .stack-bar .seg-sys { background: var(--s3); }
+
+  .drawer-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); flex-wrap: wrap; margin-top: 2px; }
+  .drawer-legend .sep { opacity: .4; }
+  .drawer-legend span[data-tip] { cursor: help; border-bottom: 1px dotted var(--muted); }
+
+  .drawer-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 2px 0; }
+  .drawer-row .k { color: var(--muted); }
+  .drawer-row .v { color: var(--text); font-weight: 500; font-family: var(--mono); }
+  .biggest-row { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 2px; }
+
+  .drawer-usage { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 2px; display: flex; flex-direction: column; gap: 4px; }
+  .usage-row { font-size: 12px; color: var(--text); }
+
+  .dev-view { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .dev-view[hidden] { display: none; }
+  .sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+
+  /* Strip Box (2-column usage & context strip) */
+  .strip-box {
+    display: flex; justify-content: space-between; align-items: center; width: 100%;
+    padding: 8px 14px; border-radius: 10px; background: var(--surface);
+    border: 1px solid var(--border); box-shadow: var(--shadow); user-select: none;
+    box-sizing: border-box; cursor: pointer; color: var(--text);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+  }
+  .strip-box:hover { background: var(--surface-hover); border-color: var(--border-hover); box-shadow: var(--shadow-hover); }
+  .strip-left { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+  .strip-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }
+  .u-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .u-label {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 700; font-size: 10.5px;
+    letter-spacing: 0.03em; min-width: 28px; padding: 1px 6px; border-radius: 4px;
+    color: var(--text); background: var(--track); border: 1px solid var(--border);
+    flex: none;
+  }
+  .u-bar-track {
+    width: 120px; height: 7px; border-radius: 999px; background: var(--track);
+    overflow: hidden; flex: none; box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+  }
+  .u-bar-fill { height: 100%; border-radius: 999px; transition: width .35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .u-bar-fill.solid-ok { background: var(--good); }
+  .u-bar-fill.solid-warn { background: var(--warn); }
+  .u-bar-fill.solid-danger { background: var(--danger); }
+  .u-bar-fill.hatched-ok {
+    background: repeating-linear-gradient(45deg, var(--good), var(--good) 3px, transparent 3px, transparent 6px);
+    background-color: rgba(74, 222, 128, 0.25);
+  }
+  .u-bar-fill.hatched-warn {
+    background: repeating-linear-gradient(45deg, var(--warn), var(--warn) 3px, transparent 3px, transparent 6px);
+    background-color: rgba(251, 191, 36, 0.25);
+  }
+  .u-bar-fill.hatched-danger {
+    background: repeating-linear-gradient(45deg, var(--danger), var(--danger) 3px, transparent 3px, transparent 6px);
+    background-color: rgba(248, 113, 113, 0.25);
+  }
+  .u-bar-fill.neutral { background: var(--muted); opacity: .4; }
+  .u-pct { font-family: var(--mono); font-weight: 700; font-size: 11.5px; min-width: 40px; text-align: right; }
+  .u-pct.ok { color: var(--good); }
+  .u-pct.warn { color: var(--warn-text); }
+  .u-pct.danger { color: var(--danger); }
+  .u-pct.neutral { color: var(--muted); }
+  .u-reset { font-family: var(--mono); color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .u-note { color: var(--muted); font-size: 11px; font-weight: 500; }
+
+  .ctx-msgs { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.15; text-align: right; font-weight: 500; }
+  .ctx-row { display: flex; align-items: center; gap: 7px; color: var(--text); }
+  .ctx-ring-btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; border-radius: 6px; padding: 1px 3px; }
+  .ctx-ring-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ctx-ring-svg { width: 22px; height: 22px; transform: rotate(-90deg); flex: none; }
+  .ctx-ring-track { fill: none; stroke: var(--track); stroke-width: 2.75; }
+  .ctx-ring-arc { fill: none; stroke-width: 2.75; stroke-linecap: round; transition: stroke-dashoffset .35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .ctx-ring-arc.ok { stroke: var(--good); }
+  .ctx-ring-arc.warn { stroke: var(--warn); }
+  .ctx-ring-arc.danger { stroke: var(--danger); }
+  .ctx-ring-arc.hatched { stroke-dasharray: 2.5 2 !important; }
+  .ctx-pct { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+  .ctx-pct.ok { color: var(--good); }
+  .ctx-pct.warn { color: var(--warn-text); }
+  .ctx-pct.danger { color: var(--danger); }
+  .ctx-pct.neutral { color: var(--text); }
+
+  .new-chat-suggestion { color: var(--warn-text); font-size: 11.5px; padding: 4px 0; border-top: 1px solid var(--border); margin-top: 2px; }
+  .sparkline-row { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border); padding-top: 4px; margin-top: 2px; }
+  .drawer-sparkline { width: 120px; height: 24px; stroke: var(--accent); stroke-width: 1.5; fill: none; stroke-linecap: round; }
+  .draft-estimate { display: inline-flex; align-items: center; font-size: 11px; color: var(--muted); padding: 2px 8px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); margin-bottom: 4px; width: fit-content; }
+  .visible-only-badge { font-size: 10px; color: var(--muted); margin-left: 4px; font-weight: normal; }
+
   .hide { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 `;
 
 
+  // --- ui/strip-component.js ---
+  /**
+ * Context Monitor - StripComponent
+ *
+ * Single shared UI component for the usage & context strip above the chat input across
+ * claude.ai, gemini.google.com, and chatgpt.com.
+ *
+ * Layout (two-column):
+ * - Left: usage rows (0 to 2 rows). Label, bar, percent, reset time, optional note.
+ * - Right: context ring, with percent beside it. Optional "~N msgs left" above ring (Claude only)
+ *          or reset time (Gemini).
+ * - Ring hover or click: opens detail drawer with context breakdown and biggest item.
+ * - Usage row hover or click: opens detail drawer with usage details.
+ */
+
+
+
+
+
+
+
+
+
+
+const RING_R = 9;
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_R; // ~56.55
+
+class StripComponent {
+  /**
+   * @param {Element} container Parent element (usually shadow root or wrapper inside shadow root)
+   * @param {{ onToggleDrawer?: (open: boolean) => void, onToggleDev?: (open: boolean) => void }} [callbacks]
+   */
+  constructor(container, callbacks = {}) {
+    this.container = container;
+    this.callbacks = callbacks;
+    this.drawerOpen = false;
+    this.devOpen = false;
+    this._data = null;
+    this._hoverTimer = null;
+    this._pinnedOpen = false;
+    this._countdown = new ResetCountdown({
+      onTick: (text) => this._onCountdownTick(text)
+    });
+
+    this._build();
+  }
+
+  _build() {
+    this.root = h('div', 'glance-container root', this.container);
+
+    // Pre-send draft token estimate pill (debounced 300ms, shown only when draft exists)
+    this.draftPill = h('div', 'draft-estimate hide', this.root);
+
+    // Toast element for threshold alerts
+    this.toast = h('div', 'toast hide', this.root);
+    this.toast.setAttribute('role', 'status');
+    this.toast.setAttribute('aria-live', 'polite');
+
+    // 1. Detail Drawer (collapsed by default, opens on click/hover)
+    this.drawer = h('div', 'detail-drawer', this.root);
+    this.drawer.hidden = true;
+
+    // Header: Context ~96K / 200K · est. + Gear button
+    const dHead = h('div', 'drawer-header', this.drawer);
+    const titleBox = h('div', null, dHead);
+    titleBox.style.cssText = 'display:flex;align-items:baseline;gap:6px;';
+    this.dTitle = h('span', 'drawer-title', titleBox, 'Context —');
+    this.dModel = h('span', 'model-caption', titleBox);
+    this.dGear = iconButton(dHead, ICONS.gear, 'Toggle developer diagnostics');
+    this.dGear.b.classList.add('drawer-gear');
+    this.dGear.b.setAttribute('aria-expanded', 'false');
+
+    // Stacked bar
+    this.dStack = h('div', 'stack-bar', this.drawer);
+    this.dStack.setAttribute('role', 'progressbar');
+    this.dStack.setAttribute('aria-label', 'Context distribution');
+    this.dSegUser = h('span', 'seg seg-user', this.dStack);
+    this.dSegAsst = h('span', 'seg seg-asst', this.dStack);
+    this.dSegSys = h('span', 'seg seg-sys', this.dStack);
+
+    // Legend: You 4% · Claude & tools 55% · System 41%
+    this.dLegend = h('div', 'drawer-legend', this.drawer);
+    this.dLegUser = h('span', null, this.dLegend);
+    h('span', 'sep', this.dLegend, '·');
+    this.dLegAsst = h('span', null, this.dLegend);
+    h('span', 'sep', this.dLegend, '·');
+    this.dLegSys = h('span', null, this.dLegend);
+    this.dLegSys.title = 'System prompt, memory, tool definitions';
+
+    // Suggestion line: "Consider a new chat" (rendered in drawer only at >=80% context)
+    this.dNewChatRow = h('div', 'drawer-row new-chat-suggestion hide', this.drawer);
+    this.dNewChatVal = h('span', 'suggestion-text', this.dNewChatRow, '💡 High context usage: Consider starting a new chat');
+
+    // Biggest item: <name> · <tokens> (shown only when data exists)
+    this.dBigRow = h('div', 'drawer-row biggest-row hide', this.drawer);
+    h('span', 'k', this.dBigRow, 'Biggest item:');
+    this.dBigVal = h('span', 'v', this.dBigRow);
+    this.dBigRow.addEventListener('click', () => {
+      if (this._currentBiggest?.element) {
+        scrollToItem(this._currentBiggest.element);
+      }
+    });
+
+    // Usage history sparkline (rolling 7-day, gaps drawn as breaks)
+    this.dSparklineBox = h('div', 'drawer-row sparkline-row hide', this.drawer);
+    h('span', 'k', this.dSparklineBox, 'Usage history:');
+    const sSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    sSvg.setAttribute('class', 'drawer-sparkline');
+    sSvg.setAttribute('viewBox', '0 0 120 24');
+    sSvg.setAttribute('aria-hidden', 'true');
+    this.dSparklinePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    sSvg.appendChild(this.dSparklinePath);
+    this.dSparklineBox.appendChild(sSvg);
+
+    // Usage details section in drawer
+    this.dUsage = h('div', 'drawer-usage hide', this.drawer);
+
+    // Developer view (hidden by default behind gear icon)
+    this.dDev = h('div', 'dev-view hide', this.drawer);
+    h('div', 'sec-title', this.dDev, 'Diagnostics');
+    this.dDevContent = h('div', null, this.dDev);
+    this.dExportBtn = textButton(this.dDevContent, 'Export Checkpoint (MD)', () => this._exportCheckpoint());
+
+    this.dGear.b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.devOpen = !this.devOpen;
+      show(this.dDev, this.devOpen);
+      this.dGear.b.setAttribute('aria-expanded', String(this.devOpen));
+      if (this.callbacks.onToggleDev) this.callbacks.onToggleDev(this.devOpen);
+    });
+
+    // 2. Main Strip Box (Two columns: Left = usage rows, Right = context ring)
+    this.strip = h('div', 'strip-box', this.root);
+    this.strip.setAttribute('role', 'region');
+    this.strip.setAttribute('tabindex', '0');
+    this.strip.setAttribute('aria-label', 'AI Chat Usage and Context Strip');
+    this.strip.setAttribute('aria-expanded', 'false');
+
+    // Left Column: Usage Rows
+    this.stripLeft = h('div', 'strip-left', this.strip);
+
+    // Right Column: Context Ring + msgs left
+    this.stripRight = h('div', 'strip-right', this.strip);
+    this.ctxMsgs = h('div', 'ctx-msgs hide', this.stripRight);
+
+    this.ctxRow = h('div', 'ctx-row', this.stripRight);
+    this.ringBtn = h('button', 'ctx-ring-btn', this.ctxRow);
+    this.ringBtn.type = 'button';
+    this.ringBtn.setAttribute('tabindex', '0');
+    this.ringBtn.setAttribute('aria-label', 'Context ring: click or hover for breakdown');
+
+    // SVG Circular Ring
+    const NS = 'http://www.w3.org/2000/svg';
+    this.svg = document.createElementNS(NS, 'svg');
+    this.svg.setAttribute('class', 'ctx-ring-svg');
+    this.svg.setAttribute('viewBox', '0 0 24 24');
+    this.svg.setAttribute('aria-hidden', 'true');
+
+    this.ringTrack = document.createElementNS(NS, 'circle');
+    this.ringTrack.setAttribute('class', 'ctx-ring-track');
+    this.ringTrack.setAttribute('cx', '12');
+    this.ringTrack.setAttribute('cy', '12');
+    this.ringTrack.setAttribute('r', String(RING_R));
+    this.svg.appendChild(this.ringTrack);
+
+    this.ringArc = document.createElementNS(NS, 'circle');
+    this.ringArc.setAttribute('class', 'ctx-ring-arc');
+    this.ringArc.setAttribute('cx', '12');
+    this.ringArc.setAttribute('cy', '12');
+    this.ringArc.setAttribute('r', String(RING_R));
+    this.ringArc.setAttribute('stroke-dasharray', String(RING_CIRCUMFERENCE));
+    this.ringArc.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE));
+    this.svg.appendChild(this.ringArc);
+
+    this.ringBtn.appendChild(this.svg);
+    this.ctxVal = h('span', 'ctx-pct', this.ringBtn, '—');
+
+    // Events: click toggles pinned open state; hover previews drawer
+    this.strip.addEventListener('click', (e) => {
+      if (e.target.closest('.drawer-gear') || e.target.closest('.dev-view')) return;
+      this._toggleDrawer();
+    });
+
+    this.strip.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        this._toggleDrawer();
+      }
+    });
+
+    this.strip.addEventListener('mouseenter', () => {
+      clearTimeout(this._hoverTimer);
+      this._hoverTimer = setTimeout(() => {
+        if (!this.drawerOpen) {
+          this._setDrawerOpen(true, false);
+        }
+      }, 150);
+    });
+
+    this.strip.addEventListener('mouseleave', () => {
+      clearTimeout(this._hoverTimer);
+      if (!this._pinnedOpen && this.drawerOpen) {
+        this._setDrawerOpen(false, false);
+      }
+    });
+  }
+
+  _toggleDrawer(force) {
+    const next = typeof force === 'boolean' ? force : !this.drawerOpen;
+    this._pinnedOpen = next;
+    this._setDrawerOpen(next, true);
+  }
+
+  _setDrawerOpen(open, notify = true) {
+    this.drawerOpen = open;
+    this.drawer.hidden = !open;
+    setAttr(this.strip, 'aria-expanded', String(open));
+    if (notify && this.callbacks.onToggleDrawer) {
+      this.callbacks.onToggleDrawer(open);
+    }
+  }
+
+  /**
+   * Renders the strip and drawer with standardized data.
+   *
+   * @param {{
+   *   rows: Array<{
+   *     label: string,
+   *     state: 'ok'|'warn'|'danger'|'unlimited'|'unknown',
+   *     percent?: number,
+   *     resetsAt?: string|number,
+   *     source: 'measured'|'estimated',
+   *     note?: string
+   *   }>,
+   *   context?: {
+   *     used?: number,
+   *     limit?: number,
+   *     source: 'measured'|'estimated',
+   *     refLimit?: number,
+   *     refType?: 'user'|'published',
+   *     state?: 'A'|'B'|'C'
+   *   },
+   *   msgsLeft?: number|null,
+   *   rightNote?: string|null,
+   *   breakdown?: { user?: number, assistant?: number, system?: number },
+   *   biggest?: { name?: string, role?: string, turn?: number, tokens?: number },
+   *   provider?: string,
+   *   model?: string,
+   *   modelFamily?: string
+   * }} data
+   */
+  render(data) {
+    this._data = data;
+    if (!data) {
+      this.strip.style.display = 'none';
+      return;
+    }
+
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const ctx = data.context || null;
+
+    // If both rows and context are empty/unavailable, hide the strip cleanly without error
+    if (rows.length === 0 && (!ctx || ctx.used === undefined || ctx.used === null)) {
+      this.strip.style.display = 'none';
+      return;
+    }
+    this.strip.style.display = '';
+
+    // -------------------------------------------------------------------------
+    // 1. Render Left Column: Usage Rows
+    // -------------------------------------------------------------------------
+    this.stripLeft.textContent = '';
+    this.dUsage.textContent = '';
+    let hasUsageDetails = false;
+
+    for (const r of rows) {
+      const uRow = h('div', 'u-row', this.stripLeft);
+      uRow.setAttribute('tabindex', '0');
+
+      // Label (site's own name, e.g. "5h", "Wk", "Uploads")
+      h('span', 'u-label', uRow, r.label);
+
+      // Bar and values
+      if (r.state === 'unlimited') {
+        const noteText = r.note || 'No limit · subject to safeguards';
+        const noteEl = h('span', 'u-note', uRow, noteText);
+        noteEl.style.color = 'var(--muted)';
+      } else if (typeof r.percent === 'number' && Number.isFinite(r.percent)) {
+        const pct = Math.round(r.percent);
+        const t = threshold(pct);
+        const isEst = r.source === 'estimated';
+
+        // Bar container
+        const barTrack = h('div', 'u-bar-track', uRow);
+        const barFill = h('div', 'u-bar-fill', barTrack);
+        barFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+
+        // Bar fill style: solid for measured, hatched for estimated
+        const fillClass = isEst ? `hatched-${t.state}` : `solid-${t.state}`;
+        barFill.classList.add(fillClass);
+
+        // Percent text: at 80%+ append ⚠
+        const pctEl = h('span', `u-pct ${t.state}`, uRow, t.symbol ? `${pct}% ${t.symbol}` : `${pct}%`);
+        if (isEst) {
+          pctEl.title = 'Estimated';
+        }
+
+        // Reset text
+        const resetStr = r.resetsAt ? (formatReset(r.resetsAt) || '') : '';
+        if (resetStr) {
+          const rReset = h('span', 'u-reset', uRow, resetStr);
+          if (data.features?.countdown !== false) {
+            this._activeResetEl = rReset;
+            this._countdown.start(r.resetsAt);
+          }
+        }
+
+        // Row note if present
+        if (r.note) {
+          h('span', 'u-note', uRow, r.note);
+        }
+
+        // Build matching drawer usage row
+        const dRow = h('div', 'drawer-row usage-row', this.dUsage);
+        const tag = isEst ? '🟡 est.' : '🟢 measured';
+        const parts = [r.label, `${pct}%`, resetStr, tag].filter(Boolean);
+        setText(dRow, parts.join(' · '));
+        hasUsageDetails = true;
+      } else if (r.note) {
+        h('span', 'u-note', uRow, r.note);
+      }
+    }
+    show(this.dUsage, hasUsageDetails);
+
+    // -------------------------------------------------------------------------
+    // 2. Render Right Column: Msgs Left & Context Ring
+    // -------------------------------------------------------------------------
+    // Right Top: msgsLeft (Claude) or reset note (Gemini)
+    if (typeof data.msgsLeft === 'number' && Number.isFinite(data.msgsLeft)) {
+      const split = formatMsgs(data.msgsLeft, { split: true });
+      if (split) {
+        this.ctxMsgs.textContent = '';
+        h('div', null, this.ctxMsgs, split.top);
+        h('div', null, this.ctxMsgs, split.bottom);
+        this.ctxMsgs.title = 'Estimated messages left before limit';
+        show(this.ctxMsgs, true);
+      } else {
+        show(this.ctxMsgs, false);
+      }
+    } else if (data.rightNote) {
+      this.ctxMsgs.textContent = '';
+      h('div', null, this.ctxMsgs, data.rightNote);
+      show(this.ctxMsgs, true);
+    } else {
+      show(this.ctxMsgs, false);
+    }
+
+    // Right Bottom: Context Ring
+    // Determine ring state: A (Known limit), B (User reference), C (No limit)
+    let ringState = 'C';
+    let ringLimit = null;
+    let _isUserRef = false;
+
+    if (ctx) {
+      if (ctx.limit && Number.isFinite(ctx.limit) && ctx.limit > 0) {
+        ringState = 'A';
+        ringLimit = ctx.limit;
+      } else if (ctx.refLimit && Number.isFinite(ctx.refLimit) && ctx.refLimit > 0) {
+        ringState = 'B';
+        ringLimit = ctx.refLimit;
+        _isUserRef = true;
+      } else {
+        ringState = 'C';
+      }
+    }
+
+    const used = ctx?.used;
+    const isEstCtx = ctx?.source === 'estimated';
+
+    if (ringState === 'A' || ringState === 'B') {
+      const pct = typeof used === 'number' && Number.isFinite(used) && ringLimit
+        ? Math.round((used / ringLimit) * 100)
+        : null;
+
+      if (pct !== null) {
+        const t = threshold(pct);
+        const offset = RING_CIRCUMFERENCE * (1 - Math.min(100, Math.max(0, pct)) / 100);
+
+        this.ringArc.style.display = '';
+        this.ringArc.setAttribute('stroke-dashoffset', String(offset));
+        this.ringArc.className.baseVal = `ctx-ring-arc ${t.state} ${isEstCtx ? 'hatched' : ''}`;
+
+        setText(this.ctxVal, t.symbol ? `${pct}% ${t.symbol}` : `${pct}%`);
+        this.ctxVal.className = `ctx-pct ${t.state}`;
+      } else {
+        this.ringArc.style.display = 'none';
+        setText(this.ctxVal, '—');
+        this.ctxVal.className = 'ctx-pct neutral';
+      }
+    } else {
+      // State C: No limit. Outlined ring, NO fill arc, count ONLY beside ring (no percent)
+      this.ringArc.style.display = 'none';
+      const formattedUsed = typeof used === 'number' && Number.isFinite(used)
+        ? formatTokens(used, { approx: true })
+        : '—';
+      setText(this.ctxVal, formattedUsed);
+      this.ctxVal.className = 'ctx-pct neutral';
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. Render Detail Drawer
+    // -------------------------------------------------------------------------
+    const usedFormatted = formatTokens(used, { approx: true }) || '0';
+    const tagCtx = isEstCtx ? 'est.' : 'measured';
+
+    let titleText = 'Context —';
+    if (ringState === 'A' && ringLimit) {
+      titleText = `Context ${usedFormatted} / ${formatTokens(ringLimit)} · ${tagCtx}`;
+    } else if (ringState === 'B' && ringLimit) {
+      titleText = `Context ${usedFormatted} vs your ${formatTokens(ringLimit)} ref · ${tagCtx}`;
+    } else if (ringState === 'C' && used !== null && used !== undefined) {
+      titleText = `Context ${usedFormatted} used · ${tagCtx}`;
+    }
+    setText(this.dTitle, titleText);
+
+    const modelCaption = [data.model, data.modelFamily].filter(Boolean).join(' · ');
+    setText(this.dModel, modelCaption ? `(${modelCaption})` : '');
+
+    // Stacked breakdown
+    const bk = data.breakdown || {};
+    const uTokens = bk.user || 0;
+    const aTokens = bk.assistant || 0;
+    const sTokens = bk.system || 0;
+    const totalBk = (uTokens + aTokens + sTokens) || used || 1;
+
+    const uPct = Math.round((uTokens / totalBk) * 100);
+    const aPct = Math.round((aTokens / totalBk) * 100);
+    const sPct = Math.max(0, 100 - uPct - aPct);
+
+    this.dSegUser.style.width = `${uPct}%`;
+    this.dSegAsst.style.width = `${aPct}%`;
+    this.dSegSys.style.width = `${sPct}%`;
+
+    const provName = data.provider || 'Assistant';
+    setText(this.dLegUser, `You ${uPct}%`);
+    setText(this.dLegAsst, `${provName} & tools ${aPct}%`);
+    setText(this.dLegSys, `System ${sPct}%`);
+
+    // Biggest item
+    const big = data.biggest;
+    this._currentBiggest = big;
+    if (big && typeof big.tokens === 'number' && big.tokens > 0) {
+      const disp = formatBiggestItemDisplay(big, formatTokens);
+      if (disp) {
+        this.dBigVal.textContent = '';
+        h('span', null, this.dBigVal, disp.text);
+        if (disp.sub) {
+          h('span', 'visible-only-badge', this.dBigVal, ` (${disp.sub})`);
+        }
+        this.dBigRow.style.cursor = big.element ? 'pointer' : '';
+        show(this.dBigRow, true);
+      } else {
+        show(this.dBigRow, false);
+      }
+    } else {
+      show(this.dBigRow, false);
+    }
+
+    // "Consider a new chat" line in drawer (at 80%+ context, 85%+ if estimated)
+    const ctxPct = (ringState === 'A' || ringState === 'B') && ringLimit
+      ? Math.round((used / ringLimit) * 100)
+      : null;
+    const isEst = isEstCtx || data.context?.source === 'estimated';
+    const showSuggest = shouldShowNewChatSuggestion(ctxPct, isEst ? 'estimated' : 'measured', data.features?.newChatSuggestion ?? true);
+    show(this.dNewChatRow, showSuggest);
+
+    // Usage history sparkline in drawer
+    if (Array.isArray(data.history) && data.history.length > 0 && data.features?.usageHistory !== false) {
+      const dPath = generateSparklinePath(data.history, 120, 24);
+      if (dPath) {
+        this.dSparklinePath.setAttribute('d', dPath);
+        show(this.dSparklineBox, true);
+      } else {
+        show(this.dSparklineBox, false);
+      }
+    } else {
+      show(this.dSparklineBox, false);
+    }
+  }
+
+  setDraftEstimate(tokens) {
+    if (tokens && typeof tokens === 'number' && tokens > 0) {
+      const text = formatPreSendEstimate(tokens, formatTokens);
+      setText(this.draftPill, text);
+      show(this.draftPill, true);
+    } else {
+      show(this.draftPill, false);
+    }
+  }
+
+  _exportCheckpoint() {
+    if (this.callbacks.onExportCheckpoint) {
+      this.callbacks.onExportCheckpoint();
+      return;
+    }
+    const msgs = this._data?.messages || [];
+    const md = buildCheckpointMarkdown(msgs, {
+      title: this._data?.title || (this._data?.model ? `${this._data.model} Chat` : 'Conversation Checkpoint'),
+      model: this._data?.model,
+      usedTokens: this._data?.context?.used,
+      contextLimit: this._data?.context?.limit,
+      percentage: this._data?.percentage,
+      range: 20
+    });
+    downloadMarkdownFile(md);
+    this.showToast('Checkpoint exported as Markdown');
+  }
+
+  destroy() {
+    if (this._countdown) {
+      this._countdown.destroy();
+    }
+  }
+
+  _onCountdownTick(text) {
+    if (!text) return;
+    if (this._activeResetEl) {
+      setText(this._activeResetEl, text);
+    }
+  }
+
+  showToast(text, ms = 4000) {
+    if (!this.toast) return;
+    this.toast.textContent = text;
+    show(this.toast, true);
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => show(this.toast, false), ms);
+  }
+}
+
+
+
+  // --- content/strip-adapters.js ---
+  /**
+ * Context Monitor - Platform Strip Adapters
+ *
+ * One adapter per platform (Claude, Gemini, ChatGPT) transforming platform state into
+ * standardized StripComponent data contract:
+ *   type Row = { label, state, percent?, resetsAt?, source, note? }
+ *   type Context = { used?, limit?, source }
+ *   type Adapter = () => { rows: Row[], context?: Context, msgsLeft?: number }
+ *
+ * Rules:
+ * - Adapters must NEVER throw. On failure, return rows: [] and hide strip.
+ * - Claude: rows "5h" and "Weekly". Context ring against published limit. Show "~N msgs left", labeled est.
+ * - Gemini: rows "5h" and "Weekly" (one weighted pool). No message count. Show note "Heavy tasks use more".
+ *           Context limit from Gemini API model info at runtime; if unavailable, use state C.
+ *           Replace "~28 msgs left" with reset time (e.g. "resets in 2h 10m").
+ * - ChatGPT: a text row "No limit · subject to safeguards" (state "unlimited"). Tool rows appear only when tracked.
+ *            Context: count only, no ring fill, no percent, unless user reference is set in settings.
+ */
+
+
+
+/**
+ * Adapter for Claude (claude.ai)
+ * @param {Object} [viewState]
+ * @param {Object} [_settings]
+ * @returns {{ rows: Array<Object>, context?: Object, msgsLeft?: number, provider: string, breakdown?: Object, biggest?: Object, model?: string, modelFamily?: string }}
+ */
+function claudeAdapter(viewState = {}, _settings = {}) {
+  try {
+    if (!viewState) return { rows: [], context: undefined };
+
+    const limits = Array.isArray(viewState.limits) ? viewState.limits : [];
+    const rows = [];
+
+    // Session (5h) row: always present for Claude
+    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session') || l.label?.toLowerCase().includes('5h'));
+    const sessionPct = (session && typeof session.percent === 'number' && Number.isFinite(session.percent))
+      ? Math.round(session.percent)
+      : (limits.length === 0 ? 0 : undefined);
+    const sessionState = sessionPct !== undefined
+      ? threshold(sessionPct).state
+      : (session?.blocked ? 'danger' : 'unknown');
+
+    if (session || limits.length === 0) {
+      rows.push({
+        label: '5h',
+        state: sessionState,
+        percent: sessionPct,
+        resetsAt: session?.resetsAt ? (typeof session.resetsAt === 'number' ? new Date(session.resetsAt).toISOString() : String(session.resetsAt)) : undefined,
+        source: session?.estimated ? 'estimated' : 'measured',
+        note: session?.note
+      });
+    }
+
+    // Weekly row: always present for Claude
+    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly') || l.label?.toLowerCase().includes('7d'));
+    const weeklyPct = (weekly && typeof weekly.percent === 'number' && Number.isFinite(weekly.percent))
+      ? Math.round(weekly.percent)
+      : (limits.length === 0 ? 0 : undefined);
+    const weeklyState = weeklyPct !== undefined
+      ? threshold(weeklyPct).state
+      : (weekly?.blocked ? 'danger' : 'unknown');
+
+    if (weekly || limits.length === 0) {
+      rows.push({
+        label: 'Weekly',
+        state: weeklyState,
+        percent: weeklyPct,
+        resetsAt: weekly?.resetsAt ? (typeof weekly.resetsAt === 'number' ? new Date(weekly.resetsAt).toISOString() : String(weekly.resetsAt)) : undefined,
+        source: weekly?.estimated ? 'estimated' : 'measured',
+        note: weekly?.note
+      });
+    }
+
+    let context;
+    if (typeof viewState.usedTokens === 'number' && Number.isFinite(viewState.usedTokens)) {
+      context = {
+        used: viewState.usedTokens,
+        limit: (typeof viewState.contextLimit === 'number' && Number.isFinite(viewState.contextLimit)) ? viewState.contextLimit : 200000,
+        source: 'estimated'
+      };
+    } else {
+      context = {
+        used: 0,
+        limit: (typeof viewState.contextLimit === 'number' && Number.isFinite(viewState.contextLimit)) ? viewState.contextLimit : 200000,
+        source: 'estimated'
+      };
+    }
+
+    const msgsLeft = (typeof viewState.exchangesLeft === 'number' && Number.isFinite(viewState.exchangesLeft))
+      ? viewState.exchangesLeft
+      : undefined;
+
+    return {
+      rows,
+      context,
+      msgsLeft,
+      provider: 'Claude',
+      breakdown: {
+        user: viewState.stats?.user,
+        assistant: viewState.stats?.assistant,
+        system: viewState.stats?.hidden
+      },
+      biggest: viewState.biggest?.[0],
+      model: viewState.model,
+      modelFamily: viewState.modelFamily
+    };
+  } catch (_) {
+    return { rows: [], context: undefined };
+  }
+}
+
+/**
+ * Adapter for Gemini (gemini.google.com)
+ * @param {Object} [viewState]
+ * @param {Object} [_settings]
+ * @returns {{ rows: Array<Object>, context?: Object, msgsLeft?: undefined, rightNote?: string, provider: string, breakdown?: Object, biggest?: Object, model?: string, modelFamily?: string }}
+ */
+function geminiAdapter(viewState = {}, _settings = {}) {
+  try {
+    if (!viewState) return { rows: [], context: undefined };
+
+    const limits = Array.isArray(viewState.limits) ? viewState.limits : [];
+    const rows = [];
+
+    // Gemini: 5h and Weekly (one weighted pool). Show note "Heavy tasks use more".
+    // Both 5h and Weekly rows are always present
+    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session') || l.label?.toLowerCase().includes('5h'));
+    const sessionPct = (session && typeof session.percent === 'number' && Number.isFinite(session.percent))
+      ? Math.round(session.percent)
+      : 0;
+    const sessionState = (session && typeof session.percent === 'number' && Number.isFinite(session.percent))
+      ? threshold(sessionPct).state
+      : (session?.blocked ? 'danger' : 'ok');
+
+    rows.push({
+      label: '5h',
+      state: sessionState,
+      percent: sessionPct,
+      resetsAt: session?.resetsAt ? (typeof session.resetsAt === 'number' ? new Date(session.resetsAt).toISOString() : String(session.resetsAt)) : undefined,
+      source: session?.estimated ? 'estimated' : 'measured',
+      note: 'Heavy tasks use more'
+    });
+
+    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
+    const weeklyPct = (weekly && typeof weekly.percent === 'number' && Number.isFinite(weekly.percent))
+      ? Math.round(weekly.percent)
+      : 0;
+    const weeklyState = (weekly && typeof weekly.percent === 'number' && Number.isFinite(weekly.percent))
+      ? threshold(weeklyPct).state
+      : (weekly?.blocked ? 'danger' : 'ok');
+
+    rows.push({
+      label: 'Weekly',
+      state: weeklyState,
+      percent: weeklyPct,
+      resetsAt: weekly?.resetsAt ? (typeof weekly.resetsAt === 'number' ? new Date(weekly.resetsAt).toISOString() : String(weekly.resetsAt)) : undefined,
+      source: weekly?.estimated ? 'estimated' : 'measured'
+    });
+
+    // Replace "~28 msgs left" with "resets in 2h 10m" (or nearest reset time)
+    const headReset = session?.resetsAt || weekly?.resetsAt || null;
+    const rightNote = headReset ? formatReset(headReset, Date.now(), { relative: true }) : null;
+
+    let context;
+    if (typeof viewState.usedTokens === 'number' && Number.isFinite(viewState.usedTokens)) {
+      context = {
+        used: viewState.usedTokens,
+        // Context limit from the Gemini API model info at runtime; if unavailable, use state C (omit limit)
+        limit: (typeof viewState.contextLimit === 'number' && Number.isFinite(viewState.contextLimit)) ? viewState.contextLimit : undefined,
+        source: 'estimated'
+      };
+    } else {
+      context = {
+        used: 0,
+        limit: (typeof viewState.contextLimit === 'number' && Number.isFinite(viewState.contextLimit)) ? viewState.contextLimit : undefined,
+        source: 'estimated'
+      };
+    }
+
+    return {
+      rows,
+      context,
+      msgsLeft: undefined, // Gemini shows NO message count!
+      rightNote,
+      provider: 'Gemini',
+      breakdown: {
+        user: viewState.stats?.user,
+        assistant: viewState.stats?.assistant,
+        system: viewState.stats?.hidden
+      },
+      biggest: viewState.biggest?.[0],
+      model: viewState.model,
+      modelFamily: viewState.modelFamily
+    };
+  } catch (_) {
+    return { rows: [], context: undefined };
+  }
+}
+
+/**
+ * Adapter for ChatGPT (chatgpt.com)
+ * @param {Object} [viewState]
+ * @param {Object} [settings]
+ * @returns {{ rows: Array<Object>, context?: Object, msgsLeft?: undefined, provider: string, breakdown?: Object, biggest?: Object, model?: string, modelFamily?: string }}
+ */
+function chatgptAdapter(viewState = {}, settings = {}) {
+  try {
+    if (!viewState) return { rows: [], context: undefined };
+
+    const limits = Array.isArray(viewState.limits) ? viewState.limits : [];
+    const rows = [];
+
+    // Text row: "No limit · subject to safeguards" (state "unlimited")
+    rows.push({
+      label: 'Text',
+      state: 'unlimited',
+      source: 'measured',
+      note: 'No limit · subject to safeguards'
+    });
+
+    // Tool rows (e.g. Uploads, Images, Data analysis) appear only when a tracked limit exists
+    for (const l of limits) {
+      if (l.key === 'limit' || l.label?.toLowerCase().includes('text') || l.key?.startsWith('model:')) continue;
+      const pct = typeof l.percent === 'number' && Number.isFinite(l.percent) ? Math.round(l.percent) : undefined;
+      const st = pct !== undefined ? threshold(pct).state : (l.blocked ? 'danger' : 'unknown');
+      rows.push({
+        label: l.label || 'Tool',
+        state: st,
+        percent: pct,
+        resetsAt: l.resetsAt ? (typeof l.resetsAt === 'number' ? new Date(l.resetsAt).toISOString() : String(l.resetsAt)) : undefined,
+        source: l.estimated ? 'estimated' : 'measured',
+        note: l.note
+      });
+    }
+
+    // Context: count only, no ring fill, no percent, unless user reference is set in settings
+    let context;
+    const usedTokens = (typeof viewState.usedTokens === 'number' && Number.isFinite(viewState.usedTokens))
+      ? viewState.usedTokens
+      : 0;
+
+    const userRef = settings?.context?.userReference || null;
+    if (userRef && Number.isFinite(userRef) && userRef > 0) {
+      context = {
+        used: usedTokens,
+        limit: undefined, // no OpenAI published limit
+        refLimit: userRef,
+        refType: 'user',
+        source: 'estimated'
+      };
+    } else {
+      context = {
+        used: usedTokens,
+        limit: undefined, // State C: count only, no ring fill, no percent
+        source: 'estimated'
+      };
+    }
+
+    return {
+      rows,
+      context,
+      msgsLeft: undefined,
+      rightNote: null,
+      provider: 'ChatGPT',
+      breakdown: {
+        user: viewState.stats?.user,
+        assistant: viewState.stats?.assistant,
+        system: viewState.stats?.hidden
+      },
+      biggest: viewState.biggest?.[0],
+      model: viewState.model,
+      modelFamily: viewState.modelFamily
+    };
+  } catch (_) {
+    return { rows: [], context: undefined };
+  }
+}
+
+/**
+ * Returns adapter function for provider name.
+ * @param {string} providerName
+ * @returns {Function}
+ */
+function getAdapterForProvider(providerName) {
+  const name = String(providerName || '').toLowerCase();
+  if (name.includes('claude')) return claudeAdapter;
+  if (name.includes('gemini')) return geminiAdapter;
+  return chatgptAdapter;
+}
+
+
   // --- content/widgets.js ---
   /**
- * Context Monitor - Widgets: two small pills on the chat page, each dragged on its own.
- *   Context  "5.7K · 2%" (badge colours) → click expands a card with the fields chosen in Settings
- *   Capsule  "💊 Capsule" → click runs captureCapsule with the chosen method; click again cancels
- * Everything else lives in the side panel (toolbar icon). Also here, because they belong to the page:
- * the 80% / 95% alerts (toasts on the Context pill) and the usage % next to chats in the sidebar.
- * Alt+T hides / shows both pills for this page view; Settings turns each one off for good.
- *
- * Each pill is its own shadow host (the page's CSS cannot reach it), moved only with transform and
- * anchored to its nearer side and top / bottom edge. Positions persist per site in chrome.storage.local
- * (`ui:<hostname>` = { pos: { context, capsule } }). Page-derived strings are only ever assigned as text.
+ * Context Monitor - In-page UI Widgets:
+ * 1. Glance strip (one line, always visible, mounted above the chat input):
+ *    "🟢 48% · ~28 msgs left · resets 7:20 PM"
+ *    Clicking it toggles the Detail drawer.
+ * 2. Detail drawer (collapsed by default, remembers state in extension storage):
+ *    - Header: "Context 96K / 200K · est." + Gear icon button
+ *    - Stacked bar with legend: You 4% | Claude & tools 55% | System & memory 41%
+ *    - "Biggest item: <name> · <tokens>" row (shown only when data exists)
+ *    - Usage section: exactly two rows (Session & Weekly)
+ *    - Developer view (growth, diagnostics, raw numbers; hidden by default)
+ * 3. Capsule pill ("💊 Capsule"):
+ *    Floating, draggable, unchanged prompt-capture tool.
  */
+
+
+
+
+
 
 
 
@@ -5542,17 +7395,13 @@ const WIDGET_CSS = `
   .root.w.top { flex-direction: column-reverse; }
   .pill.dragging { cursor: grabbing; }
   .pill.good .num { color: var(--good); } .pill.warn .num { color: var(--warn-text); } .pill.bad .num { color: var(--danger); }
-  .wcard { width: 220px; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
-  .wcard .fine:first-child { margin-top: 0; }
   .root.w .toast { position: static; transform: none; max-width: 240px; opacity: 1; }
 `;
 
 const validPos = (p) => Boolean(p) && ['left', 'right'].includes(p.side) && Number.isFinite(p.dx) && (Number.isFinite(p.y) || Number.isFinite(p.yFromBottom));
 
 /**
- * Pill positions from the stored per-site value. The old single widget saved `pos: { side, dx, y }`:
- * that becomes the Context pill's position, the Capsule pill starts at its default, and `migrated`
- * says the new shape should be written back.
+ * Pill positions from the stored per-site value (preserved for backward compatibility & tests).
  * @returns {{ pos: { context: Object, capsule: Object }, migrated: boolean }}
  */
 function widgetPositions(stored) {
@@ -5563,10 +7412,7 @@ function widgetPositions(stored) {
 }
 
 /**
- * Free drag for one pill: pointer events, translate3d, clamped to the viewport, snapped to the
- * nearest side on release (hold Alt to skip). `onMoved(pos)` saves the new position.
- * `place()` re-positions at most once per frame (it reads layout).
- * @returns {{ place(): void, wasDragged(): boolean }}
+ * Free drag for the Capsule pill: pointer events, translate3d, clamped to the viewport.
  */
 function makeDraggable(host, handle, getPos, onMoved) {
   let drag = null;
@@ -5588,7 +7434,6 @@ function makeDraggable(host, handle, getPos, onMoved) {
   };
   const placeNow = () => { placeRaf = null; if (!drag?.moved) { const { x, y } = xy(); apply(x, y); } };
   const place = () => { if (typeof requestAnimationFrame !== 'function') placeNow(); else placeRaf ??= requestAnimationFrame(placeNow); };
-  // Anchored to the nearer side and the nearer top / bottom edge, so resizes and the card never push it off screen
   const settle = (x, y, snap, animate) => {
     const { w, h: ht } = size();
     const vw = innerWidth;
@@ -5600,7 +7445,6 @@ function makeDraggable(host, handle, getPos, onMoved) {
       if (Math.abs(y - TOP_SAFE) < SNAP_Y) y = TOP_SAFE;
       else if (Math.abs(vh - ht - MARGIN - y) < SNAP_Y) y = vh - ht - MARGIN;
     }
-    // Store what is shown: the clamped position, so reloading never jumps
     dx = Math.max(MARGIN, Math.min(dx, vw - w - MARGIN));
     y = Math.max(MARGIN, Math.min(y, vh - ht - MARGIN));
     onMoved(y + ht / 2 > vh / 2 ? { side, dx, yFromBottom: vh - ht - y } : { side, dx, y });
@@ -5623,7 +7467,7 @@ function makeDraggable(host, handle, getPos, onMoved) {
     const dx = e.clientX - d.sx;
     const dy = e.clientY - d.sy;
     if (!d.moved) {
-      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // Still a click
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
       d.moved = true;
       handle.classList.add('dragging');
       document.documentElement.style.userSelect = 'none';
@@ -5639,28 +7483,19 @@ function makeDraggable(host, handle, getPos, onMoved) {
     try { handle.releasePointerCapture(d.id); } catch (_) {}
     drag = null;
     if (!d.moved) return;
-    justDragged = true; // Swallow the click that follows a drag
+    justDragged = true;
     handle.classList.remove('dragging');
     document.documentElement.style.userSelect = '';
     settle(d.x, d.y, !e.altKey && e.type !== 'pointercancel', true);
   };
   handle.addEventListener('pointerup', end);
   handle.addEventListener('pointercancel', end);
-  handle.addEventListener('keydown', (e) => {
-    const step = e.shiftKey ? 40 : 10;
-    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-    if (!d) return;
-    e.preventDefault();
-    const { x, y } = xy();
-    settle(x + d[0], y + d[1], false, false);
-  });
   return { place, wasDragged: () => { const was = justDragged; justDragged = false; return was; } };
 }
 
 class Widgets {
   /**
    * @param {{ provider?: string, findInput?: () => Element|null, replySelector?: string, userSelector?: string, countTokens?: Function }} [adapter]
-   *   Same shape the coordinators pass; `findInput` / `replySelector` are what the Capsule pill fills and reads.
    */
   constructor(adapter = {}) {
     this.adapter = {
@@ -5670,59 +7505,80 @@ class Widgets {
       userSelector: adapter.userSelector || null,
       countTokens: adapter.countTokens || null
     };
-    // What the Capsule pill and the side panel (over the panel channel) use to read and fill the page
     this.page = createPage({ ...this.adapter, getLimits: () => this.vm?.limits || [] });
     this.settings = normalizeSettings();
     this.pos = widgetPositions(null).pos;
     this.vm = null;
-    this.ctx = null;
+    this.glance = null;
     this.cap = null;
-    this.loaded = false; // Hidden until Settings are read: a pill turned off never flashes
-    this.hidden = false; // Alt+T, this page view only
-    this.expanded = false;
-    this.run = null; // Active Capsule wait ({ cancel })
+    this.loaded = false;
+    this.hidden = false;
+    this.drawerOpen = false; // Collapsed on first load
+    this.devOpen = false;
+    this.run = null;
     this._alerted = new Map();
+    this.alertManager = new AlertManager({
+      toastFn: (msg) => this.stripComponent?.showToast(msg, 4000)
+    });
+    this.preSendEstimator = new PreSendEstimator({
+      onEstimate: (tokens) => this.stripComponent?.setDraftEstimate(tokens)
+    });
+    this._history = [];
+    this._lastHistorySample = 0;
     this._usage = {};
     const host = typeof location !== 'undefined' ? location.hostname : '';
     this._storeKey = host ? `ui:${host}` : 'ui';
     this._usageKey = host ? `usage:${host}` : 'usage';
+    this._historyKey = host ? `usage_history:${host}` : 'usage_history';
   }
 
   mount() {
-    if (this.ctx || typeof document === 'undefined') return;
-    this.ctx = this._host('chatgpt-context-monitor-host', 'context');
-    this.cap = this._host('chatgpt-context-monitor-capsule', 'capsule');
-    this._buildContext();
-    this._buildCapsule();
+    if (this.glance || typeof document === 'undefined') return;
+    // Remove any leftover floating context host or capsule host
+    document.getElementById('chatgpt-context-monitor-host')?.remove();
+    document.getElementById('chatgpt-context-monitor-capsule')?.remove();
+    this.cap = null; // Capsules parked per user instructions: no floating pill
+
+    this._buildGlance();
+    this._ensureGlanceMounted();
 
     window.addEventListener('resize', () => this._render());
     window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => this._render());
     window.addEventListener('keydown', (e) => {
-      if (!this.ctx || !e.altKey || e.ctrlKey || e.metaKey || e.code !== 'KeyT') return;
+      if (!this.glance || !e.altKey || e.ctrlKey || e.metaKey || e.code !== 'KeyT') return;
       e.preventDefault();
       this.hidden = !this.hidden;
       this._render();
     }, true);
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'local' || !changes[SETTINGS_KEY] || !this.ctx) return;
+        if (area !== 'local' || !changes[SETTINGS_KEY] || !this.glance) return;
         this.settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
-        this._settingsFresh = true; // Newer than what _load may still be reading
-        if (!this.settings.widgets.capsule.enabled) this._cancelRun();
+        this._settingsFresh = true;
         this._paintBadges();
         this._render();
       });
     } catch (_) {}
-    // The site re-renders its sidebar constantly: repaint at most every 400 ms, only when something changed
     this._badgeObserver = new MutationObserver(() => {
+      this._ensureGlanceMounted();
       if (this._badgeTimer) return;
       this._badgeTimer = setTimeout(() => { this._badgeTimer = null; this._paintBadges(); }, 400);
     });
     this._badgeObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+
+    try {
+      this._themeObserver = new MutationObserver(() => this._render());
+      if (document.documentElement) {
+        this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] });
+      }
+      if (document.body) {
+        this._themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] });
+      }
+    } catch (_) {}
+
     this._load().finally(() => { this.loaded = true; this._paintBadges(); this._render(); });
   }
 
-  /** One fixed shadow host per pill, so each one positions on its own. */
   _host(id, key) {
     document.getElementById(id)?.remove();
     const host = document.createElement('div');
@@ -5738,30 +7594,8 @@ class Widgets {
     return { host, root, pill, drag, key };
   }
 
-  _buildContext() {
-    const { root, pill } = this.ctx;
-    pill.title = 'Context usage: click for details, drag to move (Alt+T hides)';
-    pill.setAttribute('aria-expanded', 'false');
-    this.ctx.num = h('span', 'num', pill, '—');
-    const card = this.ctx.card = h('div', 'wcard hide', root);
-    card.setAttribute('role', 'region');
-    card.setAttribute('aria-label', `${this.adapter.provider} context usage`);
-    this.ctx.empty = h('p', 'fine', card);
-    this.ctx.rows = h('div', null, card);
-    this.ctx.rowEls = new Map();
-    h('p', 'fine', card, 'More in the side panel');
-    const toast = this.ctx.toast = h('div', 'toast hide', root);
-    toast.setAttribute('role', 'status');
-    toast.setAttribute('aria-live', 'polite');
-    // The card comes before the pill: above it when bottom-anchored, below it (column-reverse) when top-anchored
-    root.append(toast, card, pill);
-    pill.addEventListener('click', () => { if (!this.ctx.drag.wasDragged()) this._setExpanded(!this.expanded); });
-    root.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.expanded) { e.stopPropagation(); this._setExpanded(false); pill.focus(); }
-    });
-  }
-
   _buildCapsule() {
+    if (!this.cap) return;
     const { pill } = this.cap;
     pill.title = 'Save this chat as a Capsule (method in Settings); click again to cancel. Drag to move.';
     this.cap.label = h('span', null, pill, CAPSULE_LABEL);
@@ -5769,75 +7603,209 @@ class Widgets {
     pill.addEventListener('click', () => { if (!this.cap.drag.wasDragged()) this._capsuleClick(); });
   }
 
-  /** @param {Object} viewState Output of toWidgetState() */
+  _buildGlance() {
+    document.getElementById('chatgpt-context-monitor-glance')?.remove();
+    const host = document.createElement('div');
+    host.id = 'chatgpt-context-monitor-glance';
+    host.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;width:100%;z-index:20;margin:0 0 8px;contain:layout style;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    h('style', null, shadow, STYLES + WIDGET_CSS);
+
+    this.stripComponent = new StripComponent(shadow, {
+      onToggleDrawer: (open) => {
+        this.drawerOpen = open;
+        try {
+          this._storage()?.set({ 'ui:drawer_open': this.drawerOpen }).catch(() => {});
+        } catch (_) {}
+      },
+      onToggleDev: (open) => {
+        this.devOpen = open;
+        if (open && this.vm) this._renderDevView();
+      }
+    });
+
+    this.glance = {
+      host,
+      shadow,
+      root: this.stripComponent.root,
+      strip: this.stripComponent.strip,
+      drawer: this.stripComponent.drawer,
+      toast: this.stripComponent.toast
+    };
+  }
+
+  _toggleDrawer(force) {
+    if (!this.stripComponent) return;
+    this.stripComponent._toggleDrawer(force);
+  }
+
+  _ensureGlanceMounted() {
+    if (!this.glance || typeof document === 'undefined') return;
+    const input = this.adapter.findInput(document);
+    let anchor = null;
+    if (input) {
+      if (input.tagName === 'FORM') {
+        anchor = input;
+      } else {
+        anchor = input.closest('fieldset') ||
+                 input.closest('form') ||
+                 input.closest('[data-testid="chat-input"]') ||
+                 input.closest('[data-testid="composer"]') ||
+                 input.parentElement;
+      }
+    }
+    if (!anchor) {
+      anchor = document.querySelector('form, [data-testid="composer"], [data-testid="chat-input"], [data-testid="prompt-textarea"]');
+    }
+    if (!anchor || !anchor.parentElement) return;
+
+    if (this.glance.host.parentElement !== anchor.parentElement || this.glance.host.nextSibling !== anchor) {
+      anchor.parentElement.insertBefore(this.glance.host, anchor);
+    }
+    if (this.settings?.features?.preSendEstimate && input) {
+      this.preSendEstimator.attach(input);
+    } else {
+      this.preSendEstimator.detach();
+    }
+  }
+
+  _isDarkMode() {
+    const s = this.settings;
+    if (s.display?.theme === 'dark') return true;
+    if (s.display?.theme === 'light') return false;
+
+    // Auto mode: inspect DOM first (ChatGPT, Claude, Gemini in-app themes)
+    try {
+      if (typeof document !== 'undefined') {
+        const docEl = document.documentElement;
+        const body = document.body;
+
+        // 1. ChatGPT & Claude: <html class="dark"> or <body class="dark">
+        if (docEl?.classList?.contains('dark') || body?.classList?.contains('dark')) return true;
+        if (docEl?.classList?.contains('light') || body?.classList?.contains('light')) return false;
+
+        // 2. Gemini: <html data-theme="dark"> or class="dark-theme"
+        const docTheme = docEl?.getAttribute?.('data-theme') || body?.getAttribute?.('data-theme') ||
+                         docEl?.getAttribute?.('data-mode') || body?.getAttribute?.('data-mode') ||
+                         docEl?.getAttribute?.('color-scheme') || body?.getAttribute?.('color-scheme');
+        if (docTheme === 'dark') return true;
+        if (docTheme === 'light') return false;
+        if (docEl?.classList?.contains('dark-theme') || body?.classList?.contains('dark-theme')) return true;
+
+        // 3. Computed background color luminance of body, html, or main
+        if (typeof window !== 'undefined' && window.getComputedStyle) {
+          const els = [body, docEl, document.querySelector('main'), document.getElementById('root')].filter(Boolean);
+          for (const el of els) {
+            const bg = window.getComputedStyle(el)?.backgroundColor;
+            const rgb = String(bg || '').match(/\d+/g);
+            if (rgb && rgb.length >= 3) {
+              const r = Number(rgb[0]), g = Number(rgb[1]), b = Number(rgb[2]);
+              const a = rgb.length >= 4 ? Number(rgb[3]) : 1;
+              if (a > 0.1) {
+                const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+                if (lum < 0.48) return true;
+                if (lum > 0.52) return false;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    return Boolean(typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+  }
+
   update(viewState) {
     this.vm = viewState;
-    if (!this.ctx) this.mount();
-    if (!this.ctx) return;
+    if (!this.glance) this.mount();
+    if (!this.glance) return;
     this._trackUsage(viewState);
-    // SPA re-renders can drop our nodes; re-attach instead of rebuilding
-    for (const p of [this.ctx, this.cap]) if (!p.host.isConnected) (document.body || document.documentElement).appendChild(p.host);
+    this._ensureGlanceMounted();
+    if (this.cap && !this.cap.host.isConnected) (document.body || document.documentElement).appendChild(this.cap.host);
     this._render();
   }
 
   _render() {
-    if (!this.ctx) return;
+    if (!this.glance) return;
     const s = this.settings;
-    const dark = s.display.theme === 'dark' || (s.display.theme === 'auto' && Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches));
-    for (const [p, on] of [[this.ctx, s.widgets.context.enabled], [this.cap, s.widgets.capsule.enabled]]) {
-      const display = on && this.loaded && !this.hidden ? '' : 'none';
-      if (p.host.style.display !== display) p.host.style.display = display;
-      p.root.classList.toggle('light', !dark);
-      p.root.classList.toggle('left', this.pos[p.key].side === 'left');
-      p.root.classList.toggle('top', !Number.isFinite(this.pos[p.key].yFromBottom));
+    const dark = this._isDarkMode();
+
+    this.glance.root.classList.toggle('light', !dark);
+    this.glance.root.classList.toggle('dark', dark);
+    if (this.glance.host) {
+      this.glance.host.classList.toggle('light', !dark);
+      this.glance.host.classList.toggle('dark', dark);
+    }
+    if (this.cap) {
+      this.cap.root.classList.toggle('light', !dark);
+      this.cap.root.classList.toggle('left', this.pos.capsule?.side === 'left');
+      this.cap.root.classList.toggle('top', !Number.isFinite(this.pos.capsule?.yFromBottom));
+      const capDisplay = s.widgets.capsule.enabled && this.loaded && !this.hidden ? '' : 'none';
+      if (this.cap.host.style.display !== capDisplay) this.cap.host.style.display = capDisplay;
     }
 
-    const { pill, num, card } = this.ctx;
+    const glanceDisplay = s.widgets.context.enabled && this.loaded && !this.hidden ? '' : 'none';
+    if (this.glance.host.style.display !== glanceDisplay) this.glance.host.style.display = glanceDisplay;
+
+    const ready = Boolean(this.vm) && this.vm.ready !== false;
+    this._renderGlance(ready);
+    this.cap?.drag.place();
+
+    if (ready && s.context.alerts && this.glance.host.style.display !== 'none') {
+      this._maybeAlert(this.vm);
+    }
+  }
+
+  _renderGlance(_ready) {
+    if (!this.glance || !this.stripComponent) return;
+
+    const adapter = getAdapterForProvider(this.adapter.provider);
+    const vm = this.vm || {
+      provider: this.adapter.provider,
+      usedTokens: 0,
+      limits: [],
+      ready: true
+    };
+    const data = adapter(vm, this.settings);
+    data.history = this._history;
+    data.features = this.settings.features;
+    data.percentage = vm.percentage;
+    this.stripComponent.render(data);
+
+    if (this.devOpen) this._renderDevView();
+  }
+
+  _renderDevView() {
+    if (!this.stripComponent?.dDevContent || !this.vm) return;
     const vm = this.vm;
-    const ready = Boolean(vm) && vm.ready !== false;
-    const pct = ready ? vm.percentage ?? null : null;
-    setText(num, ready ? `${fmtK(vm.usedTokens)}${pct !== null ? ` · ${pct}%` : ''}` : '—');
-    const level = pct === null ? '' : pct >= 85 ? 'bad' : pct >= 65 ? 'warn' : 'good';
-    for (const t of ['good', 'warn', 'bad']) pill.classList.toggle(t, t === level);
-    setAttr(pill, 'aria-label', ready
-      ? `Context usage ${fmtInt(vm.usedTokens)} tokens${pct !== null ? `, ${pct}% of window` : ''}. ${this.expanded ? 'Hide' : 'Show'} details.`
-      : 'Context usage: reading conversation.');
-    setAttr(pill, 'aria-expanded', String(this.expanded));
-    show(card, this.expanded);
-    if (this.expanded) this._renderCard(ready);
-    this.ctx.drag.place();
-    this.cap.drag.place();
-    // Only while the Context pill is shown (a hidden toast would use up the chat's alert); fires once it shows
-    if (ready && s.context.alerts && this.ctx.host.style.display !== 'none') this._maybeAlert(vm);
-  }
+    const el = this.stripComponent.dDevContent;
+    el.textContent = '';
+    const dRawRows = RowList(el);
+    const dDiagRows = RowList(el);
+    const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
+    const numExact = (n) => (n !== null && n !== undefined ? n.toLocaleString() : 'Unknown');
 
-  /** Rows are rebuilt only when the chosen / available fields change; otherwise only values are written. */
-  _renderCard(ready) {
-    const { rows, rowEls, empty } = this.ctx;
-    const fields = ready ? widgetFields(this.vm, this.settings.widgets.context.fields) : [];
-    const keys = fields.map(f => f.key).join();
-    if (keys !== [...rowEls.keys()].join()) {
-      rowEls.clear();
-      rows.replaceChildren();
-      for (const f of fields) {
-        const row = h('div', 'row', rows);
-        h('span', 'k', row, f.label);
-        rowEls.set(f.key, h('span', 'v', row));
-      }
-    }
-    for (const f of fields) setText(rowEls.get(f.key), f.value);
-    setText(empty, !ready ? 'Reading the conversation…' : fields.length ? '' : 'No fields chosen: pick them in the side panel\'s Settings.');
-    show(empty, !ready || !fields.length);
-  }
+    dRawRows.update([
+      { label: 'Used tokens', value: numExact(vm.usedTokens) },
+      { label: 'Remaining tokens', value: numExact(vm.remainingTokens) },
+      { label: 'Window', value: numExact(vm.contextLimit) },
+      { label: 'You', value: numExact(st.user) },
+      { label: 'Assistant + tools', value: numExact(st.assistant) },
+      { label: 'System & hidden', value: numExact(st.hidden) }
+    ]);
 
-  _setExpanded(open) {
-    this.expanded = open;
-    this._render();
+    const modelStr = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
+    dDiagRows.update([
+      { label: 'Provider', value: vm.provider || '—' },
+      { label: 'Model', value: modelStr || '—' },
+      { label: 'Plan', value: vm.plan || 'Unknown' },
+      { label: 'Source', value: vm.source || '—' },
+      { label: 'Turns', value: String(vm.turns || 0) }
+    ]);
   }
 
   // ------------------------------------------------------------------ Capsule pill
 
-  /** R11: errors become a status; the run handle is dropped on saved / error / cancelled. */
   async _capsuleClick() {
     if (typeof chrome === 'undefined' || !chrome.runtime?.id) return this._capsuleStatus({ state: 'error', text: 'Extension updated: reload the page' });
     if (this.run) return this._cancelRun();
@@ -5860,7 +7828,6 @@ class Widgets {
     }
   }
 
-  /** Drops the handle first (R11), so cancel() runs once. */
   _cancelRun() {
     const run = this.run;
     this.run = null;
@@ -5876,50 +7843,62 @@ class Widgets {
     else this._capsuleText(CAPSULE_LABEL);
   }
 
-  /** Pill text; with `ms`, back to the plain label after that long. */
   _capsuleText(text, ms) {
     clearTimeout(this._capTimer);
     if (!this.cap) return;
     setText(this.cap.label, text);
     if (ms) this._capTimer = setTimeout(() => this._capsuleText(CAPSULE_LABEL), ms);
-    this.cap.drag.place(); // The pill's width changed
+    this.cap.drag.place();
   }
 
   // ------------------------------------------------------------------ alerts & sidebar badges
 
   _toast(text, ms = 1500) {
-    const t = this.ctx.toast;
+    if (!this.glance?.toast) return;
+    const t = this.glance.toast;
     t.textContent = text;
     show(t, true);
-    this.ctx.drag.place();
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => { show(t, false); this.ctx?.drag.place(); }, ms);
+    this._toastTimer = setTimeout(() => { show(t, false); }, ms);
   }
 
-  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
   _maybeAlert(vm) {
     if (!vm.ready || vm.percentage === null) return;
-    const lvl = alertLevel(vm.percentage);
-    const key = vm.conversationId || '';
-    if (lvl <= (this._alerted.get(key) || 0)) return;
-    this._alerted.set(key, lvl);
-    this._toast(lvl === 95
-      ? `Context ${vm.percentage}% full: start a new chat soon`
-      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
-    if (!reducedMotion()) this.ctx.pill.animate?.([{ transform: 'scale(1)' }, { transform: 'scale(1.12)' }, { transform: 'scale(1)' }], { duration: 700, iterations: 2 });
+    const sessionLimit = (vm.limits || []).find(l => l.key === 'session' || l.label?.toLowerCase().includes('5h') || l.label?.toLowerCase().includes('session'));
+    const res = this.alertManager.evaluate({
+      chatId: vm.conversationId || 'global',
+      contextPct: vm.percentage,
+      contextSource: vm.percentageSource || (vm.authoritative ? 'measured' : 'estimated'),
+      sessionPct: sessionLimit?.percent,
+      sessionSource: sessionLimit?.estimated ? 'estimated' : 'measured',
+      enabled: this.settings?.features?.alerts !== false && this.settings?.context?.alerts !== false
+    });
+    if (res.fired && !reducedMotion()) {
+      this.stripComponent?.strip?.animate?.([{ transform: 'scale(1)' }, { transform: 'scale(1.08)' }, { transform: 'scale(1)' }], { duration: 600, iterations: 2 });
+    }
   }
 
-  /** Remembers this chat's usage and shows it next to the chat in the sidebar. */
   _trackUsage(vm) {
     if (!vm.ready || !vm.conversationId || vm.percentage === null) return;
     const before = this._usage[vm.conversationId]?.pct;
     this._usage = recordUsage(this._usage, vm.conversationId, vm.percentage);
-    if (this._usage[vm.conversationId]?.pct === before) return;
-    this._paintBadges();
-    clearTimeout(this._usageTimer);
-    this._usageTimer = setTimeout(() => {
-      try { this._storage()?.set({ [this._usageKey]: this._usage }).catch(() => {}); } catch (_) {}
-    }, 1000);
+    if (this._usage[vm.conversationId]?.pct !== before) {
+      this._paintBadges();
+      clearTimeout(this._usageTimer);
+      this._usageTimer = setTimeout(() => {
+        try { this._storage()?.set({ [this._usageKey]: this._usage }).catch(() => {}); } catch (_) {}
+      }, 1000);
+    }
+
+    // 5-minute periodic usage history sampling
+    if (this.settings?.features?.usageHistory) {
+      const now = Date.now();
+      if (now - this._lastHistorySample >= 5 * 60 * 1000) {
+        this._lastHistorySample = now;
+        this._history = addSample(this._history, vm.percentage, now);
+        try { this._storage()?.set({ [this._historyKey]: this._history }).catch(() => {}); } catch (_) {}
+      }
+    }
   }
 
   _paintBadges() {
@@ -5939,28 +7918,24 @@ class Widgets {
       const text = `${u.pct}%`;
       if (badge.textContent !== text) badge.textContent = text;
       badge.title = `Context ${text} full (Context Monitor)`;
-      const color = u.pct > 85 ? '#F87171' : u.pct >= 60 ? '#FBBF24' : '';
+      const color = u.pct > 80 ? '#F87171' : u.pct >= 50 ? '#FBBF24' : '#10A37F';
       if (badge.style.color !== color) badge.style.color = color;
     }
   }
-
-  // ------------------------------------------------------------------ storage
 
   _storage() {
     try { return typeof chrome !== 'undefined' ? chrome.storage?.local || null : null; } catch (_) { return null; }
   }
 
-  /** Settings, positions and sidebar usage; migrates the old single widget's per-site prefs once. */
   async _load() {
     const area = this._storage();
     if (!area) return;
     try {
-      const r = (await area.get([SETTINGS_KEY, this._storeKey, this._usageKey])) || {};
+      const r = (await area.get([SETTINGS_KEY, this._storeKey, this._usageKey, this._historyKey, 'ui:drawer_open'])) || {};
       const old = r[this._storeKey] && typeof r[this._storeKey] === 'object' ? r[this._storeKey] : {};
       const { pos, migrated } = widgetPositions(old);
       this.pos = pos;
       if (migrated) area.set({ [this._storeKey]: { pos } }).catch(() => {});
-      // R5: the old widget kept theme / exact numbers / sidebar badges per site; Settings owns them now
       if (!r[SETTINGS_KEY] && ['theme', 'compact', 'badges'].some(k => k in old)) {
         const next = await writeSettings(area, { display: { theme: old.theme, compact: old.compact, badges: old.badges } });
         if (!this._settingsFresh) this.settings = next;
@@ -5969,6 +7944,16 @@ class Widgets {
       }
       const usage = r[this._usageKey];
       if (usage && typeof usage === 'object') this._usage = { ...usage, ...this._usage };
+
+      const hist = r[this._historyKey];
+      if (Array.isArray(hist)) this._history = downsampleHistory(hist);
+
+      // Detail drawer is collapsed by default on first load; remembers state in storage
+      if (typeof r['ui:drawer_open'] === 'boolean') {
+        this.drawerOpen = r['ui:drawer_open'];
+      } else {
+        this.drawerOpen = false;
+      }
     } catch (_) {}
   }
 
@@ -6002,7 +7987,7 @@ class ChatGPTDOMObserver {
     this.debounceMs = options.debounceMs || 120;
     this._streamCheckAt = 0;
     // The chat input of the site (typing there never changes the conversation's context)
-    this.composerSelector = options.composerSelector || '#prompt-textarea';
+    this.composerSelector = options.composerSelector || '#prompt-textarea, [data-testid="prompt-textarea"], div[contenteditable="true"][role="textbox"], form textarea';
     // Upper bound on how long a burst of mutations can postpone an update. Without it, a page that
     // never stops mutating (initial render, animations) kept pushing the trailing debounce back.
     this.maxWaitMs = options.maxWaitMs || 400;
@@ -6465,7 +8450,27 @@ class ContentScriptCoordinator {
     // UI adapter: the only ChatGPT-specific UI knowledge is the name and where the input is
     this.overlayUI = new Widgets({
       provider: 'ChatGPT',
-      findInput: () => document.querySelector('#prompt-textarea') || document.querySelector('form textarea'),
+      findInput: () => {
+        const selectors = [
+          '#prompt-textarea',
+          '[data-testid="prompt-textarea"]',
+          'div#prompt-textarea',
+          'div[contenteditable="true"][id*="prompt"]',
+          'div[contenteditable="true"][role="textbox"]',
+          'form [contenteditable="true"]',
+          'form textarea',
+          'textarea[placeholder*="message" i]',
+          'textarea[placeholder*="ChatGPT" i]',
+          'textarea[data-id]',
+          '[data-id="root"] textarea',
+          '[data-id="root"] [contenteditable="true"]'
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) return el;
+        }
+        return document.querySelector('form textarea') || document.querySelector('form');
+      },
       replySelector: "[data-message-author-role='assistant']",
       userSelector: "[data-message-author-role='user']",
       countTokens: (text) => this.tokenizer.countTokens(text)
@@ -8127,7 +10132,7 @@ class ProviderCoordinator {
     this._apiInFlight = null;
     this._wasStreaming = false;
     this._sessionStartTokens = new Map();
-    this._sendBadge = badgeSender();
+    this._sendBadge = () => {}; // Toolbar badges removed per design simplification
     this._activeOrgId = undefined;
     this._streamLimits = null;
     this._accountLimits = null;

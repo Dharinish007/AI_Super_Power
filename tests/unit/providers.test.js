@@ -211,8 +211,9 @@ export async function runProvidersTests() {
       assert('Limits: providers without a stream source get no placeholder', new ProviderCoordinator(GeminiProvider)._currentLimits([]).length === 0);
       // Streamed value keeps winning even when the timestamps land in the same millisecond and both show
       // a smaller percentage than the API copy — this was the five-hour reduction bug.
-      coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 9, resetsAt: Date.now() + 3600000 }], at: Date.now() };
-      coord._api = { at: Date.now() };
+      const sameMs = Date.now();
+      coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 9, resetsAt: sameMs + 3600000 }], at: sameMs };
+      coord._api = { at: sameMs };
       assert('Limits: streamed value wins on equal milliseconds', coord._currentLimits([{ key: 'session', label: 'S', percent: 30, resetsAt: null }])[0].percent === 9);
 
       // Watcher (MAIN world): forwards only message_limit from a completion stream, page response untouched

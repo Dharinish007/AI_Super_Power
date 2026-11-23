@@ -25,6 +25,14 @@ import { runGemmaTokenizerTests } from './unit/gemma-tokenizer.test.js';
 import { runSettingsTests } from './unit/settings.test.js';
 import { runPageActionsTests } from './unit/page-actions.test.js';
 import { runPanelChannelTests } from './unit/panel-channel.test.js';
+import { runFormattersTests } from './unit/formatters.test.js';
+import { runStripComponentTests } from './unit/strip-component.test.js';
+import { runStripAdaptersTests } from './unit/strip-adapters.test.js';
+import { runAlertsTests } from './unit/alerts.test.js';
+import { runBiggestItemAndCountdownTests } from './unit/biggest-item.test.js';
+import { runHistoryTests } from './unit/history.test.js';
+import { runPreSendTests } from './unit/pre-send.test.js';
+import { runCheckpointExportTests } from './unit/checkpoint-export.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -49,7 +57,15 @@ const SUITES = [
   runGemmaTokenizerTests, // Gemma 4 tokenizer (Gemini) == reference implementation
   runSettingsTests, // Settings defaults, normalize, read/write with repair
   runPageActionsTests, // The in-page Page: read the chat, fill the box, wait for a Capsule
-  runPanelChannelTests // Port protocol between the tab and the side panel
+  runPanelChannelTests, // Port protocol between the tab and the side panel
+  runFormattersTests, // Pure UI formatters for glance, drawer, and panel
+  runStripComponentTests, // In-page StripComponent UI tests
+  runStripAdaptersTests, // Platform adapters for Claude, Gemini, ChatGPT
+  runAlertsTests, // Threshold alerts with hysteresis
+  runBiggestItemAndCountdownTests, // Reset countdown + biggest item ranking
+  runHistoryTests, // Usage history sampling & sparkline
+  runPreSendTests, // Pre-send draft token estimate
+  runCheckpointExportTests // Checkpoint Markdown export
 ];
 
 console.log('========================================================');

@@ -1,22 +1,29 @@
 /**
- * Context Monitor - Widgets: two small pills on the chat page, each dragged on its own.
- *   Context  "5.7K · 2%" (badge colours) → click expands a card with the fields chosen in Settings
- *   Capsule  "💊 Capsule" → click runs captureCapsule with the chosen method; click again cancels
- * Everything else lives in the side panel (toolbar icon). Also here, because they belong to the page:
- * the 80% / 95% alerts (toasts on the Context pill) and the usage % next to chats in the sidebar.
- * Alt+T hides / shows both pills for this page view; Settings turns each one off for good.
- *
- * Each pill is its own shadow host (the page's CSS cannot reach it), moved only with transform and
- * anchored to its nearer side and top / bottom edge. Positions persist per site in chrome.storage.local
- * (`ui:<hostname>` = { pos: { context, capsule } }). Page-derived strings are only ever assigned as text.
+ * Context Monitor - In-page UI Widgets:
+ * 1. Glance strip (one line, always visible, mounted above the chat input):
+ *    "🟢 48% · ~28 msgs left · resets 7:20 PM"
+ *    Clicking it toggles the Detail drawer.
+ * 2. Detail drawer (collapsed by default, remembers state in extension storage):
+ *    - Header: "Context 96K / 200K · est." + Gear icon button
+ *    - Stacked bar with legend: You 4% | Claude & tools 55% | System & memory 41%
+ *    - "Biggest item: <name> · <tokens>" row (shown only when data exists)
+ *    - Usage section: exactly two rows (Session & Weekly)
+ *    - Developer view (growth, diagnostics, raw numbers; hidden by default)
+ * 3. Capsule pill ("💊 Capsule"):
+ *    Floating, draggable, unchanged prompt-capture tool.
  */
 
 import { CapsuleStore, captureCapsule } from './capsule.js';
 import { createPage } from './page-actions.js';
 import { SETTINGS_KEY, normalizeSettings, writeSettings } from './settings.js';
-import { alertLevel, chatIdFromHref, recordUsage, widgetFields } from './widget-state.js';
+import { chatIdFromHref, recordUsage } from './widget-state.js';
 import { STYLES } from '../ui/styles.js';
-import { h, setText, setAttr, show, fmtK, fmtInt, reducedMotion } from '../ui/dom.js';
+import { h, setText, show, reducedMotion, RowList } from '../ui/dom.js';
+import { StripComponent } from '../ui/strip-component.js';
+import { getAdapterForProvider } from './strip-adapters.js';
+import { AlertManager } from './alerts.js';
+import { PreSendEstimator } from './pre-send.js';
+import { addSample, downsampleHistory } from './history.js';
 
 const MARGIN = 8; // Viewport clamp
 const TOP_SAFE = 72; // Snap top: below the sites' top bars (Share, account buttons)
@@ -30,17 +37,13 @@ const WIDGET_CSS = `
   .root.w.top { flex-direction: column-reverse; }
   .pill.dragging { cursor: grabbing; }
   .pill.good .num { color: var(--good); } .pill.warn .num { color: var(--warn-text); } .pill.bad .num { color: var(--danger); }
-  .wcard { width: 220px; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); }
-  .wcard .fine:first-child { margin-top: 0; }
   .root.w .toast { position: static; transform: none; max-width: 240px; opacity: 1; }
 `;
 
 const validPos = (p) => Boolean(p) && ['left', 'right'].includes(p.side) && Number.isFinite(p.dx) && (Number.isFinite(p.y) || Number.isFinite(p.yFromBottom));
 
 /**
- * Pill positions from the stored per-site value. The old single widget saved `pos: { side, dx, y }`:
- * that becomes the Context pill's position, the Capsule pill starts at its default, and `migrated`
- * says the new shape should be written back.
+ * Pill positions from the stored per-site value (preserved for backward compatibility & tests).
  * @returns {{ pos: { context: Object, capsule: Object }, migrated: boolean }}
  */
 export function widgetPositions(stored) {
@@ -51,10 +54,7 @@ export function widgetPositions(stored) {
 }
 
 /**
- * Free drag for one pill: pointer events, translate3d, clamped to the viewport, snapped to the
- * nearest side on release (hold Alt to skip). `onMoved(pos)` saves the new position.
- * `place()` re-positions at most once per frame (it reads layout).
- * @returns {{ place(): void, wasDragged(): boolean }}
+ * Free drag for the Capsule pill: pointer events, translate3d, clamped to the viewport.
  */
 function makeDraggable(host, handle, getPos, onMoved) {
   let drag = null;
@@ -76,7 +76,6 @@ function makeDraggable(host, handle, getPos, onMoved) {
   };
   const placeNow = () => { placeRaf = null; if (!drag?.moved) { const { x, y } = xy(); apply(x, y); } };
   const place = () => { if (typeof requestAnimationFrame !== 'function') placeNow(); else placeRaf ??= requestAnimationFrame(placeNow); };
-  // Anchored to the nearer side and the nearer top / bottom edge, so resizes and the card never push it off screen
   const settle = (x, y, snap, animate) => {
     const { w, h: ht } = size();
     const vw = innerWidth;
@@ -88,7 +87,6 @@ function makeDraggable(host, handle, getPos, onMoved) {
       if (Math.abs(y - TOP_SAFE) < SNAP_Y) y = TOP_SAFE;
       else if (Math.abs(vh - ht - MARGIN - y) < SNAP_Y) y = vh - ht - MARGIN;
     }
-    // Store what is shown: the clamped position, so reloading never jumps
     dx = Math.max(MARGIN, Math.min(dx, vw - w - MARGIN));
     y = Math.max(MARGIN, Math.min(y, vh - ht - MARGIN));
     onMoved(y + ht / 2 > vh / 2 ? { side, dx, yFromBottom: vh - ht - y } : { side, dx, y });
@@ -111,7 +109,7 @@ function makeDraggable(host, handle, getPos, onMoved) {
     const dx = e.clientX - d.sx;
     const dy = e.clientY - d.sy;
     if (!d.moved) {
-      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // Still a click
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
       d.moved = true;
       handle.classList.add('dragging');
       document.documentElement.style.userSelect = 'none';
@@ -127,28 +125,19 @@ function makeDraggable(host, handle, getPos, onMoved) {
     try { handle.releasePointerCapture(d.id); } catch (_) {}
     drag = null;
     if (!d.moved) return;
-    justDragged = true; // Swallow the click that follows a drag
+    justDragged = true;
     handle.classList.remove('dragging');
     document.documentElement.style.userSelect = '';
     settle(d.x, d.y, !e.altKey && e.type !== 'pointercancel', true);
   };
   handle.addEventListener('pointerup', end);
   handle.addEventListener('pointercancel', end);
-  handle.addEventListener('keydown', (e) => {
-    const step = e.shiftKey ? 40 : 10;
-    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-    if (!d) return;
-    e.preventDefault();
-    const { x, y } = xy();
-    settle(x + d[0], y + d[1], false, false);
-  });
   return { place, wasDragged: () => { const was = justDragged; justDragged = false; return was; } };
 }
 
 export class Widgets {
   /**
    * @param {{ provider?: string, findInput?: () => Element|null, replySelector?: string, userSelector?: string, countTokens?: Function }} [adapter]
-   *   Same shape the coordinators pass; `findInput` / `replySelector` are what the Capsule pill fills and reads.
    */
   constructor(adapter = {}) {
     this.adapter = {
@@ -158,59 +147,80 @@ export class Widgets {
       userSelector: adapter.userSelector || null,
       countTokens: adapter.countTokens || null
     };
-    // What the Capsule pill and the side panel (over the panel channel) use to read and fill the page
     this.page = createPage({ ...this.adapter, getLimits: () => this.vm?.limits || [] });
     this.settings = normalizeSettings();
     this.pos = widgetPositions(null).pos;
     this.vm = null;
-    this.ctx = null;
+    this.glance = null;
     this.cap = null;
-    this.loaded = false; // Hidden until Settings are read: a pill turned off never flashes
-    this.hidden = false; // Alt+T, this page view only
-    this.expanded = false;
-    this.run = null; // Active Capsule wait ({ cancel })
+    this.loaded = false;
+    this.hidden = false;
+    this.drawerOpen = false; // Collapsed on first load
+    this.devOpen = false;
+    this.run = null;
     this._alerted = new Map();
+    this.alertManager = new AlertManager({
+      toastFn: (msg) => this.stripComponent?.showToast(msg, 4000)
+    });
+    this.preSendEstimator = new PreSendEstimator({
+      onEstimate: (tokens) => this.stripComponent?.setDraftEstimate(tokens)
+    });
+    this._history = [];
+    this._lastHistorySample = 0;
     this._usage = {};
     const host = typeof location !== 'undefined' ? location.hostname : '';
     this._storeKey = host ? `ui:${host}` : 'ui';
     this._usageKey = host ? `usage:${host}` : 'usage';
+    this._historyKey = host ? `usage_history:${host}` : 'usage_history';
   }
 
   mount() {
-    if (this.ctx || typeof document === 'undefined') return;
-    this.ctx = this._host('chatgpt-context-monitor-host', 'context');
-    this.cap = this._host('chatgpt-context-monitor-capsule', 'capsule');
-    this._buildContext();
-    this._buildCapsule();
+    if (this.glance || typeof document === 'undefined') return;
+    // Remove any leftover floating context host or capsule host
+    document.getElementById('chatgpt-context-monitor-host')?.remove();
+    document.getElementById('chatgpt-context-monitor-capsule')?.remove();
+    this.cap = null; // Capsules parked per user instructions: no floating pill
+
+    this._buildGlance();
+    this._ensureGlanceMounted();
 
     window.addEventListener('resize', () => this._render());
     window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => this._render());
     window.addEventListener('keydown', (e) => {
-      if (!this.ctx || !e.altKey || e.ctrlKey || e.metaKey || e.code !== 'KeyT') return;
+      if (!this.glance || !e.altKey || e.ctrlKey || e.metaKey || e.code !== 'KeyT') return;
       e.preventDefault();
       this.hidden = !this.hidden;
       this._render();
     }, true);
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'local' || !changes[SETTINGS_KEY] || !this.ctx) return;
+        if (area !== 'local' || !changes[SETTINGS_KEY] || !this.glance) return;
         this.settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
-        this._settingsFresh = true; // Newer than what _load may still be reading
-        if (!this.settings.widgets.capsule.enabled) this._cancelRun();
+        this._settingsFresh = true;
         this._paintBadges();
         this._render();
       });
     } catch (_) {}
-    // The site re-renders its sidebar constantly: repaint at most every 400 ms, only when something changed
     this._badgeObserver = new MutationObserver(() => {
+      this._ensureGlanceMounted();
       if (this._badgeTimer) return;
       this._badgeTimer = setTimeout(() => { this._badgeTimer = null; this._paintBadges(); }, 400);
     });
     this._badgeObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+
+    try {
+      this._themeObserver = new MutationObserver(() => this._render());
+      if (document.documentElement) {
+        this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] });
+      }
+      if (document.body) {
+        this._themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] });
+      }
+    } catch (_) {}
+
     this._load().finally(() => { this.loaded = true; this._paintBadges(); this._render(); });
   }
 
-  /** One fixed shadow host per pill, so each one positions on its own. */
   _host(id, key) {
     document.getElementById(id)?.remove();
     const host = document.createElement('div');
@@ -226,30 +236,8 @@ export class Widgets {
     return { host, root, pill, drag, key };
   }
 
-  _buildContext() {
-    const { root, pill } = this.ctx;
-    pill.title = 'Context usage: click for details, drag to move (Alt+T hides)';
-    pill.setAttribute('aria-expanded', 'false');
-    this.ctx.num = h('span', 'num', pill, '—');
-    const card = this.ctx.card = h('div', 'wcard hide', root);
-    card.setAttribute('role', 'region');
-    card.setAttribute('aria-label', `${this.adapter.provider} context usage`);
-    this.ctx.empty = h('p', 'fine', card);
-    this.ctx.rows = h('div', null, card);
-    this.ctx.rowEls = new Map();
-    h('p', 'fine', card, 'More in the side panel');
-    const toast = this.ctx.toast = h('div', 'toast hide', root);
-    toast.setAttribute('role', 'status');
-    toast.setAttribute('aria-live', 'polite');
-    // The card comes before the pill: above it when bottom-anchored, below it (column-reverse) when top-anchored
-    root.append(toast, card, pill);
-    pill.addEventListener('click', () => { if (!this.ctx.drag.wasDragged()) this._setExpanded(!this.expanded); });
-    root.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.expanded) { e.stopPropagation(); this._setExpanded(false); pill.focus(); }
-    });
-  }
-
   _buildCapsule() {
+    if (!this.cap) return;
     const { pill } = this.cap;
     pill.title = 'Save this chat as a Capsule (method in Settings); click again to cancel. Drag to move.';
     this.cap.label = h('span', null, pill, CAPSULE_LABEL);
@@ -257,75 +245,209 @@ export class Widgets {
     pill.addEventListener('click', () => { if (!this.cap.drag.wasDragged()) this._capsuleClick(); });
   }
 
-  /** @param {Object} viewState Output of toWidgetState() */
+  _buildGlance() {
+    document.getElementById('chatgpt-context-monitor-glance')?.remove();
+    const host = document.createElement('div');
+    host.id = 'chatgpt-context-monitor-glance';
+    host.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;width:100%;z-index:20;margin:0 0 8px;contain:layout style;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    h('style', null, shadow, STYLES + WIDGET_CSS);
+
+    this.stripComponent = new StripComponent(shadow, {
+      onToggleDrawer: (open) => {
+        this.drawerOpen = open;
+        try {
+          this._storage()?.set({ 'ui:drawer_open': this.drawerOpen }).catch(() => {});
+        } catch (_) {}
+      },
+      onToggleDev: (open) => {
+        this.devOpen = open;
+        if (open && this.vm) this._renderDevView();
+      }
+    });
+
+    this.glance = {
+      host,
+      shadow,
+      root: this.stripComponent.root,
+      strip: this.stripComponent.strip,
+      drawer: this.stripComponent.drawer,
+      toast: this.stripComponent.toast
+    };
+  }
+
+  _toggleDrawer(force) {
+    if (!this.stripComponent) return;
+    this.stripComponent._toggleDrawer(force);
+  }
+
+  _ensureGlanceMounted() {
+    if (!this.glance || typeof document === 'undefined') return;
+    const input = this.adapter.findInput(document);
+    let anchor = null;
+    if (input) {
+      if (input.tagName === 'FORM') {
+        anchor = input;
+      } else {
+        anchor = input.closest('fieldset') ||
+                 input.closest('form') ||
+                 input.closest('[data-testid="chat-input"]') ||
+                 input.closest('[data-testid="composer"]') ||
+                 input.parentElement;
+      }
+    }
+    if (!anchor) {
+      anchor = document.querySelector('form, [data-testid="composer"], [data-testid="chat-input"], [data-testid="prompt-textarea"]');
+    }
+    if (!anchor || !anchor.parentElement) return;
+
+    if (this.glance.host.parentElement !== anchor.parentElement || this.glance.host.nextSibling !== anchor) {
+      anchor.parentElement.insertBefore(this.glance.host, anchor);
+    }
+    if (this.settings?.features?.preSendEstimate && input) {
+      this.preSendEstimator.attach(input);
+    } else {
+      this.preSendEstimator.detach();
+    }
+  }
+
+  _isDarkMode() {
+    const s = this.settings;
+    if (s.display?.theme === 'dark') return true;
+    if (s.display?.theme === 'light') return false;
+
+    // Auto mode: inspect DOM first (ChatGPT, Claude, Gemini in-app themes)
+    try {
+      if (typeof document !== 'undefined') {
+        const docEl = document.documentElement;
+        const body = document.body;
+
+        // 1. ChatGPT & Claude: <html class="dark"> or <body class="dark">
+        if (docEl?.classList?.contains('dark') || body?.classList?.contains('dark')) return true;
+        if (docEl?.classList?.contains('light') || body?.classList?.contains('light')) return false;
+
+        // 2. Gemini: <html data-theme="dark"> or class="dark-theme"
+        const docTheme = docEl?.getAttribute?.('data-theme') || body?.getAttribute?.('data-theme') ||
+                         docEl?.getAttribute?.('data-mode') || body?.getAttribute?.('data-mode') ||
+                         docEl?.getAttribute?.('color-scheme') || body?.getAttribute?.('color-scheme');
+        if (docTheme === 'dark') return true;
+        if (docTheme === 'light') return false;
+        if (docEl?.classList?.contains('dark-theme') || body?.classList?.contains('dark-theme')) return true;
+
+        // 3. Computed background color luminance of body, html, or main
+        if (typeof window !== 'undefined' && window.getComputedStyle) {
+          const els = [body, docEl, document.querySelector('main'), document.getElementById('root')].filter(Boolean);
+          for (const el of els) {
+            const bg = window.getComputedStyle(el)?.backgroundColor;
+            const rgb = String(bg || '').match(/\d+/g);
+            if (rgb && rgb.length >= 3) {
+              const r = Number(rgb[0]), g = Number(rgb[1]), b = Number(rgb[2]);
+              const a = rgb.length >= 4 ? Number(rgb[3]) : 1;
+              if (a > 0.1) {
+                const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+                if (lum < 0.48) return true;
+                if (lum > 0.52) return false;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    return Boolean(typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+  }
+
   update(viewState) {
     this.vm = viewState;
-    if (!this.ctx) this.mount();
-    if (!this.ctx) return;
+    if (!this.glance) this.mount();
+    if (!this.glance) return;
     this._trackUsage(viewState);
-    // SPA re-renders can drop our nodes; re-attach instead of rebuilding
-    for (const p of [this.ctx, this.cap]) if (!p.host.isConnected) (document.body || document.documentElement).appendChild(p.host);
+    this._ensureGlanceMounted();
+    if (this.cap && !this.cap.host.isConnected) (document.body || document.documentElement).appendChild(this.cap.host);
     this._render();
   }
 
   _render() {
-    if (!this.ctx) return;
+    if (!this.glance) return;
     const s = this.settings;
-    const dark = s.display.theme === 'dark' || (s.display.theme === 'auto' && Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches));
-    for (const [p, on] of [[this.ctx, s.widgets.context.enabled], [this.cap, s.widgets.capsule.enabled]]) {
-      const display = on && this.loaded && !this.hidden ? '' : 'none';
-      if (p.host.style.display !== display) p.host.style.display = display;
-      p.root.classList.toggle('light', !dark);
-      p.root.classList.toggle('left', this.pos[p.key].side === 'left');
-      p.root.classList.toggle('top', !Number.isFinite(this.pos[p.key].yFromBottom));
+    const dark = this._isDarkMode();
+
+    this.glance.root.classList.toggle('light', !dark);
+    this.glance.root.classList.toggle('dark', dark);
+    if (this.glance.host) {
+      this.glance.host.classList.toggle('light', !dark);
+      this.glance.host.classList.toggle('dark', dark);
+    }
+    if (this.cap) {
+      this.cap.root.classList.toggle('light', !dark);
+      this.cap.root.classList.toggle('left', this.pos.capsule?.side === 'left');
+      this.cap.root.classList.toggle('top', !Number.isFinite(this.pos.capsule?.yFromBottom));
+      const capDisplay = s.widgets.capsule.enabled && this.loaded && !this.hidden ? '' : 'none';
+      if (this.cap.host.style.display !== capDisplay) this.cap.host.style.display = capDisplay;
     }
 
-    const { pill, num, card } = this.ctx;
+    const glanceDisplay = s.widgets.context.enabled && this.loaded && !this.hidden ? '' : 'none';
+    if (this.glance.host.style.display !== glanceDisplay) this.glance.host.style.display = glanceDisplay;
+
+    const ready = Boolean(this.vm) && this.vm.ready !== false;
+    this._renderGlance(ready);
+    this.cap?.drag.place();
+
+    if (ready && s.context.alerts && this.glance.host.style.display !== 'none') {
+      this._maybeAlert(this.vm);
+    }
+  }
+
+  _renderGlance(_ready) {
+    if (!this.glance || !this.stripComponent) return;
+
+    const adapter = getAdapterForProvider(this.adapter.provider);
+    const vm = this.vm || {
+      provider: this.adapter.provider,
+      usedTokens: 0,
+      limits: [],
+      ready: true
+    };
+    const data = adapter(vm, this.settings);
+    data.history = this._history;
+    data.features = this.settings.features;
+    data.percentage = vm.percentage;
+    this.stripComponent.render(data);
+
+    if (this.devOpen) this._renderDevView();
+  }
+
+  _renderDevView() {
+    if (!this.stripComponent?.dDevContent || !this.vm) return;
     const vm = this.vm;
-    const ready = Boolean(vm) && vm.ready !== false;
-    const pct = ready ? vm.percentage ?? null : null;
-    setText(num, ready ? `${fmtK(vm.usedTokens)}${pct !== null ? ` · ${pct}%` : ''}` : '—');
-    const level = pct === null ? '' : pct >= 85 ? 'bad' : pct >= 65 ? 'warn' : 'good';
-    for (const t of ['good', 'warn', 'bad']) pill.classList.toggle(t, t === level);
-    setAttr(pill, 'aria-label', ready
-      ? `Context usage ${fmtInt(vm.usedTokens)} tokens${pct !== null ? `, ${pct}% of window` : ''}. ${this.expanded ? 'Hide' : 'Show'} details.`
-      : 'Context usage: reading conversation.');
-    setAttr(pill, 'aria-expanded', String(this.expanded));
-    show(card, this.expanded);
-    if (this.expanded) this._renderCard(ready);
-    this.ctx.drag.place();
-    this.cap.drag.place();
-    // Only while the Context pill is shown (a hidden toast would use up the chat's alert); fires once it shows
-    if (ready && s.context.alerts && this.ctx.host.style.display !== 'none') this._maybeAlert(vm);
-  }
+    const el = this.stripComponent.dDevContent;
+    el.textContent = '';
+    const dRawRows = RowList(el);
+    const dDiagRows = RowList(el);
+    const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
+    const numExact = (n) => (n !== null && n !== undefined ? n.toLocaleString() : 'Unknown');
 
-  /** Rows are rebuilt only when the chosen / available fields change; otherwise only values are written. */
-  _renderCard(ready) {
-    const { rows, rowEls, empty } = this.ctx;
-    const fields = ready ? widgetFields(this.vm, this.settings.widgets.context.fields) : [];
-    const keys = fields.map(f => f.key).join();
-    if (keys !== [...rowEls.keys()].join()) {
-      rowEls.clear();
-      rows.replaceChildren();
-      for (const f of fields) {
-        const row = h('div', 'row', rows);
-        h('span', 'k', row, f.label);
-        rowEls.set(f.key, h('span', 'v', row));
-      }
-    }
-    for (const f of fields) setText(rowEls.get(f.key), f.value);
-    setText(empty, !ready ? 'Reading the conversation…' : fields.length ? '' : 'No fields chosen: pick them in the side panel\'s Settings.');
-    show(empty, !ready || !fields.length);
-  }
+    dRawRows.update([
+      { label: 'Used tokens', value: numExact(vm.usedTokens) },
+      { label: 'Remaining tokens', value: numExact(vm.remainingTokens) },
+      { label: 'Window', value: numExact(vm.contextLimit) },
+      { label: 'You', value: numExact(st.user) },
+      { label: 'Assistant + tools', value: numExact(st.assistant) },
+      { label: 'System & hidden', value: numExact(st.hidden) }
+    ]);
 
-  _setExpanded(open) {
-    this.expanded = open;
-    this._render();
+    const modelStr = [vm.model, vm.modelFamily].filter(Boolean).join(' · ');
+    dDiagRows.update([
+      { label: 'Provider', value: vm.provider || '—' },
+      { label: 'Model', value: modelStr || '—' },
+      { label: 'Plan', value: vm.plan || 'Unknown' },
+      { label: 'Source', value: vm.source || '—' },
+      { label: 'Turns', value: String(vm.turns || 0) }
+    ]);
   }
 
   // ------------------------------------------------------------------ Capsule pill
 
-  /** R11: errors become a status; the run handle is dropped on saved / error / cancelled. */
   async _capsuleClick() {
     if (typeof chrome === 'undefined' || !chrome.runtime?.id) return this._capsuleStatus({ state: 'error', text: 'Extension updated: reload the page' });
     if (this.run) return this._cancelRun();
@@ -348,7 +470,6 @@ export class Widgets {
     }
   }
 
-  /** Drops the handle first (R11), so cancel() runs once. */
   _cancelRun() {
     const run = this.run;
     this.run = null;
@@ -364,50 +485,62 @@ export class Widgets {
     else this._capsuleText(CAPSULE_LABEL);
   }
 
-  /** Pill text; with `ms`, back to the plain label after that long. */
   _capsuleText(text, ms) {
     clearTimeout(this._capTimer);
     if (!this.cap) return;
     setText(this.cap.label, text);
     if (ms) this._capTimer = setTimeout(() => this._capsuleText(CAPSULE_LABEL), ms);
-    this.cap.drag.place(); // The pill's width changed
+    this.cap.drag.place();
   }
 
   // ------------------------------------------------------------------ alerts & sidebar badges
 
   _toast(text, ms = 1500) {
-    const t = this.ctx.toast;
+    if (!this.glance?.toast) return;
+    const t = this.glance.toast;
     t.textContent = text;
     show(t, true);
-    this.ctx.drag.place();
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => { show(t, false); this.ctx?.drag.place(); }, ms);
+    this._toastTimer = setTimeout(() => { show(t, false); }, ms);
   }
 
-  /** One toast per chat when usage first reaches 80% and again at 95%; never repeats for the same step. */
   _maybeAlert(vm) {
     if (!vm.ready || vm.percentage === null) return;
-    const lvl = alertLevel(vm.percentage);
-    const key = vm.conversationId || '';
-    if (lvl <= (this._alerted.get(key) || 0)) return;
-    this._alerted.set(key, lvl);
-    this._toast(lvl === 95
-      ? `Context ${vm.percentage}% full: start a new chat soon`
-      : `Context ${vm.percentage}% full: consider wrapping up`, 4000);
-    if (!reducedMotion()) this.ctx.pill.animate?.([{ transform: 'scale(1)' }, { transform: 'scale(1.12)' }, { transform: 'scale(1)' }], { duration: 700, iterations: 2 });
+    const sessionLimit = (vm.limits || []).find(l => l.key === 'session' || l.label?.toLowerCase().includes('5h') || l.label?.toLowerCase().includes('session'));
+    const res = this.alertManager.evaluate({
+      chatId: vm.conversationId || 'global',
+      contextPct: vm.percentage,
+      contextSource: vm.percentageSource || (vm.authoritative ? 'measured' : 'estimated'),
+      sessionPct: sessionLimit?.percent,
+      sessionSource: sessionLimit?.estimated ? 'estimated' : 'measured',
+      enabled: this.settings?.features?.alerts !== false && this.settings?.context?.alerts !== false
+    });
+    if (res.fired && !reducedMotion()) {
+      this.stripComponent?.strip?.animate?.([{ transform: 'scale(1)' }, { transform: 'scale(1.08)' }, { transform: 'scale(1)' }], { duration: 600, iterations: 2 });
+    }
   }
 
-  /** Remembers this chat's usage and shows it next to the chat in the sidebar. */
   _trackUsage(vm) {
     if (!vm.ready || !vm.conversationId || vm.percentage === null) return;
     const before = this._usage[vm.conversationId]?.pct;
     this._usage = recordUsage(this._usage, vm.conversationId, vm.percentage);
-    if (this._usage[vm.conversationId]?.pct === before) return;
-    this._paintBadges();
-    clearTimeout(this._usageTimer);
-    this._usageTimer = setTimeout(() => {
-      try { this._storage()?.set({ [this._usageKey]: this._usage }).catch(() => {}); } catch (_) {}
-    }, 1000);
+    if (this._usage[vm.conversationId]?.pct !== before) {
+      this._paintBadges();
+      clearTimeout(this._usageTimer);
+      this._usageTimer = setTimeout(() => {
+        try { this._storage()?.set({ [this._usageKey]: this._usage }).catch(() => {}); } catch (_) {}
+      }, 1000);
+    }
+
+    // 5-minute periodic usage history sampling
+    if (this.settings?.features?.usageHistory) {
+      const now = Date.now();
+      if (now - this._lastHistorySample >= 5 * 60 * 1000) {
+        this._lastHistorySample = now;
+        this._history = addSample(this._history, vm.percentage, now);
+        try { this._storage()?.set({ [this._historyKey]: this._history }).catch(() => {}); } catch (_) {}
+      }
+    }
   }
 
   _paintBadges() {
@@ -427,28 +560,24 @@ export class Widgets {
       const text = `${u.pct}%`;
       if (badge.textContent !== text) badge.textContent = text;
       badge.title = `Context ${text} full (Context Monitor)`;
-      const color = u.pct > 85 ? '#F87171' : u.pct >= 60 ? '#FBBF24' : '';
+      const color = u.pct > 80 ? '#F87171' : u.pct >= 50 ? '#FBBF24' : '#10A37F';
       if (badge.style.color !== color) badge.style.color = color;
     }
   }
-
-  // ------------------------------------------------------------------ storage
 
   _storage() {
     try { return typeof chrome !== 'undefined' ? chrome.storage?.local || null : null; } catch (_) { return null; }
   }
 
-  /** Settings, positions and sidebar usage; migrates the old single widget's per-site prefs once. */
   async _load() {
     const area = this._storage();
     if (!area) return;
     try {
-      const r = (await area.get([SETTINGS_KEY, this._storeKey, this._usageKey])) || {};
+      const r = (await area.get([SETTINGS_KEY, this._storeKey, this._usageKey, this._historyKey, 'ui:drawer_open'])) || {};
       const old = r[this._storeKey] && typeof r[this._storeKey] === 'object' ? r[this._storeKey] : {};
       const { pos, migrated } = widgetPositions(old);
       this.pos = pos;
       if (migrated) area.set({ [this._storeKey]: { pos } }).catch(() => {});
-      // R5: the old widget kept theme / exact numbers / sidebar badges per site; Settings owns them now
       if (!r[SETTINGS_KEY] && ['theme', 'compact', 'badges'].some(k => k in old)) {
         const next = await writeSettings(area, { display: { theme: old.theme, compact: old.compact, badges: old.badges } });
         if (!this._settingsFresh) this.settings = next;
@@ -457,6 +586,16 @@ export class Widgets {
       }
       const usage = r[this._usageKey];
       if (usage && typeof usage === 'object') this._usage = { ...usage, ...this._usage };
+
+      const hist = r[this._historyKey];
+      if (Array.isArray(hist)) this._history = downsampleHistory(hist);
+
+      // Detail drawer is collapsed by default on first load; remembers state in storage
+      if (typeof r['ui:drawer_open'] === 'boolean') {
+        this.drawerOpen = r['ui:drawer_open'];
+      } else {
+        this.drawerOpen = false;
+      }
     } catch (_) {}
   }
 
