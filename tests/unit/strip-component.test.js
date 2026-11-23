@@ -212,7 +212,16 @@ export async function runStripComponentTests() {
     const pctRow = comp.stripLeft.querySelector('.u-pct');
     assert('Usage row at 85% includes ⚠ symbol', pctRow.textContent.includes('85% ⚠') && pctRow.classList.contains('danger'));
     assert('Estimated usage row gets hatched fill class', comp.stripLeft.querySelector('.u-bar-fill').classList.contains('hatched-danger'));
-    assert('Ring displays 90% ⚠ with danger state', comp.ctxVal.textContent.includes('90% ⚠') && comp.ctxVal.classList.contains('danger'));
+    assert('Ring displays 90% with warn/amber band', comp.ctxVal.textContent.includes('90%') && comp.ctxVal.classList.contains('warn'));
+
+    // Test >90% (> 90% is danger / red)
+    comp.render({
+      rows: [{ label: '5h', state: 'danger', percent: 95, resetsAt: Date.now() + 3600000, source: 'estimated' }],
+      context: { used: 190000, limit: 200000, source: 'estimated' },
+      msgsLeft: 1,
+      provider: 'Claude'
+    });
+    assert('Ring displays >90% (95%) with danger state', comp.ctxVal.classList.contains('danger'));
 
     // 3. Gemini: No message count, right note "resets in 2h 10m", row note "Heavy tasks use more"
     comp.render({
@@ -227,21 +236,21 @@ export async function runStripComponentTests() {
     });
 
     assert('Gemini: msgsLeft is null, right note shows resets in 2h 10m', comp.ctxMsgs.textContent.includes('resets in 2h 10m'));
-    assert('Gemini: usage row displays note', comp.stripLeft.textContent.includes('Heavy tasks use more'));
+    assert('Gemini: usage row does not display heavy note', !comp.stripLeft.textContent.includes('Heavy tasks use more'));
 
-    // 4. ChatGPT: Unlimited text row, State C (count only, no percent, no fill)
+    // 4. ChatGPT: Unlimited text row, colored context circle with percent
     comp.render({
       rows: [
         { label: 'Text', state: 'unlimited', source: 'measured', note: 'No limit · subject to safeguards' },
         { label: 'Uploads', state: 'ok', percent: 10, resetsAt: Date.now() + 3600000, source: 'measured' }
       ],
-      context: { used: 12000, source: 'estimated' }, // No limit -> State C
+      context: { used: 12000, source: 'estimated' }, // No limit -> falls back to 128K for percent & color
       msgsLeft: null,
       provider: 'ChatGPT'
     });
 
     assert('ChatGPT shows text row "No limit · subject to safeguards"', comp.stripLeft.textContent.includes('No limit · subject to safeguards'));
-    assert('ChatGPT State C ring displays count only (~12K, no percent)', comp.ctxVal.textContent.trim() === '~12K' && !comp.ctxVal.textContent.includes('%'));
+    assert('ChatGPT context circle displays colored percent', comp.ctxVal.textContent.includes('%') && comp.ctxVal.classList.contains('ok'));
     assert('ChatGPT State C drawer title shows "~12K used · est."', comp.dTitle.textContent.includes('~12K used · est.'));
 
     // 5. ChatGPT State B (User Reference set)

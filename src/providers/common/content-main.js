@@ -21,40 +21,255 @@ import { ConversationClient } from '../chatgpt/conversation-client.js';
 import { ChatGPTDOMObserver } from '../chatgpt/chatgpt-dom.js';
 import { RequestObserver } from '../../../network/request-observer.js';
 import { badgeSender, conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
+import { formatTokens } from '../../ui/shared/formatters.js';
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const round1 = (n) => Math.round(n * 10) / 10;
 // Approximate size of ChatGPT's server-side system prompt (not readable from the client)
 export const SYSTEM_PROMPT_ESTIMATE = 2500;
 
-const FEATURE_NAMES = {
+export const FEATURE_NAMES = {
   deep_research: 'Deep research', reason: 'Thinking', image_gen: 'Image generation',
   file_upload: 'File uploads', paste_text_to_file: 'Paste as file'
 };
-const featureLabel = (f) => FEATURE_NAMES[f] || f.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+export const featureLabel = (f) => FEATURE_NAMES[f] || (typeof f === 'string' ? f.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Feature');
 
 /**
  * ChatGPT plan allowances (from conversation/init) as widget limits: remaining count + reset time.
  * Entries past their reset time are dropped (the count is stale until ChatGPT reports again).
- * @param {{ limitsProgress?: Array, blocked?: string[], modelLimits?: Array }|null} raw
- * @returns {Array<{ key: string, label: string, remaining: number|null, blocked: boolean, resetsAt: number|null }>}
+ * Strictly NO 5h or session limits are ever included for ChatGPT.
+ * @param {{ limitsProgress?: Array, limits_progress?: Array, blocked?: string[], blocked_features?: string[], modelLimits?: Array, model_limits?: Array }|null} raw
+ * @param {number} [now]
+ * @returns {Array<{ id: string, key: string, label: string, remaining: number|null, used: number, total: number, blocked: boolean, resetsAt: number|null, source: string }>}
  */
 export function chatgptLimits(raw, now = Date.now()) {
   if (!raw) return [];
-  const blocked = new Set(raw.blocked || []);
-  const at = (iso) => (iso ? Date.parse(iso) || null : null);
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const blockedList = list(raw.blocked || raw.blocked_features).map(b => typeof b === 'string' ? b : (b?.feature_name || b?.name || b?.id)).filter(Boolean);
+  const blocked = new Set(blockedList);
+  const at = (isoOrTs) => {
+    if (!isoOrTs) return null;
+    if (typeof isoOrTs === 'number') return isoOrTs;
+    const parsed = Date.parse(isoOrTs);
+    return isNaN(parsed) ? null : parsed;
+  };
   const out = [];
-  for (const m of raw.modelLimits || []) {
-    if (m.model) out.push({ key: `model:${m.model}`, label: `Messages · ${m.model}`, remaining: m.remaining, blocked: m.remaining === 0, resetsAt: at(m.resetAfter) });
+
+  for (const m of list(raw.modelLimits || raw.model_limits)) {
+    const slug = m?.model || m?.model_slug || m?.slug;
+    if (slug) {
+      const remaining = typeof m.remaining === 'number' ? m.remaining : null;
+      const total = typeof (m.total ?? m.limit ?? m.num_total) === 'number'
+        ? (m.total ?? m.limit ?? m.num_total)
+        : (typeof m.used === 'number' && typeof remaining === 'number' ? m.used + remaining : (remaining !== null ? remaining : 0));
+      const used = typeof m.used === 'number'
+        ? m.used
+        : (typeof total === 'number' && typeof remaining === 'number' ? Math.max(0, total - remaining) : (remaining === 0 && total !== 0 ? total : 0));
+      out.push({
+        id: `model:${slug}`,
+        key: `model:${slug}`,
+        label: `Messages · ${slug}`,
+        remaining,
+        used,
+        total,
+        blocked: remaining === 0,
+        resetsAt: at(m.resetsAt || m.reset_time || m.resets_at || m.resetAfter || m.reset_after || m.resets_after),
+        source: 'interceptor'
+      });
+    }
   }
-  for (const l of raw.limitsProgress || []) {
-    if (l.feature) out.push({ key: l.feature, label: featureLabel(l.feature), remaining: l.remaining, blocked: blocked.has(l.feature) || l.remaining === 0, resetsAt: at(l.resetAfter) });
+
+  for (const l of list(raw.limitsProgress || raw.limits_progress)) {
+    const f = l?.feature || l?.feature_name || l?.name || l?.id;
+    if (f) {
+      const remaining = typeof l.remaining === 'number' ? l.remaining : null;
+      const isBlocked = blocked.has(f) || remaining === 0;
+      const total = typeof (l.total ?? l.limit ?? l.num_total) === 'number'
+        ? (l.total ?? l.limit ?? l.num_total)
+        : (typeof l.used === 'number' && typeof remaining === 'number' ? l.used + remaining : (remaining !== null ? remaining : 0));
+      const used = typeof l.used === 'number'
+        ? l.used
+        : (typeof total === 'number' && typeof remaining === 'number' ? Math.max(0, total - remaining) : (isBlocked && total !== 0 ? total : 0));
+      out.push({
+        id: f,
+        key: f,
+        label: featureLabel(f),
+        remaining,
+        used,
+        total,
+        blocked: isBlocked,
+        resetsAt: at(l.resetsAt || l.reset_time || l.resets_at || l.resetAfter || l.reset_after || l.resets_after),
+        source: 'interceptor'
+      });
+    }
   }
+
   for (const f of blocked) {
-    if (!out.some(l => l.key === f)) out.push({ key: f, label: featureLabel(f), remaining: 0, blocked: true, resetsAt: null });
+    if (!out.some(l => l.key === f || l.id === f)) {
+      out.push({
+        id: f,
+        key: f,
+        label: featureLabel(f),
+        remaining: 0,
+        used: 0,
+        total: 0,
+        blocked: true,
+        resetsAt: null,
+        source: 'interceptor'
+      });
+    }
   }
-  return out.filter(l => !l.resetsAt || l.resetsAt > now);
+
+  // Strictly filter out any 5h or session limits for ChatGPT
+  return out.filter(l => {
+    const id = String(l.id || l.key || '').toLowerCase();
+    const label = String(l.label || '').toLowerCase();
+    if (id === '5h' || id === 'session' || label.includes('5h') || label.includes('session')) return false;
+    return !l.resetsAt || l.resetsAt > now;
+  });
 }
+
+/**
+ * Builds standard shared contract representation for ChatGPT:
+ * {
+ *   provider: "chatgpt",
+ *   context: {
+ *     used: number,
+ *     limit: number,
+ *     segments: [
+ *       { id: "user", label: "You", tokens: number, percent: number },
+ *       { id: "assistant", label: "ChatGPT & tools", tokens: number, percent: number },
+ *       { id: "system", label: "System & memory", tokens: number, percent: number }
+ *     ],
+ *     source: "api" | "stream" | "dom" | "estimate",
+ *     confidence: "exact" | "estimate",
+ *     approx: true,
+ *     text: string
+ *   },
+ *   limits: [
+ *     {
+ *       id: string,
+ *       label: string,
+ *       used: number,
+ *       total: number,
+ *       resetsAt: number | null,
+ *       source: "api" | "stream" | "dom" | "interceptor"
+ *     }
+ *   ]
+ * }
+ */
+export function buildChatGptContractData(first = {}, second = null) {
+  const state = second || first || {};
+  const contextState = state.context || {};
+
+  let used = typeof contextState.used === 'number'
+    ? contextState.used
+    : (state.tokens?.totalMeasurable ?? state.tokens?.used ?? state.usedTokens ?? null);
+  if (used === null) {
+    if (Array.isArray(state.messages)) {
+      used = state.messages.reduce((sum, m) => sum + (m.tokens || 0), 0);
+    } else {
+      used = 0;
+    }
+  }
+
+  const limit = contextState.limit || state.contextLimit || state.model?.contextWindow || 128000;
+
+  let uTokens = 0;
+  let aTokens = 0;
+  let sTokens = 0;
+
+  if (used > 0) {
+    uTokens = contextState.segments?.find(s => s.id === 'user')?.tokens
+      ?? state.tokens?.user ?? state.stats?.user ?? state.breakdown?.user
+      ?? (Array.isArray(state.messages) ? state.messages.filter(m => m.role === 'user').reduce((s, m) => s + (m.tokens || 0), 0) : 0);
+    aTokens = contextState.segments?.find(s => s.id === 'assistant')?.tokens
+      ?? state.tokens?.assistant ?? state.stats?.assistant ?? state.breakdown?.assistant
+      ?? (Array.isArray(state.messages) ? state.messages.filter(m => m.role === 'assistant').reduce((s, m) => s + (m.tokens || 0), 0) : 0);
+    sTokens = contextState.segments?.find(s => s.id === 'system')?.tokens
+      ?? state.tokens?.hidden ?? state.stats?.hidden ?? state.breakdown?.system ?? 0;
+  }
+
+  // Fix B1 & Fix B2: Segment percentages computed against the total model limit (e.g. 128,000)
+  // At 0 usage: used = 0, tokens = 0, percent = 0
+  const uPct = (limit > 0 && uTokens > 0) ? Math.round((uTokens / limit) * 100) : 0;
+  const aPct = (limit > 0 && aTokens > 0) ? Math.round((aTokens / limit) * 100) : 0;
+  const sPct = (limit > 0 && sTokens > 0) ? Math.round((sTokens / limit) * 100) : 0;
+
+  // Determine limits
+  let rawLimits = [];
+  if (state.limitsProgress || state.modelLimits || state.limits_progress || state.model_limits) {
+    rawLimits = chatgptLimits(state);
+  } else if (state.requestObserver?.getObservedLimits) {
+    rawLimits = chatgptLimits(state.requestObserver.getObservedLimits());
+  } else if (state.observedLimits) {
+    rawLimits = chatgptLimits(state.observedLimits);
+  } else if (Array.isArray(state.limits)) {
+    rawLimits = state.limits;
+  }
+
+  // Normalize limits according to contract: strictly NO 5h row
+  const normalizedLimits = rawLimits
+    .filter(l => {
+      if (!l) return false;
+      const id = String(l.id || l.key || '').toLowerCase();
+      const label = String(l.label || '').toLowerCase();
+      return id !== '5h' && id !== 'session' && !label.includes('5h') && !label.includes('session');
+    })
+    .map(l => {
+      const id = l.id || l.key || l.feature || (l.model ? `model:${l.model}` : 'feature');
+      const label = l.label || featureLabel(id);
+      const remaining = typeof l.remaining === 'number' ? l.remaining : null;
+      const total = typeof l.total === 'number'
+        ? l.total
+        : (typeof l.used === 'number' && remaining !== null ? l.used + remaining : (remaining !== null ? remaining : 0));
+      const usedVal = typeof l.used === 'number'
+        ? l.used
+        : (typeof total === 'number' && remaining !== null ? Math.max(0, total - remaining) : (remaining === 0 ? total : 0));
+      const resetsAt = typeof l.resetsAt === 'number'
+        ? l.resetsAt
+        : (l.resetsAt ? (Date.parse(l.resetsAt) || null) : (l.resetAfter ? (Date.parse(l.resetAfter) || null) : null));
+      return {
+        id,
+        label,
+        used: usedVal,
+        total,
+        resetsAt,
+        source: 'interceptor'
+      };
+    });
+
+  const isAuthoritative = state.observables?.dataSource === 'authoritative' || state.context?.source === 'api';
+  const isStream = state.observables?.dataSource === 'stream' || state.context?.source === 'stream';
+  const isDom = state.observables?.dataSource?.startsWith('dom') || state.context?.source === 'dom' || state.source === 'dom';
+  const source = contextState.source || (isAuthoritative ? 'api' : (isStream ? 'stream' : (isDom ? 'dom' : 'estimate')));
+
+  // ChatGPT context token values are estimates (o200k_base BPE + 2,500 system prompt estimate)
+  const confidence = 'estimate';
+
+  const usedPrefix = formatTokens(used, { approx: true }) || '~0';
+  const contextText = limit ? `${usedPrefix} / ${formatTokens(limit)}` : usedPrefix;
+
+  return {
+    provider: 'chatgpt',
+    context: {
+      used,
+      limit,
+      segments: [
+        { id: 'user', label: 'You', tokens: uTokens, percent: uPct },
+        { id: 'assistant', label: 'ChatGPT & tools', tokens: aTokens, percent: aPct },
+        { id: 'system', label: 'System & memory', tokens: sTokens, percent: sPct }
+      ],
+      source,
+      confidence,
+      approx: true,
+      text: contextText
+    },
+    limits: normalizedLimits
+  };
+}
+
+export const buildChatGPTContractData = buildChatGptContractData;
 
 /**
  * Rolling timing samples (last `size` per metric) for the performance section of diagnostics.
@@ -830,6 +1045,18 @@ export class ContentScriptCoordinator {
   /** Toolbar badge (service worker); see badgeSender. */
   syncState(state) {
     this._sendBadge(state);
+  }
+
+  /**
+   * Returns standardized shared contract data for ChatGPT:
+   * {
+   *   provider: "chatgpt",
+   *   context: { used, limit, segments, source, confidence, approx, text },
+   *   limits: [{ id, label, used, total, resetsAt, source }]
+   * }
+   */
+  toContractData(state = null) {
+    return buildChatGptContractData(state || this.latestState || this._lastViewState || this);
   }
 
   /**

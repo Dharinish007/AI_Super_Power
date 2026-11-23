@@ -21,6 +21,8 @@ export class ResetCountdown {
     this.resetsAt = options.resetsAt || null;
     this.onTick = options.onTick || (() => {});
     this.nowFn = options.nowFn || (() => Date.now());
+    this.withSeconds = options.withSeconds || false;
+    this.withExact = options.withExact || false;
     this._interval = null;
     this._onFocus = () => this.tick();
     this._onVisibility = () => {
@@ -46,7 +48,8 @@ export class ResetCountdown {
       this._attached = true;
     }
 
-    this._interval = setInterval(() => this.tick(), 60000);
+    const intervalMs = this.withSeconds ? 1000 : 60000;
+    this._interval = setInterval(() => this.tick(), intervalMs);
   }
 
   tick() {
@@ -55,7 +58,11 @@ export class ResetCountdown {
       this.onTick(null);
       return null;
     }
-    const formatted = formatReset(this.resetsAt, this.nowFn(), { relative: true });
+    const formatted = formatReset(this.resetsAt, this.nowFn(), {
+      relative: true,
+      withSeconds: this.withSeconds,
+      withExact: this.withExact
+    });
     this.currentText = formatted;
     this.onTick(formatted);
     return formatted;

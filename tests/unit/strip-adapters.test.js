@@ -64,7 +64,7 @@ export async function runStripAdaptersTests() {
 
   const gRes = geminiAdapter(geminiState);
   assert('Gemini adapter returns 2 rows', gRes.rows.length === 2 && gRes.rows[0].label === '5h' && gRes.rows[1].label === 'Weekly');
-  assert('Gemini 5h row includes note "Heavy tasks use more"', gRes.rows[0].note === 'Heavy tasks use more');
+  assert('Gemini 5h row has no heavy usage note', !gRes.rows[0].note);
   assert('Gemini shows NO message count (msgsLeft is undefined)', gRes.msgsLeft === undefined);
   assert('Gemini rightNote has reset string (resets in ...)', typeof gRes.rightNote === 'string' && gRes.rightNote.startsWith('resets in'));
   assert('Gemini adapter never throws on malformed state', geminiAdapter(null).rows.length === 0);
@@ -72,7 +72,7 @@ export async function runStripAdaptersTests() {
   // Gemini empty limits (initial new chat / consumer account)
   const gEmptyRes = geminiAdapter({ provider: 'Gemini' });
   assert('Gemini with empty limits still produces 2 rows (5h and Weekly)', gEmptyRes.rows.length === 2 && gEmptyRes.rows[0].label === '5h' && gEmptyRes.rows[1].label === 'Weekly');
-  assert('Gemini empty 5h row has note "Heavy tasks use more"', gEmptyRes.rows[0].note === 'Heavy tasks use more');
+  assert('Gemini empty 5h row has no heavy usage note', !gEmptyRes.rows[0].note);
 
   // 4. ChatGPT Adapter Tests
   const chatgptState = {

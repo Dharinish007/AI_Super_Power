@@ -488,11 +488,21 @@
             const list = (v) => (Array.isArray(v) ? v : []);
             dispatchNetworkEvent('LIMITS_OBSERVED', {
               limitsProgress: list(data?.limits_progress).map(l => ({
-                feature: safeString(l?.feature_name, 64), remaining: typeof l?.remaining === 'number' ? l.remaining : null, resetAfter: safeString(l?.reset_after, 64)
+                feature: safeString(l?.feature_name || l?.feature || l?.name || l?.id, 64),
+                remaining: typeof l?.remaining === 'number' ? l.remaining : null,
+                total: typeof (l?.total ?? l?.limit ?? l?.num_total) === 'number' ? (l.total ?? l.limit ?? l.num_total) : null,
+                used: typeof (l?.used ?? l?.num_used) === 'number' ? (l.used ?? l.num_used) : null,
+                resetAfter: safeString(l?.reset_after || l?.resets_after || '', 64),
+                resetsAt: typeof l?.resets_at === 'number' ? l.resets_at : (l?.reset_time ? (typeof l.reset_time === 'number' ? l.reset_time : Date.parse(l.reset_time) || null) : null)
               })),
               blocked: list(data?.blocked_features).map(b => safeString(typeof b === 'string' ? b : (b?.feature_name || b?.name), 64)).filter(Boolean),
               modelLimits: list(data?.model_limits).map(m => ({
-                model: safeString(m?.model_slug || m?.slug || m?.model, 64), remaining: typeof m?.remaining === 'number' ? m.remaining : null, resetAfter: safeString(m?.reset_after || m?.resets_after, 64)
+                model: safeString(m?.model_slug || m?.slug || m?.model, 64),
+                remaining: typeof m?.remaining === 'number' ? m.remaining : null,
+                total: typeof (m?.total ?? m?.limit) === 'number' ? (m.total ?? m.limit) : null,
+                used: typeof m?.used === 'number' ? m.used : null,
+                resetAfter: safeString(m?.reset_after || m?.resets_after || '', 64),
+                resetsAt: typeof m?.resets_at === 'number' ? m.resets_at : (m?.reset_time ? (typeof m.reset_time === 'number' ? m.reset_time : Date.parse(m.reset_time) || null) : null)
               })),
               timestamp: Date.now()
             });

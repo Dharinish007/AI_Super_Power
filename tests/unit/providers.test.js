@@ -7,12 +7,12 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ClaudeProvider, GeminiProvider, claudeModelKey, providerForHost, parseBatchexecute, buildGeminiContractData } from '../../content/providers.js';
-import { ProviderCoordinator } from '../../content/provider-coordinator.js';
-import { ConfidenceEngine } from '../../engine/confidence-engine.js';
-import { Tokenizer } from '../../engine/tokenizer.js';
-import { toWidgetState, formatResetIn } from '../../content/widget-state.js';
-import { limitText } from '../../ui/dom.js';
+import { ClaudeProvider, GeminiProvider, claudeModelKey, providerForHost, parseBatchexecute, buildGeminiContractData } from '../../src/providers/common/providers.js';
+import { ProviderCoordinator } from '../../src/providers/common/provider-coordinator.js';
+import { ConfidenceEngine } from '../../src/engine/confidence-engine.js';
+import { Tokenizer } from '../../src/engine/tokenizer.js';
+import { toWidgetState, formatResetIn } from '../../src/ui/widget/widget-state.js';
+import { limitText } from '../../src/ui/shared/dom.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLAUDE_CONV = '11111111-2222-4333-8444-555555555555';

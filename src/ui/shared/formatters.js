@@ -160,7 +160,35 @@ export function formatReset(resetsAt, now = Date.now(), options = {}) {
   if (!ts || !Number.isFinite(ts) || ts <= now) return null;
 
   const diffMs = ts - now;
+  const diffSec = Math.floor(diffMs / 1000);
   const minTotal = Math.round(diffMs / 60000);
+
+  if (options.withSeconds) {
+    const s = diffSec % 60;
+    const m = Math.floor(diffSec / 60) % 60;
+    const h = Math.floor(diffSec / 3600) % 24;
+    const d = Math.floor(diffSec / 86400);
+
+    let countdownStr;
+    if (d > 0) {
+      countdownStr = `${d}d ${h}h ${m}m ${s}s`;
+    } else if (h > 0) {
+      countdownStr = `${h}h ${m}m ${s}s`;
+    } else if (m > 0) {
+      countdownStr = `${m}m ${s}s`;
+    } else {
+      countdownStr = `${s}s`;
+    }
+
+    if (options.withExact) {
+      const dObj = new Date(ts);
+      const isToday = dObj.toDateString() === new Date(now).toDateString();
+      const timeStr = dObj.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const exactStr = isToday ? timeStr : `${dObj.toLocaleDateString([], { weekday: 'short' })} ${timeStr}`;
+      return `${countdownStr} (${exactStr})`;
+    }
+    return countdownStr;
+  }
   if (options.relative || diffMs >= 24 * 3600 * 1000) {
     if (diffMs < 3600 * 1000) {
       return `resets in ${Math.max(1, minTotal)}m`;

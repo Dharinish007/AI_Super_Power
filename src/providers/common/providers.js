@@ -1162,7 +1162,7 @@ export function buildGeminiContractData(first = {}, second = null) {
     }
   }
 
-  const limit = contextState.limit || state.contextLimit || state.model?.contextWindow || 200000;
+  const limit = contextState.limit || (state.observables?.dataSource === 'dom_fallback' ? 200000 : (state.contextLimit || state.model?.contextWindow || 200000));
 
   const uTokens = contextState.segments?.find(s => s.id === 'user')?.tokens
     ?? state.tokens?.user ?? state.stats?.user ?? state.breakdown?.user

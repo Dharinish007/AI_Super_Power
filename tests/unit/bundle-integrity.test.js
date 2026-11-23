@@ -67,7 +67,7 @@ export function runBundleIntegrityTests() {
   // The committed bundle is what Chrome loads: it must match the sources (line endings aside, git may convert them)
   assert(
     bundleContent.replace(/\r\n/g, '\n') === bundledContentScript.replace(/\r\n/g, '\n'),
-    'content/content-script.js is up to date with its sources (run `npm run build` after editing engine/, content/ or network/)'
+    'content/content-script.js is up to date with its sources (run `npm run build` after editing src/ or network/)'
   );
 
   const panelPath = path.join(rootDir, 'sidepanel', 'sidepanel.js');

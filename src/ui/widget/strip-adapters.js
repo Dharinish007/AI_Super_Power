@@ -140,8 +140,7 @@ export function geminiAdapter(viewState = {}, _settings = {}) {
       state: sessionState,
       percent: sessionPct,
       resetsAt: session?.resetsAt ? (typeof session.resetsAt === 'number' ? new Date(session.resetsAt).toISOString() : String(session.resetsAt)) : undefined,
-      source: session?.estimated ? 'estimated' : 'measured',
-      note: 'Heavy tasks use more'
+      source: session?.estimated ? 'estimated' : 'measured'
     });
 
     const weekly = limits.find(l => l.id === 'weekly' || l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
@@ -223,13 +222,18 @@ export function chatgptAdapter(viewState = {}, settings = {}) {
       note: 'No limit · subject to safeguards'
     });
 
-    // Tool rows (e.g. Uploads, Images, Data analysis) appear only when a tracked limit exists
+    // Feature limit rows from limits_progress ONLY — no 5h row for ChatGPT.
+    // Skip model: keys, text rows, session / 5h rows.
     for (const l of limits) {
-      if (l.key === 'limit' || l.label?.toLowerCase().includes('text') || l.key?.startsWith('model:')) continue;
+      const key = String(l.key || l.id || '');
+      if (key === 'limit' || key.startsWith('model:') || l.label?.toLowerCase().includes('text')) continue;
+      if (key === '5h' || key === 'session' || key.includes('session')) continue;
+      if (l.label?.toLowerCase().includes('session')) continue;
+
       const pct = typeof l.percent === 'number' && Number.isFinite(l.percent) ? Math.round(l.percent) : undefined;
       const st = pct !== undefined ? threshold(pct).state : (l.blocked ? 'danger' : 'unknown');
       rows.push({
-        label: l.label || 'Tool',
+        label: l.label || key || 'Tool',
         state: st,
         percent: pct,
         resetsAt: l.resetsAt ? (typeof l.resetsAt === 'number' ? new Date(l.resetsAt).toISOString() : String(l.resetsAt)) : undefined,
@@ -238,25 +242,40 @@ export function chatgptAdapter(viewState = {}, settings = {}) {
       });
     }
 
-    // Context: count only, no ring fill, no percent, unless user reference is set in settings
-    let context;
+    // Context: estimate (BPE tokenizer). "~" prefix via approx:true.
+    // Use model contextWindow from widget state if available.
     const usedTokens = (typeof viewState.usedTokens === 'number' && Number.isFinite(viewState.usedTokens))
       ? viewState.usedTokens
       : 0;
 
+    const contextLimit = viewState.contextLimit && Number.isFinite(viewState.contextLimit) && viewState.contextLimit > 0
+      ? viewState.contextLimit
+      : null;
+
     const userRef = settings?.context?.userReference || null;
-    if (userRef && Number.isFinite(userRef) && userRef > 0) {
+
+    let context;
+    if (contextLimit) {
       context = {
         used: usedTokens,
-        limit: undefined, // no OpenAI published limit
+        limit: contextLimit,
+        approx: true,
+        source: 'estimated'
+      };
+    } else if (userRef && Number.isFinite(userRef) && userRef > 0) {
+      context = {
+        used: usedTokens,
+        limit: undefined,
         refLimit: userRef,
         refType: 'user',
+        approx: true,
         source: 'estimated'
       };
     } else {
       context = {
         used: usedTokens,
-        limit: undefined, // State C: count only, no ring fill, no percent
+        limit: undefined, // State C: count only, no ring fill
+        approx: true,
         source: 'estimated'
       };
     }

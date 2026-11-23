@@ -1,6 +1,6 @@
 /**
  * Context Monitor - In-page UI Widgets:
- * 1. Glance strip (one line, always visible, mounted above the chat input):
+ * 1. Glance strip (one line, always visible, mounted below the chat input):
  *    "🟢 48% · ~28 msgs left · resets 7:20 PM"
  *    Clicking it toggles the Detail drawer.
  * 2. Detail drawer (collapsed by default, remembers state in extension storage):
@@ -341,8 +341,11 @@ export class Widgets {
     }
     if (!anchor || !anchor.parentElement) return;
 
-    if (this.glance.host.parentElement !== anchor.parentElement || this.glance.host.nextSibling !== anchor) {
-      anchor.parentElement.insertBefore(this.glance.host, anchor);
+    // Insert AFTER the anchor (below the composer), not before it.
+    const afterAnchor = anchor.nextSibling;
+    if (this.glance.host.parentElement !== anchor.parentElement ||
+        this.glance.host !== anchor.nextElementSibling) {
+      anchor.parentElement.insertBefore(this.glance.host, afterAnchor);
     }
     if (this.settings?.features?.preSendEstimate && input) {
       this.preSendEstimator.attach(input);

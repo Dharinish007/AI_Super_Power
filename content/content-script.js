@@ -5383,6 +5383,8 @@ class ResetCountdown {
     this.resetsAt = options.resetsAt || null;
     this.onTick = options.onTick || (() => {});
     this.nowFn = options.nowFn || (() => Date.now());
+    this.withSeconds = options.withSeconds || false;
+    this.withExact = options.withExact || false;
     this._interval = null;
     this._onFocus = () => this.tick();
     this._onVisibility = () => {
@@ -5408,7 +5410,8 @@ class ResetCountdown {
       this._attached = true;
     }
 
-    this._interval = setInterval(() => this.tick(), 60000);
+    const intervalMs = this.withSeconds ? 1000 : 60000;
+    this._interval = setInterval(() => this.tick(), intervalMs);
   }
 
   tick() {
@@ -5417,7 +5420,11 @@ class ResetCountdown {
       this.onTick(null);
       return null;
     }
-    const formatted = formatReset(this.resetsAt, this.nowFn(), { relative: true });
+    const formatted = formatReset(this.resetsAt, this.nowFn(), {
+      relative: true,
+      withSeconds: this.withSeconds,
+      withExact: this.withExact
+    });
     this.currentText = formatted;
     this.onTick(formatted);
     return formatted;
@@ -6627,7 +6634,35 @@ function formatReset(resetsAt, now = Date.now(), options = {}) {
   if (!ts || !Number.isFinite(ts) || ts <= now) return null;
 
   const diffMs = ts - now;
+  const diffSec = Math.floor(diffMs / 1000);
   const minTotal = Math.round(diffMs / 60000);
+
+  if (options.withSeconds) {
+    const s = diffSec % 60;
+    const m = Math.floor(diffSec / 60) % 60;
+    const h = Math.floor(diffSec / 3600) % 24;
+    const d = Math.floor(diffSec / 86400);
+
+    let countdownStr;
+    if (d > 0) {
+      countdownStr = `${d}d ${h}h ${m}m ${s}s`;
+    } else if (h > 0) {
+      countdownStr = `${h}h ${m}m ${s}s`;
+    } else if (m > 0) {
+      countdownStr = `${m}m ${s}s`;
+    } else {
+      countdownStr = `${s}s`;
+    }
+
+    if (options.withExact) {
+      const dObj = new Date(ts);
+      const isToday = dObj.toDateString() === new Date(now).toDateString();
+      const timeStr = dObj.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const exactStr = isToday ? timeStr : `${dObj.toLocaleDateString([], { weekday: 'short' })} ${timeStr}`;
+      return `${countdownStr} (${exactStr})`;
+    }
+    return countdownStr;
+  }
   if (options.relative || diffMs >= 24 * 3600 * 1000) {
     if (diffMs < 3600 * 1000) {
       return `resets in ${Math.max(1, minTotal)}m`;
@@ -6942,7 +6977,7 @@ const STYLES = `
   .meta .model { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .line { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
   .line:empty { display: none; }
-  .line.warn { color: var(--warn-text); } /* #D97706 is 3.2:1 on white: text uses a darker amber (5.0:1) */
+  .line.warn { color: var(--warn-text); }
 
   .approx { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 4px;
     border: 1px solid var(--border); color: var(--muted); font-size: 10.5px; font-weight: 600; cursor: help; margin-left: 4px; }
@@ -7000,7 +7035,7 @@ const STYLES = `
 
   /* Capsules */
   .caps { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
-  .caps > * { flex-shrink: 0; } /* A long list scrolls; it never squeezes the buttons and cards */
+  .caps > * { flex-shrink: 0; }
   .caps .fine { margin-top: 0; }
   .btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .btn { display: inline-flex; align-items: center; justify-content: center; height: 26px; padding: 0 10px; border-radius: 7px;
@@ -7020,7 +7055,7 @@ const STYLES = `
   .card .m.bad { color: var(--danger); }
   .hero .card { margin-top: 10px; }
 
-  /* Library: search, tags, pin, tick several */
+  /* Library */
   .two { display: flex; gap: 6px; }
   .two .field { flex: 1; min-width: 0; }
   .two select.field { flex: 0 1 auto; max-width: 120px; }
@@ -7039,7 +7074,7 @@ const STYLES = `
   .card .m { color: var(--muted); font-size: 11px; }
   .caps-h { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 
-  /* Side panel page: the document itself is the .root (":host" above matches nothing outside a shadow root) */
+  /* Side panel page */
   .panelpage { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--bg); }
   .panelpage > .tabs { flex: none; margin: 0; padding: 8px; border-bottom: 1px solid var(--border); }
   .panelpage > .body { flex: 1; min-height: 0; }
@@ -7052,27 +7087,10 @@ const STYLES = `
 
   /* Glance Strip & Detail Drawer */
   .glance-container { display: flex; flex-direction: column; width: 100%; max-width: 768px; margin: 0 auto 6px; box-sizing: border-box; }
-  .glance-strip {
-    display: inline-flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%;
-    padding: 4px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
-    font: 500 12px/1.4 var(--ui); color: var(--text); cursor: pointer; user-select: none;
-    transition: background .15s ease, border-color .15s ease;
-  }
-  .glance-strip:hover { background: var(--hover); border-color: var(--muted); }
-  .glance-strip.good { border-color: rgba(74, 222, 128, .3); }
-  .glance-strip.warn { border-color: rgba(251, 191, 36, .3); }
-  .glance-strip.bad { border-color: rgba(248, 113, 113, .3); }
-  .glance-strip.good .glance-pct { color: var(--good); font-weight: 600; }
-  .glance-strip.warn .glance-pct { color: var(--warn-text); font-weight: 600; }
-  .glance-strip.bad .glance-pct { color: var(--danger); font-weight: 600; }
-  .glance-dot { flex: none; font-size: 11px; }
-  .glance-sep { color: var(--muted); opacity: .6; }
-  .glance-left { color: var(--text); }
-  .glance-reset { color: var(--muted); }
 
   .detail-drawer {
     width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-    padding: 12px 14px; margin-bottom: 6px; box-shadow: var(--shadow); box-sizing: border-box;
+    padding: 12px 14px; margin-bottom: 6px; box-sizing: border-box;
     display: flex; flex-direction: column; gap: 8px;
   }
   .detail-drawer[hidden] { display: none; }
@@ -7104,67 +7122,115 @@ const STYLES = `
   .dev-view[hidden] { display: none; }
   .sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 
-  /* Strip Box (2-column usage & context strip) */
+  /* Strip Box (Usage Panel) - Floating seamless bar without rigid card box */
   .strip-box {
-    display: flex; justify-content: space-between; align-items: center; width: 100%;
-    padding: 8px 14px; border-radius: 10px; background: var(--surface);
-    border: 1px solid var(--border); box-shadow: var(--shadow); user-select: none;
-    box-sizing: border-box; cursor: pointer; color: var(--text);
-    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-    transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+    display: flex; flex-direction: row; align-items: center; justify-content: space-between;
+    width: 100%; padding: 4px 2px; background: transparent; border: none;
+    user-select: none; box-sizing: border-box; color: var(--text);
+    gap: 12px;
   }
-  .strip-box:hover { background: var(--surface-hover); border-color: var(--border-hover); box-shadow: var(--shadow-hover); }
-  .strip-left { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
-  .strip-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }
-  .u-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+  .strip-box:hover { background: transparent; border: none; }
+
+  /* Single straight line rows: Session | Weekly on left, Circle on right */
+  .strip-top {
+    display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  }
+  .strip-sep {
+    color: var(--border); font-size: 11px; opacity: 0.6; margin: 0 4px; user-select: none;
+  }
+  .strip-divider { display: none; }
+
+  /* Bottom row / right elements */
+  .strip-bottom {
+    display: flex; align-items: center; gap: 8px; flex: none; position: relative;
+  }
+  .strip-bottom-left {
+    display: flex; align-items: center; gap: 8px; position: relative;
+  }
+  .strip-bottom-right {
+    display: flex; align-items: center; gap: 6px; position: relative;
+  }
+  .ctx-model {
+    font-size: 11px; color: var(--muted); font-weight: 500; margin-right: 2px; white-space: nowrap;
+  }
+
+  /* Progress bars: slightly bigger (7px) + galaxy glow animated clean */
+  .u-row { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; white-space: nowrap; }
+  .u-row + .u-row::before {
+    content: '|'; color: var(--border); font-size: 11px; opacity: 0.6; margin-right: 6px; user-select: none;
+  }
   .u-label {
     display: inline-flex; align-items: center; justify-content: center;
-    font-family: var(--mono); font-weight: 700; font-size: 10.5px;
-    letter-spacing: 0.03em; min-width: 28px; padding: 1px 6px; border-radius: 4px;
+    font-family: var(--mono); font-weight: 700; font-size: 10px;
+    letter-spacing: 0.02em; padding: 1px 5px; border-radius: 4px;
     color: var(--text); background: var(--track); border: 1px solid var(--border);
     flex: none;
   }
   .u-bar-track {
-    width: 120px; height: 7px; border-radius: 999px; background: var(--track);
-    overflow: hidden; flex: none; box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+    width: 72px; height: 7px; border-radius: 4px; background: var(--track);
+    overflow: hidden; flex: none; box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
   }
-  .u-bar-fill { height: 100%; border-radius: 999px; transition: width .35s cubic-bezier(0.4, 0, 0.2, 1); }
-  .u-bar-fill.solid-ok { background: var(--good); }
-  .u-bar-fill.solid-warn { background: var(--warn); }
-  .u-bar-fill.solid-danger { background: var(--danger); }
+  .u-bar-fill {
+    height: 100%; border-radius: 4px; transition: width .35s ease;
+    background-size: 200% 100%;
+    animation: acm-galaxy-glow 3.5s linear infinite;
+  }
+  @keyframes acm-galaxy-glow {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+  .u-bar-fill.solid-ok,
+  .u-bar-fill.galaxy-ok {
+    background-image: linear-gradient(90deg, #6366f1 0%, #8b5cf6 25%, #d946ef 50%, #06b6d4 75%, #6366f1 100%);
+    box-shadow: 0 0 8px rgba(139, 92, 246, 0.5), 0 0 2px rgba(99, 102, 241, 0.6);
+  }
+  .u-bar-fill.solid-warn,
+  .u-bar-fill.galaxy-warn {
+    background-image: linear-gradient(90deg, #f59e0b 0%, #f97316 30%, #ec4899 65%, #f59e0b 100%);
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+  }
+  .u-bar-fill.solid-danger,
+  .u-bar-fill.galaxy-danger {
+    background-image: linear-gradient(90deg, #ef4444 0%, #f43f5e 30%, #a855f7 65%, #ef4444 100%);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.55);
+  }
   .u-bar-fill.hatched-ok {
-    background: repeating-linear-gradient(45deg, var(--good), var(--good) 3px, transparent 3px, transparent 6px);
-    background-color: rgba(74, 222, 128, 0.25);
+    background: repeating-linear-gradient(45deg, #6366f1, #6366f1 3px, transparent 3px, transparent 6px);
+    background-color: rgba(99, 102, 241, 0.25);
   }
   .u-bar-fill.hatched-warn {
-    background: repeating-linear-gradient(45deg, var(--warn), var(--warn) 3px, transparent 3px, transparent 6px);
-    background-color: rgba(251, 191, 36, 0.25);
+    background: repeating-linear-gradient(45deg, #f59e0b, #f59e0b 3px, transparent 3px, transparent 6px);
+    background-color: rgba(245, 158, 11, 0.25);
   }
   .u-bar-fill.hatched-danger {
-    background: repeating-linear-gradient(45deg, var(--danger), var(--danger) 3px, transparent 3px, transparent 6px);
-    background-color: rgba(248, 113, 113, 0.25);
+    background: repeating-linear-gradient(45deg, #ef4444, #ef4444 3px, transparent 3px, transparent 6px);
+    background-color: rgba(239, 68, 68, 0.25);
   }
-  .u-bar-fill.neutral { background: var(--muted); opacity: .4; }
-  .u-pct { font-family: var(--mono); font-weight: 700; font-size: 11.5px; min-width: 40px; text-align: right; }
+  .u-bar-fill.neutral { background: var(--muted); opacity: .4; animation: none; box-shadow: none; }
+  .u-pct { font-family: var(--mono); font-weight: 600; font-size: 11px; }
   .u-pct.ok { color: var(--good); }
   .u-pct.warn { color: var(--warn-text); }
   .u-pct.danger { color: var(--danger); }
   .u-pct.neutral { color: var(--muted); }
-  .u-reset { font-family: var(--mono); color: var(--muted); font-size: 11px; white-space: nowrap; }
-  .u-note { color: var(--muted); font-size: 11px; font-weight: 500; }
+  .u-reset { font-family: var(--mono); color: var(--muted); font-size: 10.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .u-exact { font-family: var(--mono); color: var(--muted); font-size: 10.5px; opacity: 0.85; margin-left: 2px; }
+  .u-note { color: var(--muted); font-size: 10.5px; }
 
-  .ctx-msgs { font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 1.15; text-align: right; font-weight: 500; }
-  .ctx-row { display: flex; align-items: center; gap: 7px; color: var(--text); }
-  .ctx-ring-btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; border-radius: 6px; padding: 1px 3px; }
+  /* Context circle and msgs left */
+  .ctx-msgs { font-family: var(--mono); font-size: 11px; color: var(--muted); font-weight: 500; white-space: nowrap; }
+  .ctx-row { display: flex; align-items: center; gap: 6px; color: var(--text); }
+  .ctx-ring-wrap { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .ctx-ring-btn { display: inline-flex; align-items: center; cursor: pointer; border-radius: 50%; padding: 0; }
   .ctx-ring-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .ctx-ring-svg { width: 22px; height: 22px; transform: rotate(-90deg); flex: none; }
-  .ctx-ring-track { fill: none; stroke: var(--track); stroke-width: 2.75; }
-  .ctx-ring-arc { fill: none; stroke-width: 2.75; stroke-linecap: round; transition: stroke-dashoffset .35s cubic-bezier(0.4, 0, 0.2, 1); }
+  .ctx-ring-svg { width: 18px; height: 18px; transform: rotate(-90deg); flex: none; }
+  .ctx-ring-track { fill: none; stroke: var(--track); stroke-width: 2.5; }
+  .ctx-ring-arc { fill: none; stroke-width: 2.5; stroke-linecap: round; transition: stroke-dashoffset .35s ease; }
   .ctx-ring-arc.ok { stroke: var(--good); }
   .ctx-ring-arc.warn { stroke: var(--warn); }
   .ctx-ring-arc.danger { stroke: var(--danger); }
   .ctx-ring-arc.hatched { stroke-opacity: 0.85; }
-  .ctx-pct { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+  .ctx-pct { font-family: var(--mono); font-weight: 600; font-size: 11.5px; }
   .ctx-pct.ok { color: var(--good); }
   .ctx-pct.warn { color: var(--warn-text); }
   .ctx-pct.danger { color: var(--danger); }
@@ -7175,6 +7241,94 @@ const STYLES = `
   .drawer-sparkline { width: 120px; height: 24px; stroke: var(--accent); stroke-width: 1.5; fill: none; stroke-linecap: round; }
   .draft-estimate { display: inline-flex; align-items: center; font-size: 11px; color: var(--muted); padding: 2px 8px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); margin-bottom: 4px; width: fit-content; }
   .visible-only-badge { font-size: 10px; color: var(--muted); margin-left: 4px; font-weight: normal; }
+
+  /* Context breakdown hover popover (~220px wide) */
+  .acm-popover {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    width: 220px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    z-index: 2147483100;
+    color: var(--text);
+    font-size: 11.5px;
+    box-sizing: border-box;
+    pointer-events: auto;
+  }
+  .acm-popover.flip-below {
+    bottom: auto;
+    top: calc(100% + 8px);
+  }
+  .acm-popover-title {
+    font-weight: 700;
+    font-size: 11.5px;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .acm-popover-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    padding: 2.5px 0;
+  }
+  .acm-popover-label { color: var(--muted); }
+  .acm-popover-val { font-family: var(--mono); font-weight: 600; text-align: right; }
+  .acm-popover-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 6px 0;
+    opacity: 0.6;
+  }
+  .acm-popover-total .acm-popover-label { font-weight: 600; color: var(--text); }
+  .acm-popover-total .acm-popover-val { font-weight: 700; color: var(--text); }
+
+  /* ChatGPT Limit button and mini box */
+  .acm-limit-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5px 7px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--track);
+    color: var(--text);
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .acm-limit-btn:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-hover);
+  }
+  .acm-limit-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .acm-limit-box {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    min-width: 200px;
+    max-width: 280px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    z-index: 2147483100;
+    color: var(--text);
+    font-size: 11.5px;
+    box-sizing: border-box;
+    pointer-events: auto;
+  }
+  .acm-limit-box.flip-below {
+    bottom: auto;
+    top: calc(100% + 8px);
+  }
 
   .hide { display: none !important; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -7188,12 +7342,15 @@ const STYLES = `
  * Single shared UI component for the usage & context strip above the chat input across
  * claude.ai, gemini.google.com, and chatgpt.com.
  *
- * Layout (two-column):
- * - Left: usage rows (0 to 2 rows). Label, bar, percent, reset time, optional note.
- * - Right: context ring, with percent beside it. Optional "~N msgs left" above ring (Claude only)
- *          or reset time (Gemini).
- * - Ring hover or click: opens detail drawer with context breakdown and biggest item.
- * - Usage row hover or click: opens detail drawer with usage details.
+ * Layout:
+ * - Top row (Claude & Gemini): 5h limit and Weekly limit side by side, flat solid bars, no glow.
+ *   (ChatGPT: no 5h/Weekly bars).
+ * - Bottom row:
+ *   - Left: "~N msgs left" (Claude), "N/A msgs left" (Gemini), or "msgs left" + [Limit] button (ChatGPT).
+ *   - Right: flat context circle with percentage beside it (e.g. (◔) 20%).
+ *   - Hover on context circle: ~220px popover anchored above circle with 150ms leave delay and
+ *     viewport auto-flip (System, Hidden, You/Provider, divider, Total ~X / 200K).
+ *   - Click on [Limit] (ChatGPT): toggles message limits mini box with outside-click dismiss.
  */
 
 
@@ -7220,8 +7377,13 @@ class StripComponent {
     this.devOpen = false;
     this._data = null;
     this._hoverTimer = null;
+    this._ctxHoverTimer = null;
+    this._limitLeaveTimer = null;
+    this._ringLimit = null;
     this._pinnedOpen = false;
     this._countdown = new ResetCountdown({
+      withSeconds: true,
+      withExact: true,
       onTick: (text) => this._onCountdownTick(text)
     });
 
@@ -7323,25 +7485,51 @@ class StripComponent {
       if (this.callbacks.onToggleDev) this.callbacks.onToggleDev(this.devOpen);
     });
 
-    // 2. Main Strip Box (Two columns: Left = usage rows, Right = context ring)
+    // 2. Main Strip Box - single straight line floating below chat input
     this.strip = h('div', 'strip-box', this.root);
     this.strip.setAttribute('role', 'region');
     this.strip.setAttribute('tabindex', '0');
     this.strip.setAttribute('aria-label', 'AI Chat Usage and Context Strip');
     this.strip.setAttribute('aria-expanded', 'false');
 
-    // Left Column: Usage Rows
-    this.stripLeft = h('div', 'strip-left', this.strip);
+    // Left Container: Session / 5h, separator, Weekly, or ChatGPT Limit button
+    this.stripLeft = h('div', 'strip-top', this.strip);
+    this.stripTop = this.stripLeft; // Compatibility alias for tests & callers
+    this.stripBottomLeft = this.stripLeft; // Compatibility alias
 
-    // Right Column: Context Ring + msgs left
-    this.stripRight = h('div', 'strip-right', this.strip);
-    this.ctxMsgs = h('div', 'ctx-msgs hide', this.stripRight);
+    // Divider between top row and bottom row (kept hidden for compatibility)
+    this.stripDivider = h('div', 'strip-divider hide', this.strip);
+
+    // Left elements: "~N msgs left" (Claude/Gemini) + "Limit" button (ChatGPT)
+    this.ctxMsgs = h('div', 'ctx-msgs hide', this.stripLeft);
+
+    // ChatGPT Limit button & popover
+    this.limitBtn = h('button', 'acm-limit-btn hide', this.stripLeft, 'Limit');
+    this.limitBtn.type = 'button';
+    this.limitBtn.setAttribute('aria-label', 'Message limits');
+    this.limitBtn.setAttribute('aria-expanded', 'false');
+
+    this.limitBox = h('div', 'acm-limit-box hide', this.stripLeft);
+    this.limitBox.setAttribute('role', 'dialog');
+    this.limitBox.setAttribute('aria-label', 'Message limits');
+
+    // Right Side: model name in Claude + context circle + percentage beside it (◔) 20%
+    this.stripRight = h('div', 'strip-bottom-right', this.strip);
+    this.stripBottom = this.strip; // Compatibility alias
+    this.stripBottomRight = this.stripRight; // Compatibility alias
+
+    // Model name in Claude (shown before the context circle)
+    this.ctxModel = h('span', 'ctx-model hide', this.stripRight);
 
     this.ctxRow = h('div', 'ctx-row', this.stripRight);
-    this.ringBtn = h('button', 'ctx-ring-btn', this.ctxRow);
+
+    // Flat context ring wrap
+    this.ctxRingWrap = h('div', 'ctx-ring-wrap', this.ctxRow);
+    this.ringBtn = h('button', 'ctx-ring-btn', this.ctxRingWrap);
     this.ringBtn.type = 'button';
     this.ringBtn.setAttribute('tabindex', '0');
-    this.ringBtn.setAttribute('aria-label', 'Context ring: click or hover for breakdown');
+    this.ringBtn.setAttribute('aria-label', 'Context circle: hover for breakdown');
+    this.ringBtn.setAttribute('aria-expanded', 'false');
 
     // SVG Circular Ring
     const NS = 'http://www.w3.org/2000/svg';
@@ -7367,36 +7555,95 @@ class StripComponent {
     this.svg.appendChild(this.ringArc);
 
     this.ringBtn.appendChild(this.svg);
-    this.ctxVal = h('span', 'ctx-pct', this.ringBtn, '—');
 
-    // Events: click toggles pinned open state; hover previews drawer
-    this.strip.addEventListener('click', (e) => {
-      if (e.target.closest('.drawer-gear') || e.target.closest('.dev-view')) return;
-      this._toggleDrawer();
-    });
+    // Hidden center wrap (kept for backwards compatibility if referenced)
+    this.ringCenterWrap = h('div', 'ctx-ring-center-wrap hide', this.ctxRingWrap);
+    this.ringCenterText = h('span', 'ctx-ring-center-text', this.ringCenterWrap, '—');
 
-    this.strip.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        this._toggleDrawer();
-      }
-    });
+    // Percentage directly beside the circle
+    this.ctxVal = h('span', 'ctx-pct', this.ctxRingWrap, '—');
 
-    this.strip.addEventListener('mouseenter', () => {
-      clearTimeout(this._hoverTimer);
-      this._hoverTimer = setTimeout(() => {
-        if (!this.drawerOpen) {
-          this._setDrawerOpen(true, false);
-        }
+    // Context breakdown popover on hover (~220px wide, anchored above circle)
+    this.ctxPopover = h('div', 'acm-popover ctx-breakdown-popover hide', this.stripRight);
+    this.ctxPopover.setAttribute('role', 'tooltip');
+    this.ctxPopover.setAttribute('aria-label', 'Context breakdown');
+
+    // Wire up HOVER interaction on context circle with ~150ms leave delay
+    const openCtxPopover = () => {
+      clearTimeout(this._ctxHoverTimer);
+      this._renderCtxHoverPopover();
+      this._positionPopover(this.ctxPopover, this.ctxRingWrap);
+      show(this.ctxPopover, true);
+      this.ringBtn.setAttribute('aria-expanded', 'true');
+    };
+
+    const closeCtxPopover = () => {
+      clearTimeout(this._ctxHoverTimer);
+      this._ctxHoverTimer = setTimeout(() => {
+        show(this.ctxPopover, false);
+        this.ringBtn.setAttribute('aria-expanded', 'false');
       }, 150);
-    });
+    };
 
-    this.strip.addEventListener('mouseleave', () => {
-      clearTimeout(this._hoverTimer);
-      if (!this._pinnedOpen && this.drawerOpen) {
-        this._setDrawerOpen(false, false);
+    this.ctxRingWrap.addEventListener('mouseenter', openCtxPopover);
+    this.ctxRingWrap.addEventListener('mouseleave', closeCtxPopover);
+    this.ctxPopover.addEventListener('mouseenter', () => clearTimeout(this._ctxHoverTimer));
+    this.ctxPopover.addEventListener('mouseleave', closeCtxPopover);
+
+    // Wire up HOVER & CLICK interaction on ChatGPT Limit button
+    const openLimitBox = () => {
+      clearTimeout(this._limitHoverTimer);
+      this._renderLimitBox();
+      this._positionPopover(this.limitBox, this.limitBtn);
+      show(this.limitBox, true);
+      this.limitBtn.setAttribute('aria-expanded', 'true');
+    };
+
+    const closeLimitBox = () => {
+      clearTimeout(this._limitHoverTimer);
+      this._limitHoverTimer = setTimeout(() => {
+        show(this.limitBox, false);
+        this.limitBtn.setAttribute('aria-expanded', 'false');
+      }, 150);
+    };
+
+    this.limitBtn.addEventListener('mouseenter', openLimitBox);
+    this.limitBtn.addEventListener('mouseleave', closeLimitBox);
+    this.limitBox.addEventListener('mouseenter', () => clearTimeout(this._limitHoverTimer));
+    this.limitBox.addEventListener('mouseleave', closeLimitBox);
+
+    this.limitBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = !this.limitBox.classList.contains('hide');
+      if (isOpen) {
+        show(this.limitBox, false);
+        this.limitBtn.setAttribute('aria-expanded', 'false');
+      } else {
+        openLimitBox();
       }
     });
+
+    // Outside click dismiss & Escape key dismiss
+    this._popoverDismissHandler = (e) => {
+      if (this.limitBox && !this.limitBox.classList.contains('hide')) {
+        if (!this.limitBox.contains(e.target) && !this.limitBtn.contains(e.target)) {
+          show(this.limitBox, false);
+          this.limitBtn.setAttribute('aria-expanded', 'false');
+        }
+      }
+    };
+    this._popoverKeyHandler = (e) => {
+      if (e.key === 'Escape') {
+        show(this.ctxPopover, false);
+        show(this.limitBox, false);
+        this.ringBtn.setAttribute('aria-expanded', 'false');
+        this.limitBtn.setAttribute('aria-expanded', 'false');
+      }
+    };
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('click', this._popoverDismissHandler, true);
+      document.addEventListener('keydown', this._popoverKeyHandler, true);
+    }
   }
 
   _toggleDrawer(force) {
@@ -7414,34 +7661,134 @@ class StripComponent {
     }
   }
 
+  _closeAllPopovers() {
+    show(this.ctxPopover, false);
+    show(this.limitBox, false);
+    if (this.ringBtn) this.ringBtn.setAttribute('aria-expanded', 'false');
+    if (this.limitBtn) this.limitBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  /**
+   * Positions a popover anchored above the trigger element, flipping below if no room above.
+   * @param {Element} popover
+   * @param {Element} anchor
+   */
+  _positionPopover(popover, anchor) {
+    if (!popover || !anchor) return;
+    popover.classList.remove('flip-below');
+    if (typeof anchor.getBoundingClientRect !== 'function') return;
+    const rect = anchor.getBoundingClientRect();
+    const popHeight = popover.offsetHeight || 140;
+    // If less than 8px room above, flip below
+    if (rect.top - popHeight < 8) {
+      popover.classList.add('flip-below');
+    }
+  }
+
+  /**
+   * Renders the hover popover for context breakdown:
+   * Rows: System, Hidden, You / Provider, divider, Total (~X / 200K)
+   */
+  _renderCtxHoverPopover() {
+    const data = this._data;
+    if (!data) return;
+    const ctx = data.context || {};
+    const bk = data.breakdown || {};
+    const ringLimit = ctx.limit || (typeof this._ringLimit === 'number' ? this._ringLimit : null);
+    const used = ctx.used;
+    const isApprox = ctx.approx === true || ctx.source === 'estimated';
+
+    this.ctxPopover.textContent = '';
+    h('div', 'acm-popover-title', this.ctxPopover, 'Context breakdown');
+
+    const uTokens = bk.user ?? 0;
+    const aTokens = bk.assistant ?? 0;
+    const sTokens = bk.system ?? 0;
+    const hTokens = bk.hidden ?? 0;
+
+    const fmtPctOrTokens = (tokens) => {
+      if (ringLimit && Number.isFinite(ringLimit) && ringLimit > 0) {
+        return `${Math.round((tokens / ringLimit) * 100)}%`;
+      }
+      if (tokens > 0) {
+        return formatTokens(tokens) || '0';
+      }
+      return '0%';
+    };
+
+    // Row 1: System
+    const rSys = h('div', 'acm-popover-row', this.ctxPopover);
+    h('span', 'acm-popover-label', rSys, 'System');
+    h('span', 'acm-popover-val', rSys, fmtPctOrTokens(sTokens));
+
+    // Row 2: Hidden
+    const rHid = h('div', 'acm-popover-row', this.ctxPopover);
+    h('span', 'acm-popover-label', rHid, 'Hidden');
+    h('span', 'acm-popover-val', rHid, hTokens > 0 ? fmtPctOrTokens(hTokens) : '0%');
+
+    // Row 3: You / Provider (Claude / Gemini / etc.)
+    const prov = data.provider || 'AI';
+    const rYouAsst = h('div', 'acm-popover-row', this.ctxPopover);
+    h('span', 'acm-popover-label', rYouAsst, `You / ${prov}`);
+    const combinedTokens = uTokens + aTokens;
+    h('span', 'acm-popover-val', rYouAsst, fmtPctOrTokens(combinedTokens));
+
+    // Divider line
+    h('div', 'acm-popover-divider', this.ctxPopover);
+
+    // Row 4: Total (~X / 200K)
+    const rTotal = h('div', 'acm-popover-row acm-popover-total', this.ctxPopover);
+    h('span', 'acm-popover-label', rTotal, 'Total');
+    const usedFmt = formatTokens(used, { approx: isApprox }) || '0';
+    const limitFmt = ringLimit ? formatTokens(ringLimit) : 'N/A';
+    h('span', 'acm-popover-val', rTotal, `~${usedFmt} / ${limitFmt}`);
+  }
+
+  /**
+   * Renders the message limits mini box for ChatGPT.
+   */
+  _renderLimitBox() {
+    const data = this._data;
+    this.limitBox.textContent = '';
+    h('div', 'acm-popover-title', this.limitBox, 'Message Limits');
+
+    const rows = Array.isArray(data?.rows) ? data.rows : [];
+    const validLimits = rows.filter(r => r.label !== '5h' && r.label !== 'Weekly');
+
+    if (validLimits.length === 0) {
+      const emptyRow = h('div', 'acm-popover-row', this.limitBox);
+      h('span', 'acm-popover-label', emptyRow, 'No limits tracked · subject to safeguards');
+      return;
+    }
+
+    for (const r of validLimits) {
+      const row = h('div', 'acm-popover-row', this.limitBox);
+      h('span', 'acm-popover-label', row, r.label);
+
+      let valStr;
+      if (r.state === 'unlimited') {
+        valStr = r.note || 'No limit · subject to safeguards';
+      } else if (r.used !== undefined && r.max !== undefined) {
+        valStr = `${r.used} / ${r.max}`;
+      } else if (typeof r.percent === 'number') {
+        valStr = `${Math.round(r.percent)}%`;
+      } else if (r.note) {
+        valStr = r.note;
+      } else {
+        valStr = 'Active';
+      }
+
+      if (r.resetsAt) {
+        const resetStr = formatReset(r.resetsAt, Date.now(), { relative: true }) || '';
+        if (resetStr) valStr += ` · ${resetStr}`;
+      }
+
+      h('span', 'acm-popover-val', row, valStr);
+    }
+  }
+
   /**
    * Renders the strip and drawer with standardized data.
-   *
-   * @param {{
-   *   rows: Array<{
-   *     label: string,
-   *     state: 'ok'|'warn'|'danger'|'unlimited'|'unknown',
-   *     percent?: number,
-   *     resetsAt?: string|number,
-   *     source: 'measured'|'estimated',
-   *     note?: string
-   *   }>,
-   *   context?: {
-   *     used?: number,
-   *     limit?: number,
-   *     source: 'measured'|'estimated',
-   *     refLimit?: number,
-   *     refType?: 'user'|'published',
-   *     state?: 'A'|'B'|'C'
-   *   },
-   *   msgsLeft?: number|null,
-   *   rightNote?: string|null,
-   *   breakdown?: { user?: number, assistant?: number, system?: number },
-   *   biggest?: { name?: string, role?: string, turn?: number, tokens?: number },
-   *   provider?: string,
-   *   model?: string,
-   *   modelFamily?: string
-   * }} data
    */
   render(data) {
     this._data = data;
@@ -7453,30 +7800,35 @@ class StripComponent {
     const rows = Array.isArray(data.rows) ? data.rows : [];
     const ctx = data.context || null;
 
-    // If both rows and context are empty/unavailable, hide the strip cleanly without error
     if (rows.length === 0 && (!ctx || ctx.used === undefined || ctx.used === null)) {
       this.strip.style.display = 'none';
       return;
     }
     this.strip.style.display = '';
 
+    const isChatGPT = data.provider === 'ChatGPT';
+
     // -------------------------------------------------------------------------
-    // 1. Render Left Column: Usage Rows
+    // 1. Render Top Row: 5h and Weekly limit bars (Claude & Gemini side-by-side)
     // -------------------------------------------------------------------------
-    this.stripLeft.textContent = '';
+    this.stripTop.textContent = '';
     this.dUsage.textContent = '';
     let hasUsageDetails = false;
     let primaryResetTs = null;
     let primaryResetEl = null;
 
-    for (const r of rows) {
-      const uRow = h('div', 'u-row', this.stripLeft);
+    // Filter rows: for ChatGPT, remove 5h and Weekly bars
+    const visibleRows = isChatGPT
+      ? rows.filter(r => r.label !== '5h' && r.label !== 'Weekly')
+      : rows;
+
+    for (const r of visibleRows) {
+      const uRow = h('div', 'u-row', this.stripTop);
       uRow.setAttribute('tabindex', '0');
 
-      // Label (site's own name, e.g. "5h", "Wk", "Uploads")
+      // Label (e.g. "5h", "Weekly")
       h('span', 'u-label', uRow, r.label);
 
-      // Bar and values
       if (r.state === 'unlimited') {
         const noteText = r.note || 'No limit · subject to safeguards';
         const noteEl = h('span', 'u-note', uRow, noteText);
@@ -7486,25 +7838,23 @@ class StripComponent {
         const t = threshold(pct);
         const isEst = r.source === 'estimated';
 
-        // Bar container
+        // Flat solid progress bar
         const barTrack = h('div', 'u-bar-track', uRow);
         const barFill = h('div', 'u-bar-fill', barTrack);
         barFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
 
-        // Bar fill style: solid for measured, hatched for estimated
         const fillClass = isEst ? `hatched-${t.state}` : `solid-${t.state}`;
         barFill.classList.add(fillClass);
 
-        // Percent text: at 80%+ append ⚠
         const pctEl = h('span', `u-pct ${t.state}`, uRow, t.symbol ? `${pct}% ${t.symbol}` : `${pct}%`);
-        if (isEst) {
-          pctEl.title = 'Estimated';
-        }
+        if (isEst) pctEl.title = 'Estimated';
 
-        // Reset text
-        const resetStr = r.resetsAt ? (formatReset(r.resetsAt) || '') : '';
+        const isSessionRow = r.label?.toLowerCase().includes('5h') || r.label?.toLowerCase().includes('session');
+        const resetStr = r.resetsAt
+          ? (formatReset(r.resetsAt, Date.now(), { withSeconds: true, withExact: isSessionRow }) || formatReset(r.resetsAt) || '')
+          : '';
         if (resetStr) {
-          const rReset = h('span', 'u-reset', uRow, resetStr);
+          const rReset = h('span', 'u-reset', uRow, `· ${resetStr}`);
           if (data.features?.countdown !== false) {
             const rTs = typeof r.resetsAt === 'number' ? (r.resetsAt < 1e12 ? r.resetsAt * 1000 : r.resetsAt) : Date.parse(r.resetsAt);
             const curPrimaryTs = typeof primaryResetTs === 'number' ? (primaryResetTs < 1e12 ? primaryResetTs * 1000 : primaryResetTs) : (primaryResetTs ? Date.parse(primaryResetTs) : null);
@@ -7515,22 +7865,33 @@ class StripComponent {
           }
         }
 
-        // Row note if present
-        if (r.note) {
+        // Gemini: remove heavy usage wording near usage tracker
+        if (r.note && !(data.provider === 'Gemini' && r.note.toLowerCase().includes('heavy'))) {
           h('span', 'u-note', uRow, r.note);
         }
 
-        // Build matching drawer usage row
         const dRow = h('div', 'drawer-row usage-row', this.dUsage);
         const tag = isEst ? '🟡 est.' : '🟢 measured';
         const parts = [r.label, `${pct}%`, resetStr, tag].filter(Boolean);
         setText(dRow, parts.join(' · '));
         hasUsageDetails = true;
-      } else if (r.note) {
-        h('span', 'u-note', uRow, r.note);
+      } else {
+        // Missing field -> show "N/A"
+        const barTrack = h('div', 'u-bar-track', uRow);
+        const barFill = h('div', 'u-bar-fill neutral', barTrack);
+        barFill.style.width = '0%';
+        h('span', 'u-pct neutral', uRow, 'N/A');
+        if (r.note && !(data.provider === 'Gemini' && r.note.toLowerCase().includes('heavy'))) {
+          h('span', 'u-note', uRow, r.note);
+        }
       }
     }
     show(this.dUsage, hasUsageDetails);
+
+    // Display top row and divider (hide on ChatGPT or if no rows)
+    const showTopRow = !isChatGPT && visibleRows.length > 0;
+    show(this.stripTop, showTopRow);
+    show(this.stripDivider, showTopRow);
 
     if (primaryResetTs && primaryResetEl && data.features?.countdown !== false) {
       this._activeResetEl = primaryResetEl;
@@ -7540,33 +7901,47 @@ class StripComponent {
     }
 
     // -------------------------------------------------------------------------
-    // 2. Render Right Column: Msgs Left & Context Ring
+    // 2. Render Left ("Limit" button for ChatGPT) & Right (Model + (◔) 20%)
     // -------------------------------------------------------------------------
-    // Right Top: msgsLeft (Claude) or reset note (Gemini)
-    if (typeof data.msgsLeft === 'number' && Number.isFinite(data.msgsLeft)) {
-      const split = formatMsgs(data.msgsLeft, { split: true });
-      if (split) {
-        this.ctxMsgs.textContent = '';
-        h('div', null, this.ctxMsgs, split.top);
-        h('div', null, this.ctxMsgs, split.bottom);
-        this.ctxMsgs.title = 'Estimated messages left before limit';
+    if (isChatGPT) {
+      show(this.limitBtn, true);
+      show(this.ctxMsgs, false); // Requirement 2: remove msg left in ChatGPT
+    } else {
+      show(this.limitBtn, false);
+      if (typeof data.msgsLeft === 'number' && Number.isFinite(data.msgsLeft)) {
+        const split = formatMsgs(data.msgsLeft, { split: true });
+        if (split) {
+          this.ctxMsgs.textContent = '';
+          h('span', null, this.ctxMsgs, split.top + ' ' + split.bottom);
+          this.ctxMsgs.title = 'Estimated messages left before limit';
+          show(this.ctxMsgs, true);
+        } else {
+          setText(this.ctxMsgs, `~${data.msgsLeft} msgs left`);
+          show(this.ctxMsgs, true);
+        }
+      } else if (data.provider === 'Gemini') {
+        const note = data.rightNote ? ` (${data.rightNote})` : '';
+        setText(this.ctxMsgs, `N/A msgs left${note}`);
+        show(this.ctxMsgs, true);
+      } else if (data.rightNote) {
+        setText(this.ctxMsgs, data.rightNote);
         show(this.ctxMsgs, true);
       } else {
         show(this.ctxMsgs, false);
       }
-    } else if (data.rightNote) {
-      this.ctxMsgs.textContent = '';
-      h('div', null, this.ctxMsgs, data.rightNote);
-      show(this.ctxMsgs, true);
-    } else {
-      show(this.ctxMsgs, false);
     }
 
-    // Right Bottom: Context Ring
-    // Determine ring state: A (Known limit), B (User reference), C (No limit)
+    // Model name in Claude displayed immediately before the context circle
+    if (data.provider === 'Claude' && data.model) {
+      setText(this.ctxModel, data.model);
+      show(this.ctxModel, true);
+    } else {
+      show(this.ctxModel, false);
+    }
+
+    // Right side: Context Ring + percentage beside it (◔) 20%
     let ringState = 'C';
     let ringLimit = null;
-    let _isUserRef = false;
 
     if (ctx) {
       if (ctx.limit && Number.isFinite(ctx.limit) && ctx.limit > 0) {
@@ -7575,14 +7950,15 @@ class StripComponent {
       } else if (ctx.refLimit && Number.isFinite(ctx.refLimit) && ctx.refLimit > 0) {
         ringState = 'B';
         ringLimit = ctx.refLimit;
-        _isUserRef = true;
       } else {
         ringState = 'C';
       }
     }
+    this._ringLimit = ringLimit;
 
     const used = ctx?.used;
     const isEstCtx = ctx?.source === 'estimated';
+    const isApprox = ctx?.approx === true || isEstCtx;
 
     if (ringState === 'A' || ringState === 'B') {
       const pct = typeof used === 'number' && Number.isFinite(used) && ringLimit
@@ -7590,32 +7966,62 @@ class StripComponent {
         : null;
 
       if (pct !== null) {
+        const band = bandFor(pct);
         const t = threshold(pct);
         const offset = RING_CIRCUMFERENCE * (1 - Math.min(100, Math.max(0, pct)) / 100);
 
         this.ringArc.style.display = pct === 0 ? 'none' : '';
         this.ringArc.setAttribute('stroke-dashoffset', String(offset));
-        this.ringArc.className.baseVal = `ctx-ring-arc ${t.state} ${isEstCtx ? 'hatched' : ''}`;
+        const arcState = band === 'green' ? 'ok' : band === 'amber' ? 'warn' : 'danger';
+        this.ringArc.className.baseVal = `ctx-ring-arc ${arcState} ${isEstCtx ? 'hatched' : ''}`;
 
         setText(this.ctxVal, t.symbol ? `${pct}% ${t.symbol}` : `${pct}%`);
-        this.ctxVal.className = `ctx-pct ${t.state}`;
+        const ctxState = band === 'green' ? 'ok' : band === 'amber' ? 'warn' : 'danger';
+        this.ctxVal.className = `ctx-pct ${ctxState}`;
       } else {
         this.ringArc.style.display = 'none';
-        setText(this.ctxVal, '—');
+        setText(this.ctxVal, 'N/A');
         this.ctxVal.className = 'ctx-pct neutral';
       }
     } else {
-      // State C: No limit. Outlined ring, NO fill arc, count ONLY beside ring (no percent)
-      this.ringArc.style.display = 'none';
-      const formattedUsed = typeof used === 'number' && Number.isFinite(used)
-        ? formatTokens(used, { approx: true })
-        : '—';
-      setText(this.ctxVal, formattedUsed);
-      this.ctxVal.className = 'ctx-pct neutral';
+      // State C (e.g. ChatGPT default)
+      // Requirement 2: in ChatGPT, circle should be colored with % for context
+      if (isChatGPT && typeof used === 'number' && Number.isFinite(used)) {
+        const fallbackLimit = (data.model && (data.model.includes('o1') || data.model.includes('o3'))) ? 200000 : 128000;
+        this._ringLimit = fallbackLimit;
+        const pct = Math.round((used / fallbackLimit) * 100);
+        const band = bandFor(pct);
+        const t = threshold(pct);
+        const offset = RING_CIRCUMFERENCE * (1 - Math.min(100, Math.max(0, pct)) / 100);
+
+        this.ringArc.style.display = pct === 0 ? 'none' : '';
+        this.ringArc.setAttribute('stroke-dashoffset', String(offset));
+        const arcState = band === 'green' ? 'ok' : band === 'amber' ? 'warn' : 'danger';
+        this.ringArc.className.baseVal = `ctx-ring-arc ${arcState} ${isEstCtx ? 'hatched' : ''}`;
+
+        setText(this.ctxVal, t.symbol ? `${pct}% ${t.symbol}` : `${pct}%`);
+        const ctxState = band === 'green' ? 'ok' : band === 'amber' ? 'warn' : 'danger';
+        this.ctxVal.className = `ctx-pct ${ctxState}`;
+      } else {
+        this.ringArc.style.display = 'none';
+        const formattedUsed = typeof used === 'number' && Number.isFinite(used)
+          ? formatTokens(used, { approx: isApprox })
+          : 'N/A';
+        setText(this.ctxVal, formattedUsed || 'N/A');
+        this.ctxVal.className = 'ctx-pct neutral';
+      }
+    }
+
+    // If popover is currently open, refresh its content
+    if (!this.ctxPopover.classList.contains('hide')) {
+      this._renderCtxHoverPopover();
+    }
+    if (!this.limitBox.classList.contains('hide')) {
+      this._renderLimitBox();
     }
 
     // -------------------------------------------------------------------------
-    // 3. Render Detail Drawer
+    // 3. Render Detail Drawer (unchanged)
     // -------------------------------------------------------------------------
     const usedFormatted = formatTokens(used, { approx: true }) || '0';
     const tagCtx = isEstCtx ? 'est.' : 'measured';
@@ -7633,7 +8039,6 @@ class StripComponent {
     const modelCaption = [data.model, data.modelFamily].filter(Boolean).join(' · ');
     setText(this.dModel, modelCaption ? `(${modelCaption})` : '');
 
-    // Stacked breakdown
     const bk = data.breakdown || {};
     const uTokens = bk.user || 0;
     const aTokens = bk.assistant || 0;
@@ -7653,7 +8058,6 @@ class StripComponent {
     setText(this.dLegAsst, `${provName} & tools ${aPct}%`);
     setText(this.dLegSys, `System ${sPct}%`);
 
-    // Biggest item
     const big = data.biggest;
     this._currentBiggest = big;
     const showBiggest = (data.features?.biggestItem ?? true) && big && typeof big.tokens === 'number' && big.tokens > 0;
@@ -7674,7 +8078,6 @@ class StripComponent {
       show(this.dBigRow, false);
     }
 
-    // "Consider a new chat" line in drawer (at 80%+ context, 85%+ if estimated)
     const ctxPct = (ringState === 'A' || ringState === 'B') && ringLimit
       ? Math.round((used / ringLimit) * 100)
       : (typeof data.percentage === 'number' && Number.isFinite(data.percentage) ? Math.round(data.percentage) : null);
@@ -7682,7 +8085,6 @@ class StripComponent {
     const showSuggest = shouldShowNewChatSuggestion(ctxPct, isEst ? 'estimated' : 'measured', data.features?.newChatSuggestion ?? true);
     show(this.dNewChatRow, showSuggest);
 
-    // Usage history sparkline in drawer
     if (Array.isArray(data.history) && data.history.length > 0 && data.features?.usageHistory !== false) {
       const dPath = generateSparklinePath(data.history, 120, 24);
       if (dPath) {
@@ -7695,7 +8097,6 @@ class StripComponent {
       show(this.dSparklineBox, false);
     }
 
-    // Checkpoint export button in drawer diagnostics
     show(this.dExportRow, Boolean(data.features?.checkpointExport));
   }
 
@@ -7731,6 +8132,10 @@ class StripComponent {
     if (this._countdown) {
       this._countdown.destroy();
     }
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+      document.removeEventListener('click', this._popoverDismissHandler, true);
+      document.removeEventListener('keydown', this._popoverKeyHandler, true);
+    }
   }
 
   _onCountdownTick(text) {
@@ -7748,7 +8153,6 @@ class StripComponent {
     this._toastTimer = setTimeout(() => show(this.toast, false), ms);
   }
 }
-
 
 
   // --- src/ui/widget/export-dialog.js ---
@@ -8503,8 +8907,7 @@ function geminiAdapter(viewState = {}, _settings = {}) {
       state: sessionState,
       percent: sessionPct,
       resetsAt: session?.resetsAt ? (typeof session.resetsAt === 'number' ? new Date(session.resetsAt).toISOString() : String(session.resetsAt)) : undefined,
-      source: session?.estimated ? 'estimated' : 'measured',
-      note: 'Heavy tasks use more'
+      source: session?.estimated ? 'estimated' : 'measured'
     });
 
     const weekly = limits.find(l => l.id === 'weekly' || l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
@@ -8586,13 +8989,18 @@ function chatgptAdapter(viewState = {}, settings = {}) {
       note: 'No limit · subject to safeguards'
     });
 
-    // Tool rows (e.g. Uploads, Images, Data analysis) appear only when a tracked limit exists
+    // Feature limit rows from limits_progress ONLY — no 5h row for ChatGPT.
+    // Skip model: keys, text rows, session / 5h rows.
     for (const l of limits) {
-      if (l.key === 'limit' || l.label?.toLowerCase().includes('text') || l.key?.startsWith('model:')) continue;
+      const key = String(l.key || l.id || '');
+      if (key === 'limit' || key.startsWith('model:') || l.label?.toLowerCase().includes('text')) continue;
+      if (key === '5h' || key === 'session' || key.includes('session')) continue;
+      if (l.label?.toLowerCase().includes('session')) continue;
+
       const pct = typeof l.percent === 'number' && Number.isFinite(l.percent) ? Math.round(l.percent) : undefined;
       const st = pct !== undefined ? threshold(pct).state : (l.blocked ? 'danger' : 'unknown');
       rows.push({
-        label: l.label || 'Tool',
+        label: l.label || key || 'Tool',
         state: st,
         percent: pct,
         resetsAt: l.resetsAt ? (typeof l.resetsAt === 'number' ? new Date(l.resetsAt).toISOString() : String(l.resetsAt)) : undefined,
@@ -8601,25 +9009,40 @@ function chatgptAdapter(viewState = {}, settings = {}) {
       });
     }
 
-    // Context: count only, no ring fill, no percent, unless user reference is set in settings
-    let context;
+    // Context: estimate (BPE tokenizer). "~" prefix via approx:true.
+    // Use model contextWindow from widget state if available.
     const usedTokens = (typeof viewState.usedTokens === 'number' && Number.isFinite(viewState.usedTokens))
       ? viewState.usedTokens
       : 0;
 
+    const contextLimit = viewState.contextLimit && Number.isFinite(viewState.contextLimit) && viewState.contextLimit > 0
+      ? viewState.contextLimit
+      : null;
+
     const userRef = settings?.context?.userReference || null;
-    if (userRef && Number.isFinite(userRef) && userRef > 0) {
+
+    let context;
+    if (contextLimit) {
       context = {
         used: usedTokens,
-        limit: undefined, // no OpenAI published limit
+        limit: contextLimit,
+        approx: true,
+        source: 'estimated'
+      };
+    } else if (userRef && Number.isFinite(userRef) && userRef > 0) {
+      context = {
+        used: usedTokens,
+        limit: undefined,
         refLimit: userRef,
         refType: 'user',
+        approx: true,
         source: 'estimated'
       };
     } else {
       context = {
         used: usedTokens,
-        limit: undefined, // State C: count only, no ring fill, no percent
+        limit: undefined, // State C: count only, no ring fill
+        approx: true,
         source: 'estimated'
       };
     }
@@ -8662,7 +9085,7 @@ function getAdapterForProvider(providerName) {
   // --- src/ui/widget/widgets.js ---
   /**
  * Context Monitor - In-page UI Widgets:
- * 1. Glance strip (one line, always visible, mounted above the chat input):
+ * 1. Glance strip (one line, always visible, mounted below the chat input):
  *    "🟢 48% · ~28 msgs left · resets 7:20 PM"
  *    Clicking it toggles the Detail drawer.
  * 2. Detail drawer (collapsed by default, remembers state in extension storage):
@@ -9003,8 +9426,11 @@ class Widgets {
     }
     if (!anchor || !anchor.parentElement) return;
 
-    if (this.glance.host.parentElement !== anchor.parentElement || this.glance.host.nextSibling !== anchor) {
-      anchor.parentElement.insertBefore(this.glance.host, anchor);
+    // Insert AFTER the anchor (below the composer), not before it.
+    const afterAnchor = anchor.nextSibling;
+    if (this.glance.host.parentElement !== anchor.parentElement ||
+        this.glance.host !== anchor.nextElementSibling) {
+      anchor.parentElement.insertBefore(this.glance.host, afterAnchor);
     }
     if (this.settings?.features?.preSendEstimate && input) {
       this.preSendEstimator.attach(input);
@@ -11178,6 +11604,7 @@ function addIntelligence(state, { conversationId, awaitingData, attachments, isL
 
 
 
+
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 const round1 = (n) => Math.round(n * 10) / 10;
 // Approximate size of ChatGPT's server-side system prompt (not readable from the client)
@@ -11187,30 +11614,244 @@ const FEATURE_NAMES = {
   deep_research: 'Deep research', reason: 'Thinking', image_gen: 'Image generation',
   file_upload: 'File uploads', paste_text_to_file: 'Paste as file'
 };
-const featureLabel = (f) => FEATURE_NAMES[f] || f.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+const featureLabel = (f) => FEATURE_NAMES[f] || (typeof f === 'string' ? f.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Feature');
 
 /**
  * ChatGPT plan allowances (from conversation/init) as widget limits: remaining count + reset time.
  * Entries past their reset time are dropped (the count is stale until ChatGPT reports again).
- * @param {{ limitsProgress?: Array, blocked?: string[], modelLimits?: Array }|null} raw
- * @returns {Array<{ key: string, label: string, remaining: number|null, blocked: boolean, resetsAt: number|null }>}
+ * Strictly NO 5h or session limits are ever included for ChatGPT.
+ * @param {{ limitsProgress?: Array, limits_progress?: Array, blocked?: string[], blocked_features?: string[], modelLimits?: Array, model_limits?: Array }|null} raw
+ * @param {number} [now]
+ * @returns {Array<{ id: string, key: string, label: string, remaining: number|null, used: number, total: number, blocked: boolean, resetsAt: number|null, source: string }>}
  */
 function chatgptLimits(raw, now = Date.now()) {
   if (!raw) return [];
-  const blocked = new Set(raw.blocked || []);
-  const at = (iso) => (iso ? Date.parse(iso) || null : null);
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const blockedList = list(raw.blocked || raw.blocked_features).map(b => typeof b === 'string' ? b : (b?.feature_name || b?.name || b?.id)).filter(Boolean);
+  const blocked = new Set(blockedList);
+  const at = (isoOrTs) => {
+    if (!isoOrTs) return null;
+    if (typeof isoOrTs === 'number') return isoOrTs;
+    const parsed = Date.parse(isoOrTs);
+    return isNaN(parsed) ? null : parsed;
+  };
   const out = [];
-  for (const m of raw.modelLimits || []) {
-    if (m.model) out.push({ key: `model:${m.model}`, label: `Messages · ${m.model}`, remaining: m.remaining, blocked: m.remaining === 0, resetsAt: at(m.resetAfter) });
+
+  for (const m of list(raw.modelLimits || raw.model_limits)) {
+    const slug = m?.model || m?.model_slug || m?.slug;
+    if (slug) {
+      const remaining = typeof m.remaining === 'number' ? m.remaining : null;
+      const total = typeof (m.total ?? m.limit ?? m.num_total) === 'number'
+        ? (m.total ?? m.limit ?? m.num_total)
+        : (typeof m.used === 'number' && typeof remaining === 'number' ? m.used + remaining : (remaining !== null ? remaining : 0));
+      const used = typeof m.used === 'number'
+        ? m.used
+        : (typeof total === 'number' && typeof remaining === 'number' ? Math.max(0, total - remaining) : (remaining === 0 && total !== 0 ? total : 0));
+      out.push({
+        id: `model:${slug}`,
+        key: `model:${slug}`,
+        label: `Messages · ${slug}`,
+        remaining,
+        used,
+        total,
+        blocked: remaining === 0,
+        resetsAt: at(m.resetsAt || m.reset_time || m.resets_at || m.resetAfter || m.reset_after || m.resets_after),
+        source: 'interceptor'
+      });
+    }
   }
-  for (const l of raw.limitsProgress || []) {
-    if (l.feature) out.push({ key: l.feature, label: featureLabel(l.feature), remaining: l.remaining, blocked: blocked.has(l.feature) || l.remaining === 0, resetsAt: at(l.resetAfter) });
+
+  for (const l of list(raw.limitsProgress || raw.limits_progress)) {
+    const f = l?.feature || l?.feature_name || l?.name || l?.id;
+    if (f) {
+      const remaining = typeof l.remaining === 'number' ? l.remaining : null;
+      const isBlocked = blocked.has(f) || remaining === 0;
+      const total = typeof (l.total ?? l.limit ?? l.num_total) === 'number'
+        ? (l.total ?? l.limit ?? l.num_total)
+        : (typeof l.used === 'number' && typeof remaining === 'number' ? l.used + remaining : (remaining !== null ? remaining : 0));
+      const used = typeof l.used === 'number'
+        ? l.used
+        : (typeof total === 'number' && typeof remaining === 'number' ? Math.max(0, total - remaining) : (isBlocked && total !== 0 ? total : 0));
+      out.push({
+        id: f,
+        key: f,
+        label: featureLabel(f),
+        remaining,
+        used,
+        total,
+        blocked: isBlocked,
+        resetsAt: at(l.resetsAt || l.reset_time || l.resets_at || l.resetAfter || l.reset_after || l.resets_after),
+        source: 'interceptor'
+      });
+    }
   }
+
   for (const f of blocked) {
-    if (!out.some(l => l.key === f)) out.push({ key: f, label: featureLabel(f), remaining: 0, blocked: true, resetsAt: null });
+    if (!out.some(l => l.key === f || l.id === f)) {
+      out.push({
+        id: f,
+        key: f,
+        label: featureLabel(f),
+        remaining: 0,
+        used: 0,
+        total: 0,
+        blocked: true,
+        resetsAt: null,
+        source: 'interceptor'
+      });
+    }
   }
-  return out.filter(l => !l.resetsAt || l.resetsAt > now);
+
+  // Strictly filter out any 5h or session limits for ChatGPT
+  return out.filter(l => {
+    const id = String(l.id || l.key || '').toLowerCase();
+    const label = String(l.label || '').toLowerCase();
+    if (id === '5h' || id === 'session' || label.includes('5h') || label.includes('session')) return false;
+    return !l.resetsAt || l.resetsAt > now;
+  });
 }
+
+/**
+ * Builds standard shared contract representation for ChatGPT:
+ * {
+ *   provider: "chatgpt",
+ *   context: {
+ *     used: number,
+ *     limit: number,
+ *     segments: [
+ *       { id: "user", label: "You", tokens: number, percent: number },
+ *       { id: "assistant", label: "ChatGPT & tools", tokens: number, percent: number },
+ *       { id: "system", label: "System & memory", tokens: number, percent: number }
+ *     ],
+ *     source: "api" | "stream" | "dom" | "estimate",
+ *     confidence: "exact" | "estimate",
+ *     approx: true,
+ *     text: string
+ *   },
+ *   limits: [
+ *     {
+ *       id: string,
+ *       label: string,
+ *       used: number,
+ *       total: number,
+ *       resetsAt: number | null,
+ *       source: "api" | "stream" | "dom" | "interceptor"
+ *     }
+ *   ]
+ * }
+ */
+function buildChatGptContractData(first = {}, second = null) {
+  const state = second || first || {};
+  const contextState = state.context || {};
+
+  let used = typeof contextState.used === 'number'
+    ? contextState.used
+    : (state.tokens?.totalMeasurable ?? state.tokens?.used ?? state.usedTokens ?? null);
+  if (used === null) {
+    if (Array.isArray(state.messages)) {
+      used = state.messages.reduce((sum, m) => sum + (m.tokens || 0), 0);
+    } else {
+      used = 0;
+    }
+  }
+
+  const limit = contextState.limit || state.contextLimit || state.model?.contextWindow || 128000;
+
+  let uTokens = 0;
+  let aTokens = 0;
+  let sTokens = 0;
+
+  if (used > 0) {
+    uTokens = contextState.segments?.find(s => s.id === 'user')?.tokens
+      ?? state.tokens?.user ?? state.stats?.user ?? state.breakdown?.user
+      ?? (Array.isArray(state.messages) ? state.messages.filter(m => m.role === 'user').reduce((s, m) => s + (m.tokens || 0), 0) : 0);
+    aTokens = contextState.segments?.find(s => s.id === 'assistant')?.tokens
+      ?? state.tokens?.assistant ?? state.stats?.assistant ?? state.breakdown?.assistant
+      ?? (Array.isArray(state.messages) ? state.messages.filter(m => m.role === 'assistant').reduce((s, m) => s + (m.tokens || 0), 0) : 0);
+    sTokens = contextState.segments?.find(s => s.id === 'system')?.tokens
+      ?? state.tokens?.hidden ?? state.stats?.hidden ?? state.breakdown?.system ?? 0;
+  }
+
+  // Fix B1 & Fix B2: Segment percentages computed against the total model limit (e.g. 128,000)
+  // At 0 usage: used = 0, tokens = 0, percent = 0
+  const uPct = (limit > 0 && uTokens > 0) ? Math.round((uTokens / limit) * 100) : 0;
+  const aPct = (limit > 0 && aTokens > 0) ? Math.round((aTokens / limit) * 100) : 0;
+  const sPct = (limit > 0 && sTokens > 0) ? Math.round((sTokens / limit) * 100) : 0;
+
+  // Determine limits
+  let rawLimits = [];
+  if (state.limitsProgress || state.modelLimits || state.limits_progress || state.model_limits) {
+    rawLimits = chatgptLimits(state);
+  } else if (state.requestObserver?.getObservedLimits) {
+    rawLimits = chatgptLimits(state.requestObserver.getObservedLimits());
+  } else if (state.observedLimits) {
+    rawLimits = chatgptLimits(state.observedLimits);
+  } else if (Array.isArray(state.limits)) {
+    rawLimits = state.limits;
+  }
+
+  // Normalize limits according to contract: strictly NO 5h row
+  const normalizedLimits = rawLimits
+    .filter(l => {
+      if (!l) return false;
+      const id = String(l.id || l.key || '').toLowerCase();
+      const label = String(l.label || '').toLowerCase();
+      return id !== '5h' && id !== 'session' && !label.includes('5h') && !label.includes('session');
+    })
+    .map(l => {
+      const id = l.id || l.key || l.feature || (l.model ? `model:${l.model}` : 'feature');
+      const label = l.label || featureLabel(id);
+      const remaining = typeof l.remaining === 'number' ? l.remaining : null;
+      const total = typeof l.total === 'number'
+        ? l.total
+        : (typeof l.used === 'number' && remaining !== null ? l.used + remaining : (remaining !== null ? remaining : 0));
+      const usedVal = typeof l.used === 'number'
+        ? l.used
+        : (typeof total === 'number' && remaining !== null ? Math.max(0, total - remaining) : (remaining === 0 ? total : 0));
+      const resetsAt = typeof l.resetsAt === 'number'
+        ? l.resetsAt
+        : (l.resetsAt ? (Date.parse(l.resetsAt) || null) : (l.resetAfter ? (Date.parse(l.resetAfter) || null) : null));
+      return {
+        id,
+        label,
+        used: usedVal,
+        total,
+        resetsAt,
+        source: 'interceptor'
+      };
+    });
+
+  const isAuthoritative = state.observables?.dataSource === 'authoritative' || state.context?.source === 'api';
+  const isStream = state.observables?.dataSource === 'stream' || state.context?.source === 'stream';
+  const isDom = state.observables?.dataSource?.startsWith('dom') || state.context?.source === 'dom' || state.source === 'dom';
+  const source = contextState.source || (isAuthoritative ? 'api' : (isStream ? 'stream' : (isDom ? 'dom' : 'estimate')));
+
+  // ChatGPT context token values are estimates (o200k_base BPE + 2,500 system prompt estimate)
+  const confidence = 'estimate';
+
+  const usedPrefix = formatTokens(used, { approx: true }) || '~0';
+  const contextText = limit ? `${usedPrefix} / ${formatTokens(limit)}` : usedPrefix;
+
+  return {
+    provider: 'chatgpt',
+    context: {
+      used,
+      limit,
+      segments: [
+        { id: 'user', label: 'You', tokens: uTokens, percent: uPct },
+        { id: 'assistant', label: 'ChatGPT & tools', tokens: aTokens, percent: aPct },
+        { id: 'system', label: 'System & memory', tokens: sTokens, percent: sPct }
+      ],
+      source,
+      confidence,
+      approx: true,
+      text: contextText
+    },
+    limits: normalizedLimits
+  };
+}
+
+const buildChatGPTContractData = buildChatGptContractData;
 
 /**
  * Rolling timing samples (last `size` per metric) for the performance section of diagnostics.
@@ -11986,6 +12627,18 @@ class ContentScriptCoordinator {
   /** Toolbar badge (service worker); see badgeSender. */
   syncState(state) {
     this._sendBadge(state);
+  }
+
+  /**
+   * Returns standardized shared contract data for ChatGPT:
+   * {
+   *   provider: "chatgpt",
+   *   context: { used, limit, segments, source, confidence, approx, text },
+   *   limits: [{ id, label, used, total, resetsAt, source }]
+   * }
+   */
+  toContractData(state = null) {
+    return buildChatGptContractData(state || this.latestState || this._lastViewState || this);
   }
 
   /**
@@ -13185,7 +13838,7 @@ function buildGeminiContractData(first = {}, second = null) {
     }
   }
 
-  const limit = contextState.limit || state.contextLimit || state.model?.contextWindow || 200000;
+  const limit = contextState.limit || (state.observables?.dataSource === 'dom_fallback' ? 200000 : (state.contextLimit || state.model?.contextWindow || 200000));
 
   const uTokens = contextState.segments?.find(s => s.id === 'user')?.tokens
     ?? state.tokens?.user ?? state.stats?.user ?? state.breakdown?.user
