@@ -101,7 +101,9 @@ export function claudeAdapter(viewState = {}, _settings = {}) {
         assistant: viewState.stats?.assistant,
         system: viewState.stats?.hidden
       },
-      biggest: viewState.biggest?.[0],
+      biggest: viewState.biggestItem || viewState.biggest?.[0],
+      messages: viewState.messages || [],
+      title: viewState.title || (viewState.model ? `${viewState.model} Chat` : 'Claude Chat'),
       model: viewState.model,
       modelFamily: viewState.modelFamily
     };
@@ -189,7 +191,9 @@ export function geminiAdapter(viewState = {}, _settings = {}) {
         assistant: viewState.stats?.assistant,
         system: viewState.stats?.hidden
       },
-      biggest: viewState.biggest?.[0],
+      biggest: viewState.biggestItem || viewState.biggest?.[0],
+      messages: viewState.messages || [],
+      title: viewState.title || (viewState.model ? `${viewState.model} Chat` : 'Gemini Chat'),
       model: viewState.model,
       modelFamily: viewState.modelFamily
     };
@@ -268,7 +272,9 @@ export function chatgptAdapter(viewState = {}, settings = {}) {
         assistant: viewState.stats?.assistant,
         system: viewState.stats?.hidden
       },
-      biggest: viewState.biggest?.[0],
+      biggest: viewState.biggestItem || viewState.biggest?.[0],
+      messages: viewState.messages || [],
+      title: viewState.title || (viewState.model ? `${viewState.model} Chat` : 'ChatGPT Chat'),
       model: viewState.model,
       modelFamily: viewState.modelFamily
     };

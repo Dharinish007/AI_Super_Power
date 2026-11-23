@@ -33,6 +33,7 @@ import { runBiggestItemAndCountdownTests } from './unit/biggest-item.test.js';
 import { runHistoryTests } from './unit/history.test.js';
 import { runPreSendTests } from './unit/pre-send.test.js';
 import { runCheckpointExportTests } from './unit/checkpoint-export.test.js';
+import { runExportParserTests } from './unit/export-parser.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -65,7 +66,8 @@ const SUITES = [
   runBiggestItemAndCountdownTests, // Reset countdown + biggest item ranking
   runHistoryTests, // Usage history sampling & sparkline
   runPreSendTests, // Pre-send draft token estimate
-  runCheckpointExportTests // Checkpoint Markdown export
+  runCheckpointExportTests, // Checkpoint Markdown export
+  runExportParserTests // Chat Export types & message parsers (P1)
 ];
 
 console.log('========================================================');

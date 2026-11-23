@@ -97,8 +97,9 @@ export function extractBiggestItem(conversationData = {}) {
  */
 export function formatBiggestItemDisplay(item, formatTokensFn) {
   if (!item || !item.tokens) return null;
+  const label = item.label || `${item.role === 'user' ? 'You' : (item.role === 'assistant' ? 'Assistant' : 'Item')} (#${item.turn || 1})`;
   const tokenStr = formatTokensFn ? formatTokensFn(item.tokens) : `${Math.round(item.tokens / 100) / 10}K`;
-  const text = `${item.label} · ~${tokenStr}`;
+  const text = `${label} · ~${tokenStr}`;
   const sub = item.visibleOnly ? 'visible messages only' : '';
   return {
     text,

@@ -52,7 +52,15 @@ export function normalizeSettings(raw) {
   const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
   const d = obj(r.display);
   const feat = obj(r.features);
-  const alertsVal = bool(feat.alerts, bool(obj(r.context).alerts, DEFAULT_FEATURES.alerts));
+  const ctx = obj(r.context);
+
+  // Synchronize alerts: if either explicitly defines a boolean, respect it; default to DEFAULT_FEATURES.alerts
+  let alertsVal = DEFAULT_FEATURES.alerts;
+  if (typeof feat.alerts === 'boolean') {
+    alertsVal = feat.alerts;
+  } else if (typeof ctx.alerts === 'boolean') {
+    alertsVal = ctx.alerts;
+  }
 
   return {
     version: 2,
@@ -81,16 +89,45 @@ export async function readSettings(area) {
 export async function writeSettings(area, patch) {
   const cur = await readSettings(area);
   const p = obj(patch);
+  const pContext = obj(p.context);
+  const pFeatures = obj(p.features);
+
+  // Keep alerts in sync across features.alerts and context.alerts
+  let syncedAlerts;
+  if (typeof pFeatures.alerts === 'boolean') {
+    syncedAlerts = pFeatures.alerts;
+  } else if (typeof pContext.alerts === 'boolean') {
+    syncedAlerts = pContext.alerts;
+  }
+
+  const mergedFeatures = {
+    ...cur.features,
+    ...pFeatures,
+    ...(syncedAlerts !== undefined ? { alerts: syncedAlerts } : {})
+  };
+  const mergedContext = {
+    ...cur.context,
+    ...pContext,
+    ...(syncedAlerts !== undefined ? { alerts: syncedAlerts } : {})
+  };
+
   const next = normalizeSettings({
     version: 2,
     widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
     capsule: { ...cur.capsule, ...obj(p.capsule) },
-    context: { ...cur.context, ...obj(p.context) },
+    context: mergedContext,
     display: { ...cur.display, ...obj(p.display) },
-    features: { ...cur.features, ...obj(p.features) }
+    features: mergedFeatures
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+/** Resets all settings to default values and saves back to storage. */
+export async function resetSettings(area) {
+  const defaults = normalizeSettings({});
+  await area.set({ [SETTINGS_KEY]: defaults });
+  return defaults;
 }
 
 /**

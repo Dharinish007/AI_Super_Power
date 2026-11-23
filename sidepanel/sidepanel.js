@@ -61,7 +61,15 @@ function normalizeSettings(raw) {
   const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
   const d = obj(r.display);
   const feat = obj(r.features);
-  const alertsVal = bool(feat.alerts, bool(obj(r.context).alerts, DEFAULT_FEATURES.alerts));
+  const ctx = obj(r.context);
+
+  // Synchronize alerts: if either explicitly defines a boolean, respect it; default to DEFAULT_FEATURES.alerts
+  let alertsVal = DEFAULT_FEATURES.alerts;
+  if (typeof feat.alerts === 'boolean') {
+    alertsVal = feat.alerts;
+  } else if (typeof ctx.alerts === 'boolean') {
+    alertsVal = ctx.alerts;
+  }
 
   return {
     version: 2,
@@ -90,16 +98,45 @@ async function readSettings(area) {
 async function writeSettings(area, patch) {
   const cur = await readSettings(area);
   const p = obj(patch);
+  const pContext = obj(p.context);
+  const pFeatures = obj(p.features);
+
+  // Keep alerts in sync across features.alerts and context.alerts
+  let syncedAlerts;
+  if (typeof pFeatures.alerts === 'boolean') {
+    syncedAlerts = pFeatures.alerts;
+  } else if (typeof pContext.alerts === 'boolean') {
+    syncedAlerts = pContext.alerts;
+  }
+
+  const mergedFeatures = {
+    ...cur.features,
+    ...pFeatures,
+    ...(syncedAlerts !== undefined ? { alerts: syncedAlerts } : {})
+  };
+  const mergedContext = {
+    ...cur.context,
+    ...pContext,
+    ...(syncedAlerts !== undefined ? { alerts: syncedAlerts } : {})
+  };
+
   const next = normalizeSettings({
     version: 2,
     widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
     capsule: { ...cur.capsule, ...obj(p.capsule) },
-    context: { ...cur.context, ...obj(p.context) },
+    context: mergedContext,
     display: { ...cur.display, ...obj(p.display) },
-    features: { ...cur.features, ...obj(p.features) }
+    features: mergedFeatures
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+/** Resets all settings to default values and saves back to storage. */
+async function resetSettings(area) {
+  const defaults = normalizeSettings({});
+  await area.set({ [SETTINGS_KEY]: defaults });
+  return defaults;
 }
 
 /**
@@ -209,7 +246,19 @@ function recordUsage(map, id, pct, now = Date.now(), limit = 200) {
 /** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
 function biggestMessages(messages, n = 5) {
   return (messages || [])
-    .map((m, i) => ({ turn: i + 1, role: m.role, tokens: m.tokens || 0, preview: m.preview || '' }))
+    .map((m, i) => {
+      const role = m.role || 'user';
+      const who = role === 'user' ? 'You' : (role === 'assistant' ? 'Assistant' : 'System');
+      const turn = m.turn ?? (i + 1);
+      return {
+        turn,
+        role,
+        label: `${who} (#${turn})`,
+        tokens: m.tokens || 0,
+        preview: m.preview || '',
+        element: m.element || null
+      };
+    })
     .filter(m => m.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, n);
@@ -325,7 +374,9 @@ function toWidgetState(s, opts = {}) {
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
-    biggest: biggestMessages(s.tokens?.contextMessages),
+    biggest: s.biggestItem ? [s.biggestItem] : biggestMessages(s.tokens?.contextMessages),
+    biggestItem: s.biggestItem || null,
+    messages: opts.messages || s.messages || s.observables?.messages || (s.tokens?.contextMessages || []),
     growth: growthSeries(s.tokens?.contextMessages),
     attachmentFiles: normalizeAttachments(s.observables?.attachmentFiles),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
@@ -2590,17 +2641,37 @@ function SettingsView(parent, { storage }) {
   const fields = () => ({ widgets: { context: { fields: CONTEXT_FIELDS.filter((_, i) => fieldBoxes[i].checked).map(f => f.key) } } });
   const fieldBoxes = CONTEXT_FIELDS.map(f => check(w, f.label, s => s.widgets.context.fields.includes(f.key), fields));
 
+  const f = group('Features');
+  check(f, 'Reset countdown (live updates every 60s)', s => s.features.countdown, v => ({ features: { countdown: v } }));
+  check(f, 'Threshold alerts at 80% with hysteresis', s => s.features.alerts, v => ({ features: { alerts: v }, context: { alerts: v } }));
+  check(f, 'Suggest new chat in drawer at 80%+ context', s => s.features.newChatSuggestion, v => ({ features: { newChatSuggestion: v } }));
+  check(f, 'Show biggest item in drawer', s => s.features.biggestItem, v => ({ features: { biggestItem: v } }));
+  check(f, 'Record usage history and sparkline', s => s.features.usageHistory, v => ({ features: { usageHistory: v } }));
+  check(f, 'Pre-send draft token estimate', s => s.features.preSendEstimate, v => ({ features: { preSendEstimate: v } }));
+  check(f, 'Checkpoint export to Markdown', s => s.features.checkpointExport, v => ({ features: { checkpointExport: v } }));
+
   const c = group('Capsules: one-click method');
   radio(c, 'method', 'ask-ai', 'Ask this AI (fills the chat box; you press Enter)', s => s.capsule.method, v => ({ capsule: { method: v } }));
   radio(c, 'method', 'quick', 'Quick (no AI): built from the page', s => s.capsule.method, v => ({ capsule: { method: v } }));
 
   const x = group('Context');
-  check(x, 'Alerts at 80% and 95% (on the Context widget)', s => s.context.alerts, v => ({ context: { alerts: v } }));
+  check(x, 'Alerts at 80% and 95% (on the Context widget)', s => s.context.alerts, v => ({ context: { alerts: v }, features: { alerts: v } }));
 
   const d = group('Display');
   for (const t of ['auto', 'dark', 'light']) radio(d, 'theme', t, `Theme: ${t}`, s => s.display.theme, v => ({ display: { theme: v } }));
   check(d, 'Compact numbers (61.3K)', s => s.display.compact, v => ({ display: { compact: v } }));
   check(d, 'Usage % next to chats in the sidebar', s => s.display.badges, v => ({ display: { badges: v } }));
+
+  const r = group('Reset');
+  const resetBtn = textButton(r, 'Reset all settings to defaults', async () => {
+    try {
+      const def = await resetSettings(storage);
+      for (const set of inputs) set(def);
+    } catch (err) {
+      console.warn('[Context Monitor] Reset settings failed', err);
+    }
+  });
+  resetBtn.style.marginTop = '4px';
 
   return { el, update(s) { for (const set of inputs) set(s); } };
 }

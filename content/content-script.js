@@ -2152,6 +2152,294 @@ function analyzeContext(input = {}) {
 }
 
 
+  // --- engine/export/types.js ---
+  /**
+ * Context Monitor - Chat Export Types and Contracts
+ *
+ * Defines the canonical normalized data model for conversation exports.
+ * Completely headless, DOM-free, and platform-agnostic.
+ *
+ * @typedef {'user'|'assistant'|'system'|'tool'} MessageRole
+ *
+ * @typedef {'paragraph'|'heading'|'code'|'table'|'list'|'blockquote'|'attachment'|'unknown'} BlockType
+ *
+ * @typedef {Object} ParagraphBlock
+ * @property {'paragraph'} type
+ * @property {string} text
+ *
+ * @typedef {Object} HeadingBlock
+ * @property {'heading'} type
+ * @property {1|2|3|4|5|6} level
+ * @property {string} text
+ *
+ * @typedef {Object} CodeBlock
+ * @property {'code'} type
+ * @property {string} code
+ * @property {string} [language]
+ * @property {string} [filename]
+ *
+ * @typedef {Object} TableBlock
+ * @property {'table'} type
+ * @property {string[]} headers
+ * @property {string[][]} rows
+ * @property {string} [caption]
+ *
+ * @typedef {Object} ListBlock
+ * @property {'list'} type
+ * @property {boolean} ordered
+ * @property {string[]} items
+ *
+ * @typedef {Object} BlockquoteBlock
+ * @property {'blockquote'} type
+ * @property {string} text
+ *
+ * @typedef {Object} AttachmentBlock
+ * @property {'attachment'} type
+ * @property {string} name
+ * @property {string} [mimeType]
+ * @property {string} [extractedText]
+ * @property {boolean} [hasUnknownContent]
+ *
+ * @typedef {Object} UnknownBlock
+ * @property {'unknown'} type
+ * @property {string} [rawType]
+ * @property {string} summary
+ * @property {string} [rawSnippet]
+ *
+ * @typedef {ParagraphBlock|HeadingBlock|CodeBlock|TableBlock|ListBlock|BlockquoteBlock|AttachmentBlock|UnknownBlock} Block
+ *
+ * @typedef {Object} Message
+ * @property {string} id
+ * @property {MessageRole} role
+ * @property {number|null} createdAt
+ * @property {string|null} [model]
+ * @property {Block[]} blocks
+ * @property {boolean} [isStreaming]
+ *
+ * @typedef {Object} ConversationExportData
+ * @property {string|null} conversationId
+ * @property {string} title
+ * @property {'Claude'|'Gemini'|'ChatGPT'} provider
+ * @property {string|null} model
+ * @property {'api'|'dom'} source
+ * @property {number} exportedAt
+ * @property {Message[]} messages
+ */
+
+/**
+ * Creates a ParagraphBlock.
+ * @param {string} text
+ * @returns {ParagraphBlock}
+ */
+function createParagraphBlock(text) {
+  return {
+    type: 'paragraph',
+    text: String(text || '')
+  };
+}
+
+/**
+ * Creates a HeadingBlock.
+ * @param {number} level
+ * @param {string} text
+ * @returns {HeadingBlock}
+ */
+function createHeadingBlock(level, text) {
+  const lvl = Math.max(1, Math.min(6, Math.round(Number(level) || 1)));
+  return {
+    type: 'heading',
+    level: /** @type {1|2|3|4|5|6} */ (lvl),
+    text: String(text || '').trim()
+  };
+}
+
+/**
+ * Creates a CodeBlock.
+ * @param {string} code
+ * @param {string} [language]
+ * @param {string} [filename]
+ * @returns {CodeBlock}
+ */
+function createCodeBlock(code, language = '', filename = '') {
+  return {
+    type: 'code',
+    code: String(code || ''),
+    language: language ? String(language).toLowerCase().trim() : undefined,
+    filename: filename ? String(filename).trim() : undefined
+  };
+}
+
+/**
+ * Creates a TableBlock.
+ * @param {string[]} headers
+ * @param {string[][]} rows
+ * @param {string} [caption]
+ * @returns {TableBlock}
+ */
+function createTableBlock(headers = [], rows = [], caption = '') {
+  const normHeaders = Array.isArray(headers) ? headers.map(h => String(h || '').trim()) : [];
+  const normRows = Array.isArray(rows)
+    ? rows.map(r => (Array.isArray(r) ? r.map(c => String(c || '').trim()) : []))
+    : [];
+  return {
+    type: 'table',
+    headers: normHeaders,
+    rows: normRows,
+    caption: caption ? String(caption).trim() : undefined
+  };
+}
+
+/**
+ * Creates a ListBlock.
+ * @param {string[]} items
+ * @param {boolean} [ordered=false]
+ * @returns {ListBlock}
+ */
+function createListBlock(items = [], ordered = false) {
+  const normItems = Array.isArray(items) ? items.map(i => String(i || '').trim()) : [];
+  return {
+    type: 'list',
+    ordered: Boolean(ordered),
+    items: normItems
+  };
+}
+
+/**
+ * Creates a BlockquoteBlock.
+ * @param {string} text
+ * @returns {BlockquoteBlock}
+ */
+function createBlockquoteBlock(text) {
+  return {
+    type: 'blockquote',
+    text: String(text || '').trim()
+  };
+}
+
+/**
+ * Creates an AttachmentBlock.
+ * @param {string} name
+ * @param {string} [extractedText]
+ * @param {string} [mimeType]
+ * @param {boolean} [hasUnknownContent=false]
+ * @returns {AttachmentBlock}
+ */
+function createAttachmentBlock(name, extractedText = '', mimeType = '', hasUnknownContent = false) {
+  return {
+    type: 'attachment',
+    name: String(name || 'attachment'),
+    mimeType: mimeType ? String(mimeType) : undefined,
+    extractedText: extractedText ? String(extractedText) : undefined,
+    hasUnknownContent: Boolean(hasUnknownContent)
+  };
+}
+
+/**
+ * Creates an UnknownBlock. Ensures content is NEVER silently dropped.
+ * @param {string} summary Human-readable description
+ * @param {string} [rawType] Original raw tag or discriminator
+ * @param {string} [rawSnippet] Truncated sample text/code
+ * @returns {UnknownBlock}
+ */
+function createUnknownBlock(summary, rawType = 'unknown', rawSnippet = '') {
+  return {
+    type: 'unknown',
+    summary: String(summary || 'Unsupported content block'),
+    rawType: rawType ? String(rawType) : 'unknown',
+    rawSnippet: rawSnippet ? String(rawSnippet).slice(0, 500) : undefined
+  };
+}
+
+/**
+ * Creates a normalized Message.
+ * @param {Object} options
+ * @param {string} options.id
+ * @param {MessageRole} options.role
+ * @param {Block[]} [options.blocks]
+ * @param {number|null} [options.createdAt]
+ * @param {string|null} [options.model]
+ * @param {boolean} [options.isStreaming]
+ * @returns {Message}
+ */
+function createMessage(options) {
+  return {
+    id: String(options?.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+    role: options?.role || 'assistant',
+    createdAt: typeof options?.createdAt === 'number' ? options.createdAt : null,
+    model: options?.model || null,
+    blocks: Array.isArray(options?.blocks) ? options.blocks : [],
+    isStreaming: Boolean(options?.isStreaming)
+  };
+}
+
+/**
+ * Creates a normalized ConversationExportData container.
+ * @param {Object} options
+ * @param {string|null} [options.conversationId]
+ * @param {string} [options.title]
+ * @param {'Claude'|'Gemini'|'ChatGPT'} [options.provider]
+ * @param {string|null} [options.model]
+ * @param {'api'|'dom'} [options.source]
+ * @param {number} [options.exportedAt]
+ * @param {Message[]} [options.messages]
+ * @returns {ConversationExportData}
+ */
+function createConversationExportData(options = {}) {
+  return {
+    conversationId: options.conversationId || null,
+    title: String(options.title || 'Conversation Export').trim(),
+    provider: options.provider || 'Claude',
+    model: options.model || null,
+    source: options.source === 'dom' ? 'dom' : 'api',
+    exportedAt: typeof options.exportedAt === 'number' ? options.exportedAt : Date.now(),
+    messages: Array.isArray(options.messages) ? options.messages : []
+  };
+}
+
+/**
+ * Validates that an object conforms to ConversationExportData shape.
+ * @param {unknown} data
+ * @returns {boolean}
+ */
+function isConversationExportData(data) {
+  if (!data || typeof data !== 'object') return false;
+  const d = /** @type {ConversationExportData} */ (data);
+  return (
+    typeof d.title === 'string' &&
+    typeof d.provider === 'string' &&
+    (d.source === 'api' || d.source === 'dom') &&
+    typeof d.exportedAt === 'number' &&
+    Array.isArray(d.messages)
+  );
+}
+
+/**
+ * Counts total blocks and unsupported blocks in export data.
+ * @param {ConversationExportData} data
+ * @returns {{ totalBlocks: number, unknownBlocks: number, tableCount: number, messageCount: number }}
+ */
+function summarizeExportData(data) {
+  let totalBlocks = 0;
+  let unknownBlocks = 0;
+  let tableCount = 0;
+  const messages = Array.isArray(data?.messages) ? data.messages : [];
+  for (const m of messages) {
+    const blocks = Array.isArray(m?.blocks) ? m.blocks : [];
+    totalBlocks += blocks.length;
+    for (const b of blocks) {
+      if (b.type === 'unknown') unknownBlocks++;
+      if (b.type === 'table') tableCount++;
+    }
+  }
+  return {
+    totalBlocks,
+    unknownBlocks,
+    tableCount,
+    messageCount: messages.length
+  };
+}
+
+
   // --- network/request-observer.js ---
   /**
  * ChatGPT Context Monitor - Request & Network Observer Module
@@ -4095,7 +4383,15 @@ function normalizeSettings(raw) {
   const fields = Array.isArray(wc.fields) ? [...new Set(wc.fields.filter(k => keys.includes(k)))] : [...DEFAULT_SETTINGS.widgets.context.fields];
   const d = obj(r.display);
   const feat = obj(r.features);
-  const alertsVal = bool(feat.alerts, bool(obj(r.context).alerts, DEFAULT_FEATURES.alerts));
+  const ctx = obj(r.context);
+
+  // Synchronize alerts: if either explicitly defines a boolean, respect it; default to DEFAULT_FEATURES.alerts
+  let alertsVal = DEFAULT_FEATURES.alerts;
+  if (typeof feat.alerts === 'boolean') {
+    alertsVal = feat.alerts;
+  } else if (typeof ctx.alerts === 'boolean') {
+    alertsVal = ctx.alerts;
+  }
 
   return {
     version: 2,
@@ -4124,16 +4420,45 @@ async function readSettings(area) {
 async function writeSettings(area, patch) {
   const cur = await readSettings(area);
   const p = obj(patch);
+  const pContext = obj(p.context);
+  const pFeatures = obj(p.features);
+
+  // Keep alerts in sync across features.alerts and context.alerts
+  let syncedAlerts;
+  if (typeof pFeatures.alerts === 'boolean') {
+    syncedAlerts = pFeatures.alerts;
+  } else if (typeof pContext.alerts === 'boolean') {
+    syncedAlerts = pContext.alerts;
+  }
+
+  const mergedFeatures = {
+    ...cur.features,
+    ...pFeatures,
+    ...(syncedAlerts !== undefined ? { alerts: syncedAlerts } : {})
+  };
+  const mergedContext = {
+    ...cur.context,
+    ...pContext,
+    ...(syncedAlerts !== undefined ? { alerts: syncedAlerts } : {})
+  };
+
   const next = normalizeSettings({
     version: 2,
     widgets: { context: { ...cur.widgets.context, ...obj(obj(p.widgets).context) }, capsule: { ...cur.widgets.capsule, ...obj(obj(p.widgets).capsule) } },
     capsule: { ...cur.capsule, ...obj(p.capsule) },
-    context: { ...cur.context, ...obj(p.context) },
+    context: mergedContext,
     display: { ...cur.display, ...obj(p.display) },
-    features: { ...cur.features, ...obj(p.features) }
+    features: mergedFeatures
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
+}
+
+/** Resets all settings to default values and saves back to storage. */
+async function resetSettings(area) {
+  const defaults = normalizeSettings({});
+  await area.set({ [SETTINGS_KEY]: defaults });
+  return defaults;
 }
 
 /**
@@ -4243,7 +4568,19 @@ function recordUsage(map, id, pct, now = Date.now(), limit = 200) {
 /** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
 function biggestMessages(messages, n = 5) {
   return (messages || [])
-    .map((m, i) => ({ turn: i + 1, role: m.role, tokens: m.tokens || 0, preview: m.preview || '' }))
+    .map((m, i) => {
+      const role = m.role || 'user';
+      const who = role === 'user' ? 'You' : (role === 'assistant' ? 'Assistant' : 'System');
+      const turn = m.turn ?? (i + 1);
+      return {
+        turn,
+        role,
+        label: `${who} (#${turn})`,
+        tokens: m.tokens || 0,
+        preview: m.preview || '',
+        element: m.element || null
+      };
+    })
     .filter(m => m.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, n);
@@ -4359,7 +4696,9 @@ function toWidgetState(s, opts = {}) {
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
-    biggest: biggestMessages(s.tokens?.contextMessages),
+    biggest: s.biggestItem ? [s.biggestItem] : biggestMessages(s.tokens?.contextMessages),
+    biggestItem: s.biggestItem || null,
+    messages: opts.messages || s.messages || s.observables?.messages || (s.tokens?.contextMessages || []),
     growth: growthSeries(s.tokens?.contextMessages),
     attachmentFiles: normalizeAttachments(s.observables?.attachmentFiles),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },
@@ -5475,8 +5814,9 @@ function extractBiggestItem(conversationData = {}) {
  */
 function formatBiggestItemDisplay(item, formatTokensFn) {
   if (!item || !item.tokens) return null;
+  const label = item.label || `${item.role === 'user' ? 'You' : (item.role === 'assistant' ? 'Assistant' : 'Item')} (#${item.turn || 1})`;
   const tokenStr = formatTokensFn ? formatTokensFn(item.tokens) : `${Math.round(item.tokens / 100) / 10}K`;
-  const text = `${item.label} · ~${tokenStr}`;
+  const text = `${label} · ~${tokenStr}`;
   const sub = item.visibleOnly ? 'visible messages only' : '';
   return {
     text,
@@ -5840,6 +6180,549 @@ function downloadMarkdownFile(markdown, filename = 'context-checkpoint.md') {
     return true;
   } catch (_) {
     return false;
+  }
+}
+
+
+  // --- content/export/dom-block-parser.js ---
+  /**
+ * Context Monitor - DOM Block Parser
+ *
+ * Traverses on-page DOM elements to produce normalized Block[] structures.
+ * Strips UI chrome and maps semantic tags (headings, code, tables, lists, quotes)
+ * while preserving unrecognized elements as UnknownBlock.
+ */
+
+
+
+/**
+ * Selectors for UI chrome that should be ignored during parsing.
+ */
+const UI_CHROME_SELECTORS = [
+  'button',
+  '.sr-only',
+  '[aria-hidden="true"]',
+  '[data-testid*="copy"]',
+  '[data-testid*="edit"]',
+  '[data-testid*="thumbs"]',
+  '.text-xs',
+  'div[class*="toolbar"]',
+  'div[class*="feedback"]'
+];
+
+class DOMBlockParser {
+  /**
+   * Cleans a cloned node by removing UI chrome.
+   * @param {Element} element
+   * @returns {Element} Cloned and cleaned element
+   */
+  static cleanElement(element) {
+    if (!element || typeof element.cloneNode !== 'function') return element;
+    const clone = element.cloneNode(true);
+    for (const sel of UI_CHROME_SELECTORS) {
+      if (typeof clone.querySelectorAll === 'function') {
+        const matches = clone.querySelectorAll(sel);
+        for (const m of matches) {
+          // Keep button text if it represents an attachment link, otherwise remove
+          if (m.tagName.toLowerCase() === 'button' && m.getAttribute('data-testid')?.includes('attachment')) {
+            continue;
+          }
+          m.remove();
+        }
+      }
+    }
+    return clone;
+  }
+
+  /**
+   * Extracts language from pre/code class (e.g. "language-python" -> "python").
+   * @param {Element} pre
+   * @param {Element|null} code
+   * @returns {string}
+   */
+  static extractLanguage(pre, code) {
+    const cls = `${pre?.className || ''} ${code?.className || ''}`;
+    const m = cls.match(/\b(?:language|lang)-([a-zA-Z0-9_-]+)\b/i);
+    if (m) return m[1].toLowerCase();
+    const dataLang = code?.getAttribute?.('data-language') || pre?.getAttribute?.('data-language');
+    if (dataLang) return String(dataLang).toLowerCase();
+    return '';
+  }
+
+  /**
+   * Parses an HTML table element into TableBlock.
+   * @param {Element} tableEl
+   * @param {string} [caption]
+   * @returns {import('../../engine/export/types.js').TableBlock}
+   */
+  static parseTable(tableEl, caption = '') {
+    const headers = [];
+    const rows = [];
+
+    const trs = tableEl.querySelectorAll ? Array.from(tableEl.querySelectorAll('tr')) : [];
+
+    for (let idx = 0; idx < trs.length; idx++) {
+      const tr = trs[idx];
+      const ths = tr.querySelectorAll ? Array.from(tr.querySelectorAll('th')) : [];
+      const tds = tr.querySelectorAll ? Array.from(tr.querySelectorAll('td')) : [];
+
+      if (ths.length > 0 && headers.length === 0) {
+        headers.push(...ths.map(th => (th.textContent || '').trim()));
+      } else {
+        const cells = (tds.length > 0 ? tds : ths).map(td => (td.textContent || '').trim());
+        if (cells.length > 0) {
+          rows.push(cells);
+        }
+      }
+    }
+
+    // If still no headers but rows exist, promote first row to headers
+    if (headers.length === 0 && rows.length > 0) {
+      headers.push(...rows.shift());
+    }
+
+    const tableCaption = caption || (tableEl.querySelector && tableEl.querySelector('caption')?.textContent?.trim()) || '';
+    return createTableBlock(headers, rows, tableCaption);
+  }
+
+  /**
+   * Parses an HTML list element into ListBlock.
+   * @param {Element} listEl
+   * @returns {import('../../engine/export/types.js').ListBlock}
+   */
+  static parseList(listEl) {
+    const isOrdered = listEl.tagName.toLowerCase() === 'ol';
+    const items = [];
+    const lis = listEl.querySelectorAll(':scope > li, li');
+    for (const li of lis) {
+      const txt = (li.textContent || '').trim();
+      if (txt) items.push(txt);
+    }
+    return createListBlock(items, isOrdered);
+  }
+
+  /**
+   * Parses an element into an array of structured Block objects.
+   * @param {Element} rootElement
+   * @returns {import('../../engine/export/types.js').Block[]}
+   */
+  static parseElement(rootElement) {
+    if (!rootElement) return [];
+    const cleaned = this.cleanElement(rootElement);
+    const blocks = [];
+    let lastHeading = '';
+
+    // Walk direct or meaningful child nodes
+    const children = cleaned.children && cleaned.children.length > 0
+      ? Array.from(cleaned.children)
+      : [cleaned];
+
+    for (const child of children) {
+      const tag = child.tagName ? child.tagName.toLowerCase() : '';
+
+      // 1. Headings (H1 to H6)
+      if (/^h[1-6]$/.test(tag)) {
+        const level = parseInt(tag[1], 10);
+        const text = (child.textContent || '').trim();
+        if (text) {
+          lastHeading = text;
+          blocks.push(createHeadingBlock(level, text));
+        }
+        continue;
+      }
+
+      // 2. Code blocks (<pre>)
+      if (tag === 'pre') {
+        const codeEl = child.querySelector('code');
+        const lang = this.extractLanguage(child, codeEl);
+        const codeText = (codeEl || child).textContent || '';
+        blocks.push(createCodeBlock(codeText, lang));
+        continue;
+      }
+
+      // 3. Tables (<table>)
+      if (tag === 'table' || child.querySelector('table')) {
+        const tableEl = tag === 'table' ? child : child.querySelector('table');
+        if (tableEl) {
+          blocks.push(this.parseTable(tableEl, lastHeading));
+          continue;
+        }
+      }
+
+      // 4. Lists (<ol>, <ul>)
+      if (tag === 'ol' || tag === 'ul') {
+        blocks.push(this.parseList(child));
+        continue;
+      }
+
+      // 5. Blockquotes (<blockquote>)
+      if (tag === 'blockquote') {
+        const text = (child.textContent || '').trim();
+        if (text) blocks.push(createBlockquoteBlock(text));
+        continue;
+      }
+
+      // 6. Attachments & Files
+      if (child.getAttribute('data-testid')?.includes('attachment') || child.classList?.contains('attachment')) {
+        const name = (child.textContent || '').trim() || 'Attachment';
+        blocks.push(createAttachmentBlock(name));
+        continue;
+      }
+
+      // 7. Unknown / Unsupported Custom Widgets (Canvas, SVG chart, Artifact embed, iframe)
+      if (
+        tag === 'canvas' ||
+        tag === 'iframe' ||
+        child.querySelector('canvas, iframe') ||
+        child.getAttribute('data-testid')?.includes('artifact') ||
+        child.className?.includes?.('artifact') ||
+        child.className?.includes?.('unsupported')
+      ) {
+        const summary = child.getAttribute('data-testid') || child.className || tag || 'Interactive widget';
+        blocks.push(createUnknownBlock(`Interactive widget: ${summary}`, tag, (child.textContent || '').slice(0, 200)));
+        continue;
+      }
+
+      // 8. Paragraphs (<p>) or generic text wrappers
+      if (tag === 'p' || tag === 'div' || tag === 'span') {
+        // If it contains nested blocks, inspect them
+        if (child.querySelector('pre, table, ol, ul, blockquote, h1, h2, h3, h4, h5, h6')) {
+          blocks.push(...this.parseElement(child));
+        } else {
+          const text = (child.textContent || '').trim();
+          if (text) blocks.push(createParagraphBlock(text));
+        }
+        continue;
+      }
+
+      // Fallback for any other node with text
+      const fallbackText = (child.textContent || '').trim();
+      if (fallbackText) {
+        blocks.push(createParagraphBlock(fallbackText));
+      }
+    }
+
+    return blocks;
+  }
+}
+
+
+  // --- content/export/claude-message-parser.js ---
+  /**
+ * Context Monitor - Claude Message Parser
+ *
+ * Extracts and normalizes Claude chat conversations into ConversationExportData.
+ * Supports:
+ * 1. Authoritative API payload (primary): traverses active branch from leaf to root,
+ *    parses Markdown blocks (headings, code fences, GFM tables, lists, quotes),
+ *    and maps attachments/tools.
+ * 2. DOM fallback: walks on-page turn elements using DOMBlockParser.
+ *
+ * Guarantees:
+ * - Active branch traversal: discarded regenerations are excluded.
+ * - Zero silent drops: unsupported items map to UnknownBlock with descriptive summaries.
+ */
+
+
+
+
+/**
+ * Parses markdown text into an array of structured Block objects.
+ * Handles headings, code blocks, tables, lists, blockquotes, and paragraphs.
+ * @param {string} markdown
+ * @param {string} [initialHeading='']
+ * @returns {import('../../engine/export/types.js').Block[]}
+ */
+function parseMarkdownBlocks(markdown = '', initialHeading = '') {
+  if (!markdown || !markdown.trim()) return [];
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let currentHeading = initialHeading;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 1. Fenced Code Block (``` or ````)
+    const codeMatch = line.match(/^(`{3,})(.*)$/);
+    if (codeMatch) {
+      const fence = codeMatch[1];
+      const lang = codeMatch[2].trim();
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith(fence)) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // consume closing fence
+      blocks.push(createCodeBlock(codeLines.join('\n'), lang));
+      continue;
+    }
+
+    // 2. Headings (# Heading)
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const text = headingMatch[2].trim();
+      currentHeading = text;
+      blocks.push(createHeadingBlock(level, text));
+      i++;
+      continue;
+    }
+
+    // 3. GFM Tables (| Col 1 | Col 2 |)
+    if (line.trim().startsWith('|') && i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].includes('-')) {
+      const tableLines = [];
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        tableLines.push(lines[i]);
+        i++;
+      }
+      if (tableLines.length >= 2) {
+        const splitRow = (l) =>
+          l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+        const headers = splitRow(tableLines[0]);
+        // line 1 is separator |---|---|
+        const rows = tableLines.slice(2).map(splitRow);
+        blocks.push(createTableBlock(headers, rows, currentHeading));
+        continue;
+      }
+    }
+
+    // 4. Blockquotes (> quote)
+    if (line.trim().startsWith('>')) {
+      const quoteLines = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ''));
+        i++;
+      }
+      blocks.push(createBlockquoteBlock(quoteLines.join('\n')));
+      continue;
+    }
+
+    // 5. Lists (unordered: -, *, + or ordered: 1., 2.)
+    const ulMatch = line.match(/^(\s*)([-*+])\s+(.+)$/);
+    const olMatch = line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+    if (ulMatch || olMatch) {
+      const isOrdered = Boolean(olMatch);
+      const items = [];
+      while (i < lines.length) {
+        const curUl = lines[i].match(/^(\s*)([-*+])\s+(.+)$/);
+        const curOl = lines[i].match(/^(\s*)(\d+)\.\s+(.+)$/);
+        if (isOrdered && curOl) {
+          items.push(curOl[3].trim());
+          i++;
+        } else if (!isOrdered && curUl) {
+          items.push(curUl[3].trim());
+          i++;
+        } else if (lines[i].trim() === '') {
+          i++;
+          break;
+        } else {
+          break;
+        }
+      }
+      if (items.length > 0) {
+        blocks.push(createListBlock(items, isOrdered));
+        continue;
+      }
+    }
+
+    // 6. Paragraphs (text chunks separated by empty lines)
+    if (line.trim()) {
+      const paraLines = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() &&
+        !lines[i].startsWith('```') &&
+        !lines[i].match(/^#{1,6}\s+/) &&
+        !lines[i].trim().startsWith('>') &&
+        !lines[i].match(/^(\s*)([-*+]|\d+\.)\s+/) &&
+        !(lines[i].trim().startsWith('|') && i + 1 < lines.length && lines[i + 1].includes('-'))
+      ) {
+        paraLines.push(lines[i]);
+        i++;
+      }
+      const paraText = paraLines.join('\n').trim();
+      if (paraText) {
+        blocks.push(createParagraphBlock(paraText));
+      }
+      continue;
+    }
+
+    i++; // Skip empty lines
+  }
+
+  return blocks;
+}
+
+class ClaudeMessageParser {
+  /**
+   * Traverses active branch from current_leaf_message_uuid back to root.
+   * Excludes abandoned branches resulting from regenerations or edits.
+   * @param {Object} conv
+   * @returns {Array<Object>} In-order active message turns
+   */
+  static extractActiveChain(conv) {
+    const all = Array.isArray(conv?.chat_messages) ? conv.chat_messages : [];
+    const byId = new Map(all.map(m => [m.uuid, m]));
+    const chain = [];
+
+    if (conv?.current_leaf_message_uuid && byId.has(conv.current_leaf_message_uuid)) {
+      const seen = new Set();
+      for (let m = byId.get(conv.current_leaf_message_uuid); m && !seen.has(m.uuid); m = byId.get(m.parent_message_uuid)) {
+        seen.add(m.uuid);
+        chain.unshift(m);
+      }
+    } else {
+      chain.push(...[...all].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)));
+    }
+    return chain;
+  }
+
+  /**
+   * Parses an authoritative Claude conversation API JSON response.
+   * @param {Object} conv Raw conversation JSON from /api/organizations/{org}/chat_conversations/{id}
+   * @param {Object} [metadata]
+   * @param {string} [metadata.model]
+   * @param {string} [metadata.title]
+   * @returns {import('../../engine/export/types.js').ConversationExportData}
+   */
+  static parseFromApi(conv, metadata = {}) {
+    const chain = this.extractActiveChain(conv);
+    const messages = [];
+
+    for (const m of chain) {
+      const role = m.sender === 'human' ? 'user' : 'assistant';
+      const blocks = [];
+      const createdAt = m.created_at ? Date.parse(m.created_at) || null : null;
+
+      // 1. Content blocks
+      if (Array.isArray(m.content) && m.content.length > 0) {
+        for (const part of m.content) {
+          if (part.type === 'text' && part.text) {
+            blocks.push(...parseMarkdownBlocks(part.text));
+          } else if (part.type === 'tool_use') {
+            blocks.push(createUnknownBlock(
+              `Tool call: ${part.name || 'tool'}`,
+              'tool_use',
+              JSON.stringify(part.input ?? {})
+            ));
+          } else if (part.type === 'tool_result') {
+            const content = Array.isArray(part.content)
+              ? part.content.map(x => x.text || '').join('\n')
+              : String(part.content ?? '');
+            if (content) {
+              blocks.push(createParagraphBlock(`[Tool Output]:\n${content}`));
+            }
+          } else if (part.type === 'thinking') {
+            // Internal thinking is skipped by backend in future turns;
+            // if present in leaf, tag as collapsible thought or skip
+            continue;
+          } else {
+            // Any other block type: NEVER silently drop!
+            blocks.push(createUnknownBlock(
+              `Unsupported block type: ${part.type || 'unknown'}`,
+              part.type,
+              JSON.stringify(part)
+            ));
+          }
+        }
+      } else if (m.text) {
+        blocks.push(...parseMarkdownBlocks(m.text));
+      }
+
+      // 2. Attachments
+      const attachments = m.attachments || [];
+      for (const a of attachments) {
+        blocks.push(createAttachmentBlock(
+          a.file_name || 'attachment',
+          a.extracted_content || '',
+          a.file_type || ''
+        ));
+      }
+
+      // 3. Stored files
+      const storedFiles = [...(m.files || []), ...(m.files_v2 || [])];
+      for (const f of storedFiles) {
+        blocks.push(createAttachmentBlock(
+          f.file_name || 'file',
+          '',
+          f.file_kind || 'file',
+          true
+        ));
+      }
+
+      if (blocks.length > 0) {
+        messages.push(createMessage({
+          id: m.uuid,
+          role,
+          createdAt,
+          blocks,
+          isStreaming: false
+        }));
+      }
+    }
+
+    const title = conv?.name || conv?.title || metadata.title || 'Claude Conversation';
+    const model = conv?.model || metadata.model || null;
+
+    return createConversationExportData({
+      conversationId: conv?.uuid || null,
+      title,
+      provider: 'Claude',
+      model,
+      source: 'api',
+      exportedAt: Date.now(),
+      messages
+    });
+  }
+
+  /**
+   * Fallback parser extracting conversation directly from Claude DOM elements.
+   * @param {Document|Element} doc
+   * @param {Object} [metadata]
+   * @returns {import('../../engine/export/types.js').ConversationExportData}
+   */
+  static parseFromDom(doc, metadata = {}) {
+    const messages = [];
+    if (!doc || typeof doc.querySelectorAll !== 'function') {
+      return createConversationExportData({
+        title: metadata.title || 'Claude Conversation',
+        provider: 'Claude',
+        source: 'dom',
+        messages: []
+      });
+    }
+
+    const turns = Array.from(doc.querySelectorAll('[data-testid="user-message"], .font-claude-response, .font-claude-message'));
+
+    for (let i = 0; i < turns.length; i++) {
+      const el = turns[i];
+      const isUser = el.matches && (el.matches('[data-testid="user-message"]') || Boolean(el.closest('[data-testid="user-message"]')));
+      const role = isUser ? 'user' : 'assistant';
+      const blocks = DOMBlockParser.parseElement(el);
+      const isStreaming = Boolean(el.closest && el.closest('[data-is-streaming="true"]'));
+
+      if (blocks.length > 0) {
+        messages.push(createMessage({
+          id: `claude-dom-${i}-${role}`,
+          role,
+          createdAt: null,
+          blocks,
+          isStreaming
+        }));
+      }
+    }
+
+    return createConversationExportData({
+      conversationId: metadata.conversationId || null,
+      title: metadata.title || (typeof document !== 'undefined' ? document.title : 'Claude Conversation'),
+      provider: 'Claude',
+      model: metadata.model || null,
+      source: 'dom',
+      exportedAt: Date.now(),
+      messages
+    });
   }
 }
 
@@ -6639,9 +7522,11 @@ class StripComponent {
 
     // Developer view (hidden by default behind gear icon)
     this.dDev = h('div', 'dev-view hide', this.drawer);
+    this.dExportRow = h('div', 'export-row hide', this.dDev);
+    this.dExportBtn = textButton(this.dExportRow, 'Export Checkpoint (MD)', () => this._exportCheckpoint());
+    this.dExportBtn.classList.add('btn-checkpoint-export');
     h('div', 'sec-title', this.dDev, 'Diagnostics');
     this.dDevContent = h('div', null, this.dDev);
-    this.dExportBtn = textButton(this.dDevContent, 'Export Checkpoint (MD)', () => this._exportCheckpoint());
 
     this.dGear.b.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -6794,6 +7679,8 @@ class StripComponent {
     this.stripLeft.textContent = '';
     this.dUsage.textContent = '';
     let hasUsageDetails = false;
+    let primaryResetTs = null;
+    let primaryResetEl = null;
 
     for (const r of rows) {
       const uRow = h('div', 'u-row', this.stripLeft);
@@ -6832,8 +7719,12 @@ class StripComponent {
         if (resetStr) {
           const rReset = h('span', 'u-reset', uRow, resetStr);
           if (data.features?.countdown !== false) {
-            this._activeResetEl = rReset;
-            this._countdown.start(r.resetsAt);
+            const rTs = typeof r.resetsAt === 'number' ? (r.resetsAt < 1e12 ? r.resetsAt * 1000 : r.resetsAt) : Date.parse(r.resetsAt);
+            const curPrimaryTs = typeof primaryResetTs === 'number' ? (primaryResetTs < 1e12 ? primaryResetTs * 1000 : primaryResetTs) : (primaryResetTs ? Date.parse(primaryResetTs) : null);
+            if (!primaryResetTs || (rTs && curPrimaryTs && rTs < curPrimaryTs)) {
+              primaryResetTs = r.resetsAt;
+              primaryResetEl = rReset;
+            }
           }
         }
 
@@ -6853,6 +7744,13 @@ class StripComponent {
       }
     }
     show(this.dUsage, hasUsageDetails);
+
+    if (primaryResetTs && primaryResetEl && data.features?.countdown !== false) {
+      this._activeResetEl = primaryResetEl;
+      this._countdown.start(primaryResetTs);
+    } else {
+      this._countdown.stop();
+    }
 
     // -------------------------------------------------------------------------
     // 2. Render Right Column: Msgs Left & Context Ring
@@ -6971,7 +7869,8 @@ class StripComponent {
     // Biggest item
     const big = data.biggest;
     this._currentBiggest = big;
-    if (big && typeof big.tokens === 'number' && big.tokens > 0) {
+    const showBiggest = (data.features?.biggestItem ?? true) && big && typeof big.tokens === 'number' && big.tokens > 0;
+    if (showBiggest) {
       const disp = formatBiggestItemDisplay(big, formatTokens);
       if (disp) {
         this.dBigVal.textContent = '';
@@ -6991,7 +7890,7 @@ class StripComponent {
     // "Consider a new chat" line in drawer (at 80%+ context, 85%+ if estimated)
     const ctxPct = (ringState === 'A' || ringState === 'B') && ringLimit
       ? Math.round((used / ringLimit) * 100)
-      : null;
+      : (typeof data.percentage === 'number' && Number.isFinite(data.percentage) ? Math.round(data.percentage) : null);
     const isEst = isEstCtx || data.context?.source === 'estimated';
     const showSuggest = shouldShowNewChatSuggestion(ctxPct, isEst ? 'estimated' : 'measured', data.features?.newChatSuggestion ?? true);
     show(this.dNewChatRow, showSuggest);
@@ -7008,6 +7907,9 @@ class StripComponent {
     } else {
       show(this.dSparklineBox, false);
     }
+
+    // Checkpoint export button in drawer diagnostics
+    show(this.dExportRow, Boolean(data.features?.checkpointExport));
   }
 
   setDraftEstimate(tokens) {
@@ -7166,7 +8068,9 @@ function claudeAdapter(viewState = {}, _settings = {}) {
         assistant: viewState.stats?.assistant,
         system: viewState.stats?.hidden
       },
-      biggest: viewState.biggest?.[0],
+      biggest: viewState.biggestItem || viewState.biggest?.[0],
+      messages: viewState.messages || [],
+      title: viewState.title || (viewState.model ? `${viewState.model} Chat` : 'Claude Chat'),
       model: viewState.model,
       modelFamily: viewState.modelFamily
     };
@@ -7254,7 +8158,9 @@ function geminiAdapter(viewState = {}, _settings = {}) {
         assistant: viewState.stats?.assistant,
         system: viewState.stats?.hidden
       },
-      biggest: viewState.biggest?.[0],
+      biggest: viewState.biggestItem || viewState.biggest?.[0],
+      messages: viewState.messages || [],
+      title: viewState.title || (viewState.model ? `${viewState.model} Chat` : 'Gemini Chat'),
       model: viewState.model,
       modelFamily: viewState.modelFamily
     };
@@ -7333,7 +8239,9 @@ function chatgptAdapter(viewState = {}, settings = {}) {
         assistant: viewState.stats?.assistant,
         system: viewState.stats?.hidden
       },
-      biggest: viewState.biggest?.[0],
+      biggest: viewState.biggestItem || viewState.biggest?.[0],
+      messages: viewState.messages || [],
+      title: viewState.title || (viewState.model ? `${viewState.model} Chat` : 'ChatGPT Chat'),
       model: viewState.model,
       modelFamily: viewState.modelFamily
     };
@@ -7521,6 +8429,7 @@ class Widgets {
       toastFn: (msg) => this.stripComponent?.showToast(msg, 4000)
     });
     this.preSendEstimator = new PreSendEstimator({
+      tokenizer: (text) => (typeof this.adapter.countTokens === 'function' ? this.adapter.countTokens(text) : Math.ceil((text || '').length / 4)),
       onEstimate: (tokens) => this.stripComponent?.setDraftEstimate(tokens)
     });
     this._history = [];
@@ -7555,6 +8464,7 @@ class Widgets {
         if (area !== 'local' || !changes[SETTINGS_KEY] || !this.glance) return;
         this.settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
         this._settingsFresh = true;
+        this._ensureGlanceMounted();
         this._paintBadges();
         this._render();
       });
@@ -9138,7 +10048,7 @@ class ContentScriptCoordinator {
 
       // 10. Update in-page floating HUD
       const tRender = now();
-      this.showState(toWidgetState(contextState, { provider: 'ChatGPT' }));
+      this.showState(toWidgetState(contextState, { provider: 'ChatGPT', messages: effectiveMessages }));
       this.perf.record('renderMs', now() - tRender);
       this.perf.record('passMs', now() - tPass);
       // Update latency: from the change on the page / stream chunk to the widget showing it
@@ -9691,6 +10601,80 @@ const ClaudeProvider = {
       rawMessages: all.length, // Diagnostics: saved turns before normalization (spots a format change)
       attachments: { count: files, files: fileList, estimatedTokens: 0, hasUnknown: unknownFiles > 0 }
     };
+  },
+
+  /**
+   * Computes the rolling 5-hour session window and estimated utilization on Free plans.
+   * Rolling window rule: 5-hour timer starts from the first prompt sent within the window.
+   */
+  resolveSessionWindow(messages = [], model = null, now = Date.now(), storedWindow = null) {
+    const WINDOW_MS = 5 * 3600 * 1000;
+    const userTurns = messages.filter(m => m.role === 'user');
+    const userTurnsWithTime = userTurns.filter(m => m.createdAt && m.createdAt <= now);
+    const recentTurns = userTurnsWithTime.filter(m => m.createdAt > now - WINDOW_MS);
+
+    let windowStart = null;
+    if (storedWindow?.startedAt && (now - storedWindow.startedAt < WINDOW_MS)) {
+      windowStart = storedWindow.startedAt;
+    }
+
+    if (recentTurns.length > 0) {
+      const earliestRecent = Math.min(...recentTurns.map(t => t.createdAt));
+      windowStart = windowStart ? Math.min(windowStart, earliestRecent) : earliestRecent;
+    }
+
+    if (!windowStart && userTurns.length > 0) {
+      windowStart = now;
+    }
+
+    if (!windowStart) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        window: null
+      };
+    }
+
+    const resetsAt = windowStart + WINDOW_MS;
+    if (now >= resetsAt) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        window: null
+      };
+    }
+
+    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
+    const tokensInWindow = messages
+      .filter(m => (!m.createdAt || m.createdAt >= windowStart))
+      .reduce((sum, m) => sum + (m.tokens || 0), 0);
+
+    const modelKey = this.modelKey(model) || '';
+    const isHaiku = modelKey.includes('haiku');
+    const isSonnet = modelKey.includes('sonnet');
+    const maxTurns = isHaiku ? 45 : isSonnet ? 20 : 30;
+    const maxTokens = isHaiku ? 120000 : isSonnet ? 60000 : 80000;
+
+    const turnRatio = turnsInWindow / maxTurns;
+    const tokenRatio = tokensInWindow > 0 ? (tokensInWindow / maxTokens) : 0;
+    const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
+
+    const limit = {
+      key: 'session',
+      label: 'Session (5h)',
+      percent,
+      estimated: true,
+      resetsAt,
+      turns: turnsInWindow
+    };
+
+    const nextWindow = {
+      startedAt: windowStart,
+      resetsAt,
+      messageCount: turnsInWindow,
+      totalTokens: tokensInWindow,
+      model: modelKey
+    };
+
+    return { limit, window: nextWindow };
   },
 
   /**

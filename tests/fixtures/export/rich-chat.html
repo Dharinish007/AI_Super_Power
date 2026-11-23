@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Performance Review and Benchmark - Claude</title>
+</head>
+<body>
+  <div class="chat-container">
+    <!-- User turn 1 -->
+    <div data-testid="user-message">
+      <p>Can you analyze our recent pipeline performance?</p>
+      <div data-testid="file-attachment" class="attachment">
+        <span>benchmarks.csv</span>
+      </div>
+    </div>
+
+    <!-- Assistant turn 1 -->
+    <div class="font-claude-response font-claude-message">
+      <h2>Performance Analysis</h2>
+      <p>Here is the breakdown of the benchmark metrics:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Baseline</th>
+            <th>Optimized</th>
+            <th>Speedup</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Page Load</td>
+            <td>2.4s</td>
+            <td>0.8s</td>
+            <td>3.0x</td>
+          </tr>
+          <tr>
+            <td>Memory Usage</td>
+            <td>140MB</td>
+            <td>65MB</td>
+            <td>2.1x</td>
+          </tr>
+          <tr>
+            <td>CPU Idle</td>
+            <td>45%</td>
+            <td>85%</td>
+            <td>+40%</td>
+          </tr>
+        </tbody>
+      </table>
+      <ul>
+        <li>Main thread latency was reduced significantly</li>
+        <li>Heap memory usage stayed below the target threshold</li>
+      </ul>
+      <pre><code class="language-python">def calculate_speedup(baseline, current):
+    return baseline / current</code></pre>
+      <blockquote>Note: All tests ran on Chrome 120 in isolated environment.</blockquote>
+      <div data-testid="artifact-embed" class="unsupported-widget">
+        <span>Interactive Latency Distribution Chart</span>
+      </div>
+    </div>
+
+    <!-- User turn 2 -->
+    <div data-testid="user-message">
+      <p>What are the next optimization steps?</p>
+    </div>
+
+    <!-- Assistant turn 2 -->
+    <div class="font-claude-response font-claude-message">
+      <p>Next steps:</p>
+      <ol>
+        <li>Enable asset preloading</li>
+        <li>Compress bundle chunks</li>
+        <li>Implement service worker caching</li>
+      </ol>
+    </div>
+  </div>
+</body>
+</html>

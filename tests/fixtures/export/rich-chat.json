@@ -1,0 +1,84 @@
+{
+  "uuid": "chat-rich-002",
+  "name": "Performance Review and Benchmark",
+  "model": "claude-3-5-sonnet-20241022",
+  "current_leaf_message_uuid": "msg-rich-4",
+  "chat_messages": [
+    {
+      "uuid": "msg-rich-1",
+      "parent_message_uuid": "00000000-0000-0000-0000-000000000000",
+      "sender": "human",
+      "created_at": "2026-11-23T11:00:00Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "Can you analyze our recent pipeline performance?"
+        }
+      ],
+      "attachments": [
+        {
+          "file_name": "benchmarks.csv",
+          "file_type": "text/csv",
+          "extracted_content": "metric,baseline,optimized\nPage Load,2.4s,0.8s"
+        }
+      ]
+    },
+    {
+      "uuid": "msg-rich-2",
+      "parent_message_uuid": "msg-rich-1",
+      "sender": "assistant",
+      "created_at": "2026-11-23T11:00:15Z",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "Analyzing the provided benchmarks data and formatting table."
+        },
+        {
+          "type": "text",
+          "text": "## Performance Analysis\n\nHere is the breakdown of the benchmark metrics:\n\n| Metric | Baseline | Optimized | Speedup |\n|---|---|---|---|\n| Page Load | 2.4s | 0.8s | 3.0x |\n| Memory Usage | 140MB | 65MB | 2.1x |\n| CPU Idle | 45% | 85% | +40% |\n\nKey takeaways:\n- Main thread latency was reduced significantly\n- Heap memory usage stayed below the target threshold\n\nHere is the calculation script used:\n\n```python\ndef calculate_speedup(baseline, current):\n    return baseline / current\n```\n\n> Note: All tests ran on Chrome 120 in isolated environment."
+        },
+        {
+          "type": "interactive_canvas",
+          "title": "Latency Distribution Chart",
+          "data": { "points": [10, 25, 45] }
+        }
+      ]
+    },
+    {
+      "uuid": "msg-rich-abandoned",
+      "parent_message_uuid": "msg-rich-1",
+      "sender": "assistant",
+      "created_at": "2026-11-23T11:00:10Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "This was an abandoned regeneration branch that should be excluded."
+        }
+      ]
+    },
+    {
+      "uuid": "msg-rich-3",
+      "parent_message_uuid": "msg-rich-2",
+      "sender": "human",
+      "created_at": "2026-11-23T11:01:00Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "What are the next optimization steps?"
+        }
+      ]
+    },
+    {
+      "uuid": "msg-rich-4",
+      "parent_message_uuid": "msg-rich-3",
+      "sender": "assistant",
+      "created_at": "2026-11-23T11:01:20Z",
+      "content": [
+        {
+          "type": "text",
+          "text": "Next steps:\n1. Enable asset preloading\n2. Compress bundle chunks\n3. Implement service worker caching"
+        }
+      ]
+    }
+  ]
+}

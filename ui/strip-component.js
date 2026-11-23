@@ -116,9 +116,11 @@ export class StripComponent {
 
     // Developer view (hidden by default behind gear icon)
     this.dDev = h('div', 'dev-view hide', this.drawer);
+    this.dExportRow = h('div', 'export-row hide', this.dDev);
+    this.dExportBtn = textButton(this.dExportRow, 'Export Checkpoint (MD)', () => this._exportCheckpoint());
+    this.dExportBtn.classList.add('btn-checkpoint-export');
     h('div', 'sec-title', this.dDev, 'Diagnostics');
     this.dDevContent = h('div', null, this.dDev);
-    this.dExportBtn = textButton(this.dDevContent, 'Export Checkpoint (MD)', () => this._exportCheckpoint());
 
     this.dGear.b.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -271,6 +273,8 @@ export class StripComponent {
     this.stripLeft.textContent = '';
     this.dUsage.textContent = '';
     let hasUsageDetails = false;
+    let primaryResetTs = null;
+    let primaryResetEl = null;
 
     for (const r of rows) {
       const uRow = h('div', 'u-row', this.stripLeft);
@@ -309,8 +313,12 @@ export class StripComponent {
         if (resetStr) {
           const rReset = h('span', 'u-reset', uRow, resetStr);
           if (data.features?.countdown !== false) {
-            this._activeResetEl = rReset;
-            this._countdown.start(r.resetsAt);
+            const rTs = typeof r.resetsAt === 'number' ? (r.resetsAt < 1e12 ? r.resetsAt * 1000 : r.resetsAt) : Date.parse(r.resetsAt);
+            const curPrimaryTs = typeof primaryResetTs === 'number' ? (primaryResetTs < 1e12 ? primaryResetTs * 1000 : primaryResetTs) : (primaryResetTs ? Date.parse(primaryResetTs) : null);
+            if (!primaryResetTs || (rTs && curPrimaryTs && rTs < curPrimaryTs)) {
+              primaryResetTs = r.resetsAt;
+              primaryResetEl = rReset;
+            }
           }
         }
 
@@ -330,6 +338,13 @@ export class StripComponent {
       }
     }
     show(this.dUsage, hasUsageDetails);
+
+    if (primaryResetTs && primaryResetEl && data.features?.countdown !== false) {
+      this._activeResetEl = primaryResetEl;
+      this._countdown.start(primaryResetTs);
+    } else {
+      this._countdown.stop();
+    }
 
     // -------------------------------------------------------------------------
     // 2. Render Right Column: Msgs Left & Context Ring
@@ -448,7 +463,8 @@ export class StripComponent {
     // Biggest item
     const big = data.biggest;
     this._currentBiggest = big;
-    if (big && typeof big.tokens === 'number' && big.tokens > 0) {
+    const showBiggest = (data.features?.biggestItem ?? true) && big && typeof big.tokens === 'number' && big.tokens > 0;
+    if (showBiggest) {
       const disp = formatBiggestItemDisplay(big, formatTokens);
       if (disp) {
         this.dBigVal.textContent = '';
@@ -468,7 +484,7 @@ export class StripComponent {
     // "Consider a new chat" line in drawer (at 80%+ context, 85%+ if estimated)
     const ctxPct = (ringState === 'A' || ringState === 'B') && ringLimit
       ? Math.round((used / ringLimit) * 100)
-      : null;
+      : (typeof data.percentage === 'number' && Number.isFinite(data.percentage) ? Math.round(data.percentage) : null);
     const isEst = isEstCtx || data.context?.source === 'estimated';
     const showSuggest = shouldShowNewChatSuggestion(ctxPct, isEst ? 'estimated' : 'measured', data.features?.newChatSuggestion ?? true);
     show(this.dNewChatRow, showSuggest);
@@ -485,6 +501,9 @@ export class StripComponent {
     } else {
       show(this.dSparklineBox, false);
     }
+
+    // Checkpoint export button in drawer diagnostics
+    show(this.dExportRow, Boolean(data.features?.checkpointExport));
   }
 
   setDraftEstimate(tokens) {

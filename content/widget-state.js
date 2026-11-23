@@ -85,7 +85,19 @@ export function recordUsage(map, id, pct, now = Date.now(), limit = 200) {
 /** The n largest turns in the context, biggest first: what to trim (or move to a file) to free room. */
 export function biggestMessages(messages, n = 5) {
   return (messages || [])
-    .map((m, i) => ({ turn: i + 1, role: m.role, tokens: m.tokens || 0, preview: m.preview || '' }))
+    .map((m, i) => {
+      const role = m.role || 'user';
+      const who = role === 'user' ? 'You' : (role === 'assistant' ? 'Assistant' : 'System');
+      const turn = m.turn ?? (i + 1);
+      return {
+        turn,
+        role,
+        label: `${who} (#${turn})`,
+        tokens: m.tokens || 0,
+        preview: m.preview || '',
+        element: m.element || null
+      };
+    })
     .filter(m => m.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, n);
@@ -201,7 +213,9 @@ export function toWidgetState(s, opts = {}) {
       ...(dropped.count ? [{ label: 'Older turns', value: `${dropped.count} · ${dropped.tokens.toLocaleString()} outside window` }] : [])
     ],
     // Headline split for the panel's stat row (display only; same numbers as the breakdown)
-    biggest: biggestMessages(s.tokens?.contextMessages),
+    biggest: s.biggestItem ? [s.biggestItem] : biggestMessages(s.tokens?.contextMessages),
+    biggestItem: s.biggestItem || null,
+    messages: opts.messages || s.messages || s.observables?.messages || (s.tokens?.contextMessages || []),
     growth: growthSeries(s.tokens?.contextMessages),
     attachmentFiles: normalizeAttachments(s.observables?.attachmentFiles),
     stats: { user: s.tokens?.user ?? 0, assistant: s.tokens?.assistant ?? 0, hidden: s.tokens?.hidden ?? 0 },

@@ -163,6 +163,7 @@ export class Widgets {
       toastFn: (msg) => this.stripComponent?.showToast(msg, 4000)
     });
     this.preSendEstimator = new PreSendEstimator({
+      tokenizer: (text) => (typeof this.adapter.countTokens === 'function' ? this.adapter.countTokens(text) : Math.ceil((text || '').length / 4)),
       onEstimate: (tokens) => this.stripComponent?.setDraftEstimate(tokens)
     });
     this._history = [];
@@ -197,6 +198,7 @@ export class Widgets {
         if (area !== 'local' || !changes[SETTINGS_KEY] || !this.glance) return;
         this.settings = normalizeSettings(changes[SETTINGS_KEY].newValue);
         this._settingsFresh = true;
+        this._ensureGlanceMounted();
         this._paintBadges();
         this._render();
       });

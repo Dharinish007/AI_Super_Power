@@ -4,8 +4,8 @@
  * the widgets on every site pick it up through storage.onChanged.
  */
 
-import { h } from './dom.js';
-import { CONTEXT_FIELDS, writeSettings } from '../content/settings.js';
+import { h, textButton } from './dom.js';
+import { CONTEXT_FIELDS, writeSettings, resetSettings } from '../content/settings.js';
 
 /**
  * @param {HTMLElement} parent
@@ -44,17 +44,37 @@ export function SettingsView(parent, { storage }) {
   const fields = () => ({ widgets: { context: { fields: CONTEXT_FIELDS.filter((_, i) => fieldBoxes[i].checked).map(f => f.key) } } });
   const fieldBoxes = CONTEXT_FIELDS.map(f => check(w, f.label, s => s.widgets.context.fields.includes(f.key), fields));
 
+  const f = group('Features');
+  check(f, 'Reset countdown (live updates every 60s)', s => s.features.countdown, v => ({ features: { countdown: v } }));
+  check(f, 'Threshold alerts at 80% with hysteresis', s => s.features.alerts, v => ({ features: { alerts: v }, context: { alerts: v } }));
+  check(f, 'Suggest new chat in drawer at 80%+ context', s => s.features.newChatSuggestion, v => ({ features: { newChatSuggestion: v } }));
+  check(f, 'Show biggest item in drawer', s => s.features.biggestItem, v => ({ features: { biggestItem: v } }));
+  check(f, 'Record usage history and sparkline', s => s.features.usageHistory, v => ({ features: { usageHistory: v } }));
+  check(f, 'Pre-send draft token estimate', s => s.features.preSendEstimate, v => ({ features: { preSendEstimate: v } }));
+  check(f, 'Checkpoint export to Markdown', s => s.features.checkpointExport, v => ({ features: { checkpointExport: v } }));
+
   const c = group('Capsules: one-click method');
   radio(c, 'method', 'ask-ai', 'Ask this AI (fills the chat box; you press Enter)', s => s.capsule.method, v => ({ capsule: { method: v } }));
   radio(c, 'method', 'quick', 'Quick (no AI): built from the page', s => s.capsule.method, v => ({ capsule: { method: v } }));
 
   const x = group('Context');
-  check(x, 'Alerts at 80% and 95% (on the Context widget)', s => s.context.alerts, v => ({ context: { alerts: v } }));
+  check(x, 'Alerts at 80% and 95% (on the Context widget)', s => s.context.alerts, v => ({ context: { alerts: v }, features: { alerts: v } }));
 
   const d = group('Display');
   for (const t of ['auto', 'dark', 'light']) radio(d, 'theme', t, `Theme: ${t}`, s => s.display.theme, v => ({ display: { theme: v } }));
   check(d, 'Compact numbers (61.3K)', s => s.display.compact, v => ({ display: { compact: v } }));
   check(d, 'Usage % next to chats in the sidebar', s => s.display.badges, v => ({ display: { badges: v } }));
+
+  const r = group('Reset');
+  const resetBtn = textButton(r, 'Reset all settings to defaults', async () => {
+    try {
+      const def = await resetSettings(storage);
+      for (const set of inputs) set(def);
+    } catch (err) {
+      console.warn('[Context Monitor] Reset settings failed', err);
+    }
+  });
+  resetBtn.style.marginTop = '4px';
 
   return { el, update(s) { for (const set of inputs) set(s); } };
 }

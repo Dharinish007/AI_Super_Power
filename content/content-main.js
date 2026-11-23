@@ -805,7 +805,7 @@ export class ContentScriptCoordinator {
 
       // 10. Update in-page floating HUD
       const tRender = now();
-      this.showState(toWidgetState(contextState, { provider: 'ChatGPT' }));
+      this.showState(toWidgetState(contextState, { provider: 'ChatGPT', messages: effectiveMessages }));
       this.perf.record('renderMs', now() - tRender);
       this.perf.record('passMs', now() - tPass);
       // Update latency: from the change on the page / stream chunk to the widget showing it

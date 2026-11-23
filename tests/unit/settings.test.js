@@ -1,6 +1,6 @@
 /** Unit Tests for content/settings.js: defaults, repair of bad values, partial writes. */
 
-import { SETTINGS_KEY, DEFAULT_SETTINGS, DEFAULT_FEATURES, CONTEXT_FIELDS, normalizeSettings, readSettings, writeSettings, migrateSettings } from '../../content/settings.js';
+import { SETTINGS_KEY, DEFAULT_SETTINGS, DEFAULT_FEATURES, CONTEXT_FIELDS, normalizeSettings, readSettings, writeSettings, resetSettings, migrateSettings } from '../../content/settings.js';
 
 function fakeArea(init = {}) {
   const data = structuredClone(init);
@@ -52,6 +52,17 @@ export async function runSettingsTests() {
   // Re-migrating v2 is a no-op
   const noopResult = await migrateSettings(legacyArea);
   assert('migrateSettings on v2 returns migrated=false', noopResult.migrated === false);
+
+  // Synchronization between context.alerts and features.alerts
+  const alertOff = await writeSettings(area, { context: { alerts: false } });
+  assert('writeSettings({ context: { alerts: false } }) updates both context and features', alertOff.context.alerts === false && alertOff.features.alerts === false);
+  const alertOn = await writeSettings(area, { features: { alerts: true } });
+  assert('writeSettings({ features: { alerts: true } }) updates both context and features', alertOn.context.alerts === true && alertOn.features.alerts === true);
+
+  // resetSettings
+  const resetResult = await resetSettings(area);
+  assert('resetSettings restores default features and version 2', resetResult.version === 2 && resetResult.features.countdown === true && resetResult.features.biggestItem === false);
+  assert('resetSettings saves back to storage area', area.data[SETTINGS_KEY].version === 2);
 
   return { passed, failed };
 }

@@ -494,6 +494,80 @@ export const ClaudeProvider = {
   },
 
   /**
+   * Computes the rolling 5-hour session window and estimated utilization on Free plans.
+   * Rolling window rule: 5-hour timer starts from the first prompt sent within the window.
+   */
+  resolveSessionWindow(messages = [], model = null, now = Date.now(), storedWindow = null) {
+    const WINDOW_MS = 5 * 3600 * 1000;
+    const userTurns = messages.filter(m => m.role === 'user');
+    const userTurnsWithTime = userTurns.filter(m => m.createdAt && m.createdAt <= now);
+    const recentTurns = userTurnsWithTime.filter(m => m.createdAt > now - WINDOW_MS);
+
+    let windowStart = null;
+    if (storedWindow?.startedAt && (now - storedWindow.startedAt < WINDOW_MS)) {
+      windowStart = storedWindow.startedAt;
+    }
+
+    if (recentTurns.length > 0) {
+      const earliestRecent = Math.min(...recentTurns.map(t => t.createdAt));
+      windowStart = windowStart ? Math.min(windowStart, earliestRecent) : earliestRecent;
+    }
+
+    if (!windowStart && userTurns.length > 0) {
+      windowStart = now;
+    }
+
+    if (!windowStart) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        window: null
+      };
+    }
+
+    const resetsAt = windowStart + WINDOW_MS;
+    if (now >= resetsAt) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        window: null
+      };
+    }
+
+    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
+    const tokensInWindow = messages
+      .filter(m => (!m.createdAt || m.createdAt >= windowStart))
+      .reduce((sum, m) => sum + (m.tokens || 0), 0);
+
+    const modelKey = this.modelKey(model) || '';
+    const isHaiku = modelKey.includes('haiku');
+    const isSonnet = modelKey.includes('sonnet');
+    const maxTurns = isHaiku ? 45 : isSonnet ? 20 : 30;
+    const maxTokens = isHaiku ? 120000 : isSonnet ? 60000 : 80000;
+
+    const turnRatio = turnsInWindow / maxTurns;
+    const tokenRatio = tokensInWindow > 0 ? (tokensInWindow / maxTokens) : 0;
+    const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
+
+    const limit = {
+      key: 'session',
+      label: 'Session (5h)',
+      percent,
+      estimated: true,
+      resetsAt,
+      turns: turnsInWindow
+    };
+
+    const nextWindow = {
+      startedAt: windowStart,
+      resetsAt,
+      messageCount: turnsInWindow,
+      totalTokens: tokensInWindow,
+      model: modelKey
+    };
+
+    return { limit, window: nextWindow };
+  },
+
+  /**
    * Detects limit reached banners or notices in Claude's DOM.
    * @returns {{ key: string, label: string, blocked: boolean, percent: number, resetsAt: number|null }|null}
    */
@@ -803,6 +877,74 @@ export const GeminiProvider = {
     d.setHours(h, Number(t[2] || 0), 0, 0);
     if (d.getTime() <= now) d.setDate(d.getDate() + 1);
     return d.getTime();
+  },
+
+  /**
+   * Computes the rolling 5-hour session window and estimated utilization on Gemini.
+   */
+  resolveSessionWindow(messages = [], model = null, now = Date.now(), storedWindow = null) {
+    const WINDOW_MS = 5 * 3600 * 1000;
+    const userTurns = messages.filter(m => m.role === 'user');
+    const userTurnsWithTime = userTurns.filter(m => m.createdAt && m.createdAt <= now);
+    const recentTurns = userTurnsWithTime.filter(m => m.createdAt > now - WINDOW_MS);
+
+    let windowStart = null;
+    if (storedWindow?.startedAt && (now - storedWindow.startedAt < WINDOW_MS)) {
+      windowStart = storedWindow.startedAt;
+    }
+
+    if (recentTurns.length > 0) {
+      const earliestRecent = Math.min(...recentTurns.map(t => t.createdAt));
+      windowStart = windowStart ? Math.min(windowStart, earliestRecent) : earliestRecent;
+    }
+
+    if (!windowStart && userTurns.length > 0) {
+      windowStart = now;
+    }
+
+    if (!windowStart) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null },
+        window: null
+      };
+    }
+
+    const resetsAt = windowStart + WINDOW_MS;
+    if (now >= resetsAt) {
+      return {
+        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null },
+        window: null
+      };
+    }
+
+    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
+    const tokensInWindow = messages
+      .filter(m => (!m.createdAt || m.createdAt >= windowStart))
+      .reduce((sum, m) => sum + (m.tokens || 0), 0);
+
+    const maxTurns = 50;
+    const maxTokens = 150000;
+    const turnRatio = turnsInWindow / maxTurns;
+    const tokenRatio = tokensInWindow > 0 ? (tokensInWindow / maxTokens) : 0;
+    const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
+
+    const limit = {
+      key: 'session',
+      label: '5h',
+      percent,
+      estimated: true,
+      resetsAt,
+      turns: turnsInWindow
+    };
+
+    const nextWindow = {
+      startedAt: windowStart,
+      resetsAt,
+      messageCount: turnsInWindow,
+      totalTokens: tokensInWindow
+    };
+
+    return { limit, window: nextWindow };
   },
 
   // Gemini meters compute, and long chats cost more per message: note it once the chat is this full
