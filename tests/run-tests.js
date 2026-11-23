@@ -36,6 +36,8 @@ import { runCheckpointExportTests } from './unit/checkpoint-export.test.js';
 import { runExportParserTests } from './unit/export-parser.test.js';
 import { runMarkdownExporterTests } from './unit/markdown-exporter.test.js';
 import { runPrintHtmlExporterTests } from './unit/print-html-exporter.test.js';
+import { runTableExtractorTests } from './unit/table-extractor.test.js';
+import { runExcelWriterTests } from './unit/excel-writer.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -71,7 +73,9 @@ const SUITES = [
   runCheckpointExportTests, // Checkpoint Markdown export
   runExportParserTests, // Chat Export types & message parsers (P1)
   runMarkdownExporterTests, // Chat Export toMarkdown exporter (P2)
-  runPrintHtmlExporterTests // Chat Export toPrintHtml exporter (P4)
+  runPrintHtmlExporterTests, // Chat Export toPrintHtml exporter (P4)
+  runTableExtractorTests, // Chat Export toTables extractor (P5)
+  runExcelWriterTests // Chat Export toExcel OpenXML writer (P5)
 ];
 
 console.log('========================================================');
