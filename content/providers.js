@@ -532,10 +532,11 @@ export const ClaudeProvider = {
       };
     }
 
-    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
-    const tokensInWindow = messages
+    const turnsInWindow = Math.max(1, recentTurns.length, userTurns.length, storedWindow?.messageCount || 1);
+    const chatTokens = messages
       .filter(m => (!m.createdAt || m.createdAt >= windowStart))
       .reduce((sum, m) => sum + (m.tokens || 0), 0);
+    const tokensInWindow = Math.max(chatTokens, storedWindow?.totalTokens || 0);
 
     const modelKey = this.modelKey(model) || '';
     const isHaiku = modelKey.includes('haiku');
@@ -917,10 +918,11 @@ export const GeminiProvider = {
       };
     }
 
-    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
-    const tokensInWindow = messages
+    const turnsInWindow = Math.max(1, recentTurns.length, userTurns.length, storedWindow?.messageCount || 1);
+    const chatTokens = messages
       .filter(m => (!m.createdAt || m.createdAt >= windowStart))
       .reduce((sum, m) => sum + (m.tokens || 0), 0);
+    const tokensInWindow = Math.max(chatTokens, storedWindow?.totalTokens || 0);
 
     const maxTurns = 50;
     const maxTokens = 150000;

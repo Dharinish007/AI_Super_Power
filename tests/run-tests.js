@@ -38,6 +38,7 @@ import { runMarkdownExporterTests } from './unit/markdown-exporter.test.js';
 import { runPrintHtmlExporterTests } from './unit/print-html-exporter.test.js';
 import { runTableExtractorTests } from './unit/table-extractor.test.js';
 import { runExcelWriterTests } from './unit/excel-writer.test.js';
+import { runExportDialogTests } from './unit/export-dialog.test.js';
 
 const SUITES = [
   runTokenizerTests,
@@ -75,7 +76,8 @@ const SUITES = [
   runMarkdownExporterTests, // Chat Export toMarkdown exporter (P2)
   runPrintHtmlExporterTests, // Chat Export toPrintHtml exporter (P4)
   runTableExtractorTests, // Chat Export toTables extractor (P5)
-  runExcelWriterTests // Chat Export toExcel OpenXML writer (P5)
+  runExcelWriterTests, // Chat Export toExcel OpenXML writer (P5)
+  runExportDialogTests // Chat Export UI Dialog & Drawer wiring (P3)
 ];
 
 console.log('========================================================');

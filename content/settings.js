@@ -36,7 +36,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   capsule: { method: 'ask-ai' },
   context: { alerts: true },
   display: { theme: 'auto', compact: false, badges: true },
-  features: DEFAULT_FEATURES
+  features: DEFAULT_FEATURES,
+  export: { defaultFormat: 'markdown' }
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -76,6 +77,9 @@ export function normalizeSettings(raw) {
       usageHistory: bool(feat.usageHistory, DEFAULT_FEATURES.usageHistory),
       preSendEstimate: bool(feat.preSendEstimate, DEFAULT_FEATURES.preSendEstimate),
       checkpointExport: bool(feat.checkpointExport, DEFAULT_FEATURES.checkpointExport)
+    },
+    export: {
+      defaultFormat: oneOf(obj(r.export).defaultFormat, ['markdown', 'pdf', 'excel'])
     }
   };
 }
@@ -91,6 +95,7 @@ export async function writeSettings(area, patch) {
   const p = obj(patch);
   const pContext = obj(p.context);
   const pFeatures = obj(p.features);
+  const pExport = obj(p.export);
 
   // Keep alerts in sync across features.alerts and context.alerts
   let syncedAlerts;
@@ -117,7 +122,8 @@ export async function writeSettings(area, patch) {
     capsule: { ...cur.capsule, ...obj(p.capsule) },
     context: mergedContext,
     display: { ...cur.display, ...obj(p.display) },
-    features: mergedFeatures
+    features: mergedFeatures,
+    export: { ...cur.export, ...pExport }
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;

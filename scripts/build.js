@@ -43,7 +43,7 @@ const MODULES = [
   'content/attachment-detector.js', 'content/tool-detector.js', 'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/page-actions.js', 'content/panel-channel.js',
   'content/alerts.js', 'content/countdown.js', 'content/biggest-item.js', 'content/history.js', 'content/pre-send.js', 'content/checkpoint-export.js',
   'content/export/dom-block-parser.js', 'content/export/claude-message-parser.js',
-  'ui/formatters.js', 'ui/dom.js', 'ui/styles.js', 'ui/strip-component.js', 'content/strip-adapters.js', 'content/widgets.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
+  'ui/formatters.js', 'ui/dom.js', 'ui/styles.js', 'ui/strip-component.js', 'ui/export-dialog.js', 'content/strip-adapters.js', 'content/widgets.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
   'content/providers.js', 'content/provider-coordinator.js'
 ];
 

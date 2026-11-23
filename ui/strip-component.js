@@ -59,13 +59,22 @@ export class StripComponent {
     this.drawer = h('div', 'detail-drawer', this.root);
     this.drawer.hidden = true;
 
-    // Header: Context ~96K / 200K · est. + Gear button
+    // Header: Context ~96K / 200K · est. + Export + Gear buttons
     const dHead = h('div', 'drawer-header', this.drawer);
     const titleBox = h('div', null, dHead);
     titleBox.style.cssText = 'display:flex;align-items:baseline;gap:6px;';
     this.dTitle = h('span', 'drawer-title', titleBox, 'Context —');
     this.dModel = h('span', 'model-caption', titleBox);
-    this.dGear = iconButton(dHead, ICONS.gear, 'Toggle developer diagnostics');
+    const btnBox = h('div', 'drawer-actions', dHead);
+    btnBox.style.cssText = 'display:flex;align-items:center;gap:4px;';
+    this.dExport = iconButton(btnBox, ICONS.export, 'Export conversation');
+    this.dExport.b.classList.add('drawer-export');
+    this.dExport.b.setAttribute('aria-label', 'Export conversation');
+    this.dExport.b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.callbacks.onExportClick) this.callbacks.onExportClick();
+    });
+    this.dGear = iconButton(btnBox, ICONS.gear, 'Toggle developer diagnostics');
     this.dGear.b.classList.add('drawer-gear');
     this.dGear.b.setAttribute('aria-expanded', 'false');
 

@@ -5860,7 +5860,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   capsule: { method: 'ask-ai' },
   context: { alerts: true },
   display: { theme: 'auto', compact: false, badges: true },
-  features: DEFAULT_FEATURES
+  features: DEFAULT_FEATURES,
+  export: { defaultFormat: 'markdown' }
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -5900,6 +5901,9 @@ function normalizeSettings(raw) {
       usageHistory: bool(feat.usageHistory, DEFAULT_FEATURES.usageHistory),
       preSendEstimate: bool(feat.preSendEstimate, DEFAULT_FEATURES.preSendEstimate),
       checkpointExport: bool(feat.checkpointExport, DEFAULT_FEATURES.checkpointExport)
+    },
+    export: {
+      defaultFormat: oneOf(obj(r.export).defaultFormat, ['markdown', 'pdf', 'excel'])
     }
   };
 }
@@ -5915,6 +5919,7 @@ async function writeSettings(area, patch) {
   const p = obj(patch);
   const pContext = obj(p.context);
   const pFeatures = obj(p.features);
+  const pExport = obj(p.export);
 
   // Keep alerts in sync across features.alerts and context.alerts
   let syncedAlerts;
@@ -5941,7 +5946,8 @@ async function writeSettings(area, patch) {
     capsule: { ...cur.capsule, ...obj(p.capsule) },
     context: mergedContext,
     display: { ...cur.display, ...obj(p.display) },
-    features: mergedFeatures
+    features: mergedFeatures,
+    export: { ...cur.export, ...pExport }
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
@@ -8391,7 +8397,8 @@ const ICONS = {
   chevron: 'M4 6l4 4 4-4',
   refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
   copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
-  gear: 'M6.5 1.5h3l.4 1.5a5 5 0 0 1 1.2.7l1.5-.5 2.1 2.1-.5 1.5c.3.4.5.8.7 1.2l1.5.4v3l-1.5.4a5 5 0 0 1-.7 1.2l.5 1.5-2.1 2.1-1.5-.5a5 5 0 0 1-1.2.7l-.4 1.5h-3l-.4-1.5a5 5 0 0 1-1.2-.7l-1.5.5-2.1-2.1.5-1.5a5 5 0 0 1-.7-1.2l-1.5-.4v-3l1.5-.4a5 5 0 0 1 .7-1.2l-.5-1.5 2.1-2.1 1.5.5a5 5 0 0 1 1.2-.7l.4-1.5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'
+  gear: 'M6.5 1.5h3l.4 1.5a5 5 0 0 1 1.2.7l1.5-.5 2.1 2.1-.5 1.5c.3.4.5.8.7 1.2l1.5.4v3l-1.5.4a5 5 0 0 1-.7 1.2l.5 1.5-2.1 2.1-1.5-.5a5 5 0 0 1-1.2.7l-.4 1.5h-3l-.4-1.5a5 5 0 0 1-1.2-.7l-1.5.5-2.1-2.1.5-1.5a5 5 0 0 1-.7-1.2l-1.5-.4v-3l1.5-.4a5 5 0 0 1 .7-1.2l-.5-1.5 2.1-2.1 1.5.5a5 5 0 0 1 1.2-.7l.4-1.5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',
+  export: 'M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2M8 2v7.5M5 6.5l3 3 3-3'
 };
 
 const fmtK = (n) => {
@@ -8958,13 +8965,22 @@ class StripComponent {
     this.drawer = h('div', 'detail-drawer', this.root);
     this.drawer.hidden = true;
 
-    // Header: Context ~96K / 200K · est. + Gear button
+    // Header: Context ~96K / 200K · est. + Export + Gear buttons
     const dHead = h('div', 'drawer-header', this.drawer);
     const titleBox = h('div', null, dHead);
     titleBox.style.cssText = 'display:flex;align-items:baseline;gap:6px;';
     this.dTitle = h('span', 'drawer-title', titleBox, 'Context —');
     this.dModel = h('span', 'model-caption', titleBox);
-    this.dGear = iconButton(dHead, ICONS.gear, 'Toggle developer diagnostics');
+    const btnBox = h('div', 'drawer-actions', dHead);
+    btnBox.style.cssText = 'display:flex;align-items:center;gap:4px;';
+    this.dExport = iconButton(btnBox, ICONS.export, 'Export conversation');
+    this.dExport.b.classList.add('drawer-export');
+    this.dExport.b.setAttribute('aria-label', 'Export conversation');
+    this.dExport.b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.callbacks.onExportClick) this.callbacks.onExportClick();
+    });
+    this.dGear = iconButton(btnBox, ICONS.gear, 'Toggle developer diagnostics');
     this.dGear.b.classList.add('drawer-gear');
     this.dGear.b.setAttribute('aria-expanded', 'false');
 
@@ -9457,6 +9473,301 @@ class StripComponent {
 
 
 
+  // --- ui/export-dialog.js ---
+  /**
+ * Context Monitor - Export Dialog Component
+ *
+ * Modal dialog for exporting conversations to Markdown, PDF (Print preview), or Excel (.xlsx).
+ * Features:
+ * - Shadow DOM or direct DOM container mounting with high z-index.
+ * - Format selection: Markdown (.md), PDF via print, Excel (.xlsx).
+ * - Automatic source indicator ("Authoritative API" vs "Page Text (DOM Fallback)").
+ * - Visible warning count for unsupported blocks.
+ * - Dynamic disablement of Excel option if 0 tables exist in the chat.
+ * - Keyboard accessible (Esc to close, Tab navigation).
+ */
+
+
+
+
+
+
+/**
+ * Triggers browser download of a content payload.
+ * @param {string|Uint8Array|Blob} content
+ * @param {string} filename
+ * @param {string} mimeType
+ */
+function downloadFile(content, filename, mimeType) {
+  const blob = content instanceof Blob ? content : new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
+}
+
+/**
+ * Generates a clean URL/filesystem-safe slug from a title string.
+ * @param {string} title
+ * @param {string} [fallback='chat-export']
+ * @returns {string}
+ */
+function slugifyTitle(title, fallback = 'chat-export') {
+  if (!title || typeof title !== 'string') return fallback;
+  const slug = title
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-');
+  return slug ? slug.slice(0, 50) : fallback;
+}
+
+class ExportDialog {
+  /**
+   * @param {Object} options
+   * @param {import('../engine/export/types.js').ConversationExportData} options.data
+   * @param {Array<{ sheetName: string, headers: string[], rows: any[][] }>} [options.tables]
+   * @param {string} [options.defaultFormat='markdown']
+   * @param {Function} [options.onClose]
+   */
+  constructor({ data, tables = null, defaultFormat = 'markdown', onClose = null }) {
+    this.data = data || { messages: [] };
+    this.tables = Array.isArray(tables) ? tables : toTables(this.data);
+    this.selectedFormat = ['markdown', 'pdf', 'excel'].includes(defaultFormat) ? defaultFormat : 'markdown';
+    this.onClose = onClose;
+    this.container = null;
+    this.overlay = null;
+
+    // If default was excel but no tables, fallback to markdown
+    if (this.selectedFormat === 'excel' && this.tables.length === 0) {
+      this.selectedFormat = 'markdown';
+    }
+
+    this._onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        this.close();
+      }
+    };
+  }
+
+  /**
+   * Builds and opens the dialog in the DOM.
+   * @param {HTMLElement} [parent=document.body]
+   */
+  open(parent = document.body) {
+    if (this.container) return;
+
+    this.container = document.createElement('div');
+    this.container.className = 'asp-export-dialog-host';
+    this.container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,0.6);backdrop-filter:blur(2px);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1e293b;';
+
+    const card = document.createElement('div');
+    card.className = 'asp-export-dialog-card';
+    card.style.cssText = 'background:#ffffff;border-radius:12px;width:90%;max-width:480px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.1),0 10px 10px -5px rgba(0,0,0,0.04);border:1px solid #e2e8f0;overflow:hidden;animation:aspFadeIn .15s ease-out;';
+
+    // Header
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #e2e8f0;';
+    const title = document.createElement('h3');
+    title.style.cssText = 'margin:0;font-size:16px;font-weight:600;color:#0f172a;';
+    title.textContent = 'Export Chat';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'asp-export-close-btn';
+    closeBtn.style.cssText = 'background:none;border:none;font-size:18px;cursor:pointer;color:#64748b;padding:4px;border-radius:4px;line-height:1;';
+    closeBtn.textContent = '✕';
+    closeBtn.setAttribute('aria-label', 'Close dialog');
+    closeBtn.addEventListener('click', () => this.close());
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    card.appendChild(header);
+
+    // Body
+    const body = document.createElement('div');
+    body.style.cssText = 'padding:20px;';
+
+    // Summary Box
+    const summary = document.createElement('div');
+    summary.style.cssText = 'background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin-bottom:18px;font-size:13px;';
+    const chatTitle = document.createElement('div');
+    chatTitle.style.cssText = 'font-weight:600;color:#0f172a;margin-bottom:6px;word-break:break-all;';
+    chatTitle.textContent = this.data.title || 'Untitled Conversation';
+    summary.appendChild(chatTitle);
+
+    const badgesBox = document.createElement('div');
+    badgesBox.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px;';
+    const msgCount = (this.data.messages || []).length;
+    badgesBox.innerHTML = `
+      <span style="background:#e2e8f0;padding:2px 8px;border-radius:4px;color:#334155;">${msgCount} messages</span>
+      <span style="background:#e2e8f0;padding:2px 8px;border-radius:4px;color:#334155;">${this.data.provider || 'AI'} · ${this.data.model || 'Unknown'}</span>
+      <span style="background:${this.data.source === 'dom' ? '#fef3c7' : '#e0f2fe'};color:${this.data.source === 'dom' ? '#92400e' : '#0369a1'};padding:2px 8px;border-radius:4px;font-weight:500;">${this.data.source === 'dom' ? 'Page Text (DOM Fallback)' : 'Authoritative API'}</span>
+    `;
+    summary.appendChild(badgesBox);
+
+    // Unsupported count warning if any
+    let unkCount = 0;
+    (this.data.messages || []).forEach(m => {
+      (m?.blocks || []).forEach(b => {
+        if (b?.type === 'unknown') unkCount++;
+      });
+    });
+    if (unkCount > 0) {
+      const unkNotice = document.createElement('div');
+      unkNotice.className = 'asp-unsupported-notice';
+      unkNotice.style.cssText = 'margin-top:8px;font-size:12px;color:#b45309;';
+      unkNotice.textContent = `⚠️ ${unkCount} unsupported item(s) preserved as visible notes`;
+      summary.appendChild(unkNotice);
+    }
+    body.appendChild(summary);
+
+    // Format Selector
+    const formatLabel = document.createElement('div');
+    formatLabel.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:10px;color:#334155;';
+    formatLabel.textContent = 'Select Export Format:';
+    body.appendChild(formatLabel);
+
+    const formatList = document.createElement('div');
+    formatList.style.cssText = 'display:flex;flex-direction:column;gap:10px;margin-bottom:24px;';
+
+    const formats = [
+      {
+        id: 'markdown',
+        title: 'Markdown (.md)',
+        desc: 'Full conversation formatted in GitHub Flavored Markdown',
+        disabled: false
+      },
+      {
+        id: 'pdf',
+        title: 'PDF (Print Preview)',
+        desc: 'Opens printable layout with clean page breaks and print button',
+        disabled: false
+      },
+      {
+        id: 'excel',
+        title: `Excel (.xlsx) — ${this.tables.length} table(s)`,
+        desc: this.tables.length > 0 ? 'One worksheet per table, formula-safe' : 'Disabled: No tables detected in this conversation',
+        disabled: this.tables.length === 0
+      }
+    ];
+
+    formats.forEach(f => {
+      const opt = document.createElement('label');
+      opt.className = `asp-format-option asp-format-${f.id}`;
+      opt.style.cssText = `display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid ${this.selectedFormat === f.id ? '#2563eb' : '#e2e8f0'};border-radius:8px;cursor:${f.disabled ? 'not-allowed' : 'pointer'};background:${this.selectedFormat === f.id ? '#eff6ff' : f.disabled ? '#f8fafc' : '#ffffff'};opacity:${f.disabled ? '0.6' : '1'};transition:all .15s ease;`;
+
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'asp-export-format';
+      radio.value = f.id;
+      radio.checked = this.selectedFormat === f.id;
+      radio.disabled = f.disabled;
+      radio.style.cssText = 'margin-top:3px;accent-color:#2563eb;cursor:inherit;';
+
+      radio.addEventListener('change', () => {
+        if (!f.disabled) {
+          this.selectedFormat = f.id;
+          formatList.querySelectorAll('.asp-format-option').forEach(el => {
+            el.style.borderColor = '#e2e8f0';
+            el.style.background = '#ffffff';
+          });
+          opt.style.borderColor = '#2563eb';
+          opt.style.background = '#eff6ff';
+        }
+      });
+
+      const textWrap = document.createElement('div');
+      const optTitle = document.createElement('div');
+      optTitle.style.cssText = 'font-size:13.5px;font-weight:600;color:#0f172a;';
+      optTitle.textContent = f.title;
+      const optDesc = document.createElement('div');
+      optDesc.style.cssText = 'font-size:12px;color:#64748b;margin-top:2px;';
+      optDesc.textContent = f.desc;
+
+      textWrap.appendChild(optTitle);
+      textWrap.appendChild(optDesc);
+      opt.appendChild(radio);
+      opt.appendChild(textWrap);
+      formatList.appendChild(opt);
+    });
+    body.appendChild(formatList);
+
+    // Footer Actions
+    const footer = document.createElement('div');
+    footer.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;border-top:1px solid #e2e8f0;padding-top:16px;';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'asp-btn-cancel';
+    cancelBtn.style.cssText = 'background:#ffffff;border:1px solid #cbd5e1;color:#475569;border-radius:6px;padding:8px 16px;font-size:13.5px;font-weight:500;cursor:pointer;';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => this.close());
+
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.className = 'asp-btn-export-submit';
+    exportBtn.style.cssText = 'background:#2563eb;border:none;color:#ffffff;border-radius:6px;padding:8px 18px;font-size:13.5px;font-weight:500;cursor:pointer;';
+    exportBtn.textContent = 'Export';
+    exportBtn.addEventListener('click', () => this.executeExport());
+
+    footer.appendChild(cancelBtn);
+    footer.appendChild(exportBtn);
+    body.appendChild(footer);
+    card.appendChild(body);
+    this.container.appendChild(card);
+
+    parent.appendChild(this.container);
+    window.addEventListener('keydown', this._onKeyDown);
+  }
+
+  /**
+   * Performs the file export according to the selected format and triggers download.
+   */
+  executeExport() {
+    const slug = slugifyTitle(this.data.title || 'chat-export');
+
+    if (this.selectedFormat === 'markdown') {
+      const md = toMarkdown(this.data);
+      downloadFile(md, `${slug}.md`, 'text/markdown;charset=utf-8');
+    } else if (this.selectedFormat === 'pdf') {
+      const html = toPrintHtml(this.data);
+      const win = window.open('', '_blank');
+      if (win) {
+        win.document.open();
+        win.document.write(html);
+        win.document.close();
+      } else {
+        downloadFile(html, `${slug}.html`, 'text/html;charset=utf-8');
+      }
+    } else if (this.selectedFormat === 'excel') {
+      const xlsx = toExcel(this.data, this.tables);
+      downloadFile(xlsx, `${slug}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    }
+
+    this.close();
+  }
+
+  /**
+   * Closes the dialog and cleans up event listeners.
+   */
+  close() {
+    window.removeEventListener('keydown', this._onKeyDown);
+    if (this.container && this.container.parentElement) {
+      this.container.parentElement.removeChild(this.container);
+    }
+    this.container = null;
+    if (this.onClose) {
+      this.onClose();
+    }
+  }
+}
+
+
   // --- content/strip-adapters.js ---
   /**
  * Context Monitor - Platform Strip Adapters
@@ -9784,6 +10095,8 @@ function getAdapterForProvider(providerName) {
 
 
 
+
+
 const MARGIN = 8; // Viewport clamp
 const TOP_SAFE = 72; // Snap top: below the sites' top bars (Share, account buttons)
 const SNAP_Y = 48; // Snap to a top/bottom corner when released this close
@@ -9904,7 +10217,8 @@ class Widgets {
       findInput: adapter.findInput || (() => null),
       replySelector: adapter.replySelector || null,
       userSelector: adapter.userSelector || null,
-      countTokens: adapter.countTokens || null
+      countTokens: adapter.countTokens || null,
+      onExportClick: adapter.onExportClick || null
     };
     this.page = createPage({ ...this.adapter, getLimits: () => this.vm?.limits || [] });
     this.settings = normalizeSettings();
@@ -10024,6 +10338,13 @@ class Widgets {
       onToggleDev: (open) => {
         this.devOpen = open;
         if (open && this.vm) this._renderDevView();
+      },
+      onExportClick: () => {
+        if (this.adapter.onExportClick) {
+          this.adapter.onExportClick();
+        } else {
+          this._openExportDialog();
+        }
       }
     });
 
@@ -10040,6 +10361,34 @@ class Widgets {
   _toggleDrawer(force) {
     if (!this.stripComponent) return;
     this.stripComponent._toggleDrawer(force);
+  }
+
+  _openExportDialog() {
+    try {
+      let exportData = null;
+      if (typeof ClaudeMessageParser !== 'undefined') {
+        const raw = this.latestState?.rawConversation;
+        if (raw) {
+          exportData = ClaudeMessageParser.parseFromApi(raw);
+        } else if (typeof document !== 'undefined') {
+          exportData = ClaudeMessageParser.parseFromDom(document);
+        }
+      }
+      if (!exportData) {
+        exportData = {
+          title: (typeof document !== 'undefined' ? document.title : '') || 'Conversation',
+          provider: this.adapter.provider || 'AI',
+          messages: []
+        };
+      }
+      const dialog = new ExportDialog({
+        data: exportData,
+        defaultFormat: this.settings?.export?.defaultFormat || 'markdown'
+      });
+      dialog.open();
+    } catch (err) {
+      console.warn('[AI Context Monitor] Failed to open export dialog:', err);
+    }
   }
 
   _ensureGlanceMounted() {
@@ -12135,10 +12484,11 @@ const ClaudeProvider = {
       };
     }
 
-    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
-    const tokensInWindow = messages
+    const turnsInWindow = Math.max(1, recentTurns.length, userTurns.length, storedWindow?.messageCount || 1);
+    const chatTokens = messages
       .filter(m => (!m.createdAt || m.createdAt >= windowStart))
       .reduce((sum, m) => sum + (m.tokens || 0), 0);
+    const tokensInWindow = Math.max(chatTokens, storedWindow?.totalTokens || 0);
 
     const modelKey = this.modelKey(model) || '';
     const isHaiku = modelKey.includes('haiku');
@@ -12520,10 +12870,11 @@ const GeminiProvider = {
       };
     }
 
-    const turnsInWindow = Math.max(1, recentTurns.length || userTurns.length || (storedWindow?.messageCount || 1));
-    const tokensInWindow = messages
+    const turnsInWindow = Math.max(1, recentTurns.length, userTurns.length, storedWindow?.messageCount || 1);
+    const chatTokens = messages
       .filter(m => (!m.createdAt || m.createdAt >= windowStart))
       .reduce((sum, m) => sum + (m.tokens || 0), 0);
+    const tokensInWindow = Math.max(chatTokens, storedWindow?.totalTokens || 0);
 
     const maxTurns = 50;
     const maxTokens = 150000;
@@ -12624,6 +12975,8 @@ function providerForHost(hostname) {
 
 
 
+
+
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
 const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
 const API_BACKOFF_MS = 15000; // After a failed read, wait before trying again (Refresh skips this)
@@ -12666,7 +13019,8 @@ class ProviderCoordinator {
       countTokens: (text) => {
         const { encoding, scale } = this._counting();
         return Math.round(this.tokenizer.countTokens(text, encoding) * scale);
-      }
+      },
+      onExportClick: () => this.openExportDialog()
     });
     this.domObserver = null;
     this.latestState = null;
@@ -12682,6 +13036,7 @@ class ProviderCoordinator {
     this._streamLimits = null;
     this._accountLimits = null;
     this._accountLimitsAt = 0;
+    this._storedWindow = null;
   }
 
   init() {
@@ -12809,6 +13164,36 @@ class ProviderCoordinator {
     return diagnosticsSnapshot(this.latestState, currentRef, { provider: this.provider.name });
   }
 
+  openExportDialog() {
+    try {
+      let exportData = null;
+      if (this.provider.name === 'Claude') {
+        const raw = this._api?.result || this.latestState?.rawConversation;
+        if (raw) {
+          exportData = ClaudeMessageParser.parseFromApi(raw);
+        } else if (typeof document !== 'undefined') {
+          exportData = ClaudeMessageParser.parseFromDom(document);
+        }
+      }
+      if (!exportData) {
+        exportData = {
+          title: (typeof document !== 'undefined' ? document.title : '') || 'Conversation',
+          provider: this.provider.name,
+          model: this.latestState?.modelRaw || 'Unknown',
+          source: 'dom',
+          exportedAt: Date.now(),
+          messages: []
+        };
+      }
+      const dialog = new ExportDialog({
+        data: exportData
+      });
+      dialog.open();
+    } catch (err) {
+      console.warn('[AI Context Monitor] Failed to open export dialog:', err);
+    }
+  }
+
   _getOrgScope() {
     const p = this.provider;
     return typeof p.getOrgId === 'function' ? p.getOrgId() : null;
@@ -12823,9 +13208,17 @@ class ProviderCoordinator {
 
   _loadStoredLimits() {
     const p = this.provider;
-    if (!p.limitStreamSource) return;
     const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
     if (!store) return;
+
+    if (p.name === 'Claude' || p.name === 'Gemini') {
+      const winKey = `limits:${p.name}:window`;
+      store.get(winKey).then(r => {
+        if (r?.[winKey] && !this._storedWindow) this._storedWindow = r[winKey];
+      }).catch(() => {});
+    }
+
+    if (!p.limitStreamSource) return;
     const key = this._limitKey();
     const accountKey = this._limitKey('account');
     const fallbackStreamKey = `limits:${p.name}`;
@@ -12899,7 +13292,7 @@ class ProviderCoordinator {
    * Limits to show: the newer of /usage and the last streamed value. A limit
    * past its reset time shows as 0%. Pure API / stream authoritative model with zero synthetic math.
    */
-  _currentLimits(apiLimits = [], plan = null) {
+  _currentLimits(apiLimits = [], plan = null, messages = [], model = null) {
     const streamed = this._streamLimits;
     const serverLimits = apiLimits.length ? apiLimits : (this._accountLimits || []);
     const useStream = Boolean(streamed && (!serverLimits.length || (streamed.at || 0) >= (this._accountLimitsAt || this._api?.at || 0)));
@@ -12907,6 +13300,36 @@ class ProviderCoordinator {
     const rawLimits = useStream ? streamed.limits : serverLimits;
     const limits = rawLimits
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
+
+    // Check if an authoritative session limit with an active reset time exists
+    const hasAuthoritativeSession = limits.some(l => l.key === 'session' && typeof l.percent === 'number' && !l.estimated && l.resetsAt);
+
+    const hasUserMessages = Array.isArray(messages) && messages.some(m => m.role === 'user');
+    const hasActiveStoredWindow = Boolean(this._storedWindow?.startedAt && (now - this._storedWindow.startedAt < 5 * 3600 * 1000));
+
+    // If no authoritative session with reset time exists, estimate rolling 5h window when messages or stored window exist
+    if ((this.provider.name === 'Claude' || this.provider.name === 'Gemini') &&
+        !hasAuthoritativeSession &&
+        (hasUserMessages || hasActiveStoredWindow) &&
+        typeof this.provider.resolveSessionWindow === 'function') {
+      const { limit: sessionLimit, window } = this.provider.resolveSessionWindow(messages, model, now, this._storedWindow);
+      if (window && typeof chrome !== 'undefined' && chrome.storage?.local) {
+        this._storedWindow = window;
+        const winKey = `limits:${this.provider.name}:window`;
+        chrome.storage.local.set({ [winKey]: window }).catch(() => {});
+      }
+      const existingSessionIdx = limits.findIndex(l => l.key === 'session');
+      if (existingSessionIdx >= 0) {
+        const existing = limits[existingSessionIdx];
+        limits[existingSessionIdx] = {
+          ...sessionLimit,
+          percent: existing.percent > 0 ? Math.max(existing.percent, sessionLimit.percent) : sessionLimit.percent
+        };
+      } else {
+        limits.unshift(sessionLimit);
+      }
+      return limits;
+    }
 
     if (limits.length) return limits;
 
@@ -13064,7 +13487,7 @@ class ProviderCoordinator {
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
       // Plan usage limits as the site reports them (Claude only); read with the conversation
-      state.limits = this._currentLimits(saved?.limits || [], plan);
+      state.limits = this._currentLimits(saved?.limits || [], plan, tokenized, modelRaw);
       // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
       if (reached) {

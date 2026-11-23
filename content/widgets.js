@@ -24,6 +24,8 @@ import { getAdapterForProvider } from './strip-adapters.js';
 import { AlertManager } from './alerts.js';
 import { PreSendEstimator } from './pre-send.js';
 import { addSample, downsampleHistory } from './history.js';
+import { ExportDialog } from '../ui/export-dialog.js';
+import { ClaudeMessageParser } from './export/claude-message-parser.js';
 
 const MARGIN = 8; // Viewport clamp
 const TOP_SAFE = 72; // Snap top: below the sites' top bars (Share, account buttons)
@@ -145,7 +147,8 @@ export class Widgets {
       findInput: adapter.findInput || (() => null),
       replySelector: adapter.replySelector || null,
       userSelector: adapter.userSelector || null,
-      countTokens: adapter.countTokens || null
+      countTokens: adapter.countTokens || null,
+      onExportClick: adapter.onExportClick || null
     };
     this.page = createPage({ ...this.adapter, getLimits: () => this.vm?.limits || [] });
     this.settings = normalizeSettings();
@@ -265,6 +268,13 @@ export class Widgets {
       onToggleDev: (open) => {
         this.devOpen = open;
         if (open && this.vm) this._renderDevView();
+      },
+      onExportClick: () => {
+        if (this.adapter.onExportClick) {
+          this.adapter.onExportClick();
+        } else {
+          this._openExportDialog();
+        }
       }
     });
 
@@ -281,6 +291,34 @@ export class Widgets {
   _toggleDrawer(force) {
     if (!this.stripComponent) return;
     this.stripComponent._toggleDrawer(force);
+  }
+
+  _openExportDialog() {
+    try {
+      let exportData = null;
+      if (typeof ClaudeMessageParser !== 'undefined') {
+        const raw = this.latestState?.rawConversation;
+        if (raw) {
+          exportData = ClaudeMessageParser.parseFromApi(raw);
+        } else if (typeof document !== 'undefined') {
+          exportData = ClaudeMessageParser.parseFromDom(document);
+        }
+      }
+      if (!exportData) {
+        exportData = {
+          title: (typeof document !== 'undefined' ? document.title : '') || 'Conversation',
+          provider: this.adapter.provider || 'AI',
+          messages: []
+        };
+      }
+      const dialog = new ExportDialog({
+        data: exportData,
+        defaultFormat: this.settings?.export?.defaultFormat || 'markdown'
+      });
+      dialog.open();
+    } catch (err) {
+      console.warn('[AI Context Monitor] Failed to open export dialog:', err);
+    }
   }
 
   _ensureGlanceMounted() {

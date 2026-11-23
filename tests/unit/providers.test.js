@@ -216,6 +216,29 @@ export async function runProvidersTests() {
       coord._api = { at: sameMs };
       assert('Limits: streamed value wins on equal milliseconds', coord._currentLimits([{ key: 'session', label: 'S', percent: 30, resetsAt: null }])[0].percent === 9);
 
+      // 5-hour rolling session window estimation on Claude Free tier
+      coord._streamLimits = null;
+      coord._api = null;
+      const freeLimitsFromApi = [
+        { key: 'session', label: 'Session (5h)', percent: 0, resetsAt: null },
+        { key: 'weekly', label: 'Weekly', percent: 7, resetsAt: Date.now() + 8 * 3600 * 1000 }
+      ];
+      const userMsgs = [{ role: 'user', text: 'hi', tokens: 10, createdAt: Date.now() - 60000 }];
+      const resolvedFree = coord._currentLimits(freeLimitsFromApi, 'Free', userMsgs, 'claude-3-5-haiku-20241022');
+      assert('Limits: Free tier with user messages estimates 5h rolling session',
+        resolvedFree[0].key === 'session' && resolvedFree[0].estimated === true && resolvedFree[0].percent > 0 && typeof resolvedFree[0].resetsAt === 'number');
+      assert('Limits: Weekly limit preserved from server',
+        resolvedFree[1].key === 'weekly' && resolvedFree[1].percent === 7);
+
+      // Pro plan with authoritative session limit preserves server value without estimating
+      const proLimitsFromApi = [
+        { key: 'session', label: 'Session (5h)', percent: 45, resetsAt: Date.now() + 3600000, estimated: false },
+        { key: 'weekly', label: 'Weekly', percent: 12, resetsAt: Date.now() + 8 * 3600 * 1000 }
+      ];
+      const resolvedPro = coord._currentLimits(proLimitsFromApi, 'Pro', userMsgs, 'claude-3-5-sonnet-20241022');
+      assert('Limits: Pro tier with authoritative session preserves exact server values',
+        resolvedPro[0].key === 'session' && resolvedPro[0].percent === 45 && !resolvedPro[0].estimated);
+
       // Watcher (MAIN world): forwards only message_limit from a completion stream, page response untouched
       const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../../content/claude-limit-watcher.js'), 'utf8');
       const posted = [];

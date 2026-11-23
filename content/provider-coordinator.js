@@ -18,6 +18,8 @@ import { mergeLiveTurns } from './turn-merger.js';
 import { ChatGPTDOMObserver } from './chatgpt-dom.js';
 import { invalidateText, trustTextCache } from './providers.js';
 import { conversationRef, diagnosticsSnapshot, limitEvidence, addIntelligence } from './coordinator-common.js';
+import { ExportDialog } from '../ui/export-dialog.js';
+import { ClaudeMessageParser } from './export/claude-message-parser.js';
 
 const API_TTL_MS = 60000; // Saved copy stays fresh for a minute; a reply finishing re-reads it at once
 const EMPTY_RETRY_MS = 3000; // A saved copy with no turns yet (brand-new chat) is read again this soon
@@ -61,7 +63,8 @@ export class ProviderCoordinator {
       countTokens: (text) => {
         const { encoding, scale } = this._counting();
         return Math.round(this.tokenizer.countTokens(text, encoding) * scale);
-      }
+      },
+      onExportClick: () => this.openExportDialog()
     });
     this.domObserver = null;
     this.latestState = null;
@@ -77,6 +80,7 @@ export class ProviderCoordinator {
     this._streamLimits = null;
     this._accountLimits = null;
     this._accountLimitsAt = 0;
+    this._storedWindow = null;
   }
 
   init() {
@@ -204,6 +208,36 @@ export class ProviderCoordinator {
     return diagnosticsSnapshot(this.latestState, currentRef, { provider: this.provider.name });
   }
 
+  openExportDialog() {
+    try {
+      let exportData = null;
+      if (this.provider.name === 'Claude') {
+        const raw = this._api?.result || this.latestState?.rawConversation;
+        if (raw) {
+          exportData = ClaudeMessageParser.parseFromApi(raw);
+        } else if (typeof document !== 'undefined') {
+          exportData = ClaudeMessageParser.parseFromDom(document);
+        }
+      }
+      if (!exportData) {
+        exportData = {
+          title: (typeof document !== 'undefined' ? document.title : '') || 'Conversation',
+          provider: this.provider.name,
+          model: this.latestState?.modelRaw || 'Unknown',
+          source: 'dom',
+          exportedAt: Date.now(),
+          messages: []
+        };
+      }
+      const dialog = new ExportDialog({
+        data: exportData
+      });
+      dialog.open();
+    } catch (err) {
+      console.warn('[AI Context Monitor] Failed to open export dialog:', err);
+    }
+  }
+
   _getOrgScope() {
     const p = this.provider;
     return typeof p.getOrgId === 'function' ? p.getOrgId() : null;
@@ -218,9 +252,17 @@ export class ProviderCoordinator {
 
   _loadStoredLimits() {
     const p = this.provider;
-    if (!p.limitStreamSource) return;
     const store = typeof chrome !== 'undefined' ? chrome.storage?.local : null;
     if (!store) return;
+
+    if (p.name === 'Claude' || p.name === 'Gemini') {
+      const winKey = `limits:${p.name}:window`;
+      store.get(winKey).then(r => {
+        if (r?.[winKey] && !this._storedWindow) this._storedWindow = r[winKey];
+      }).catch(() => {});
+    }
+
+    if (!p.limitStreamSource) return;
     const key = this._limitKey();
     const accountKey = this._limitKey('account');
     const fallbackStreamKey = `limits:${p.name}`;
@@ -294,7 +336,7 @@ export class ProviderCoordinator {
    * Limits to show: the newer of /usage and the last streamed value. A limit
    * past its reset time shows as 0%. Pure API / stream authoritative model with zero synthetic math.
    */
-  _currentLimits(apiLimits = [], plan = null) {
+  _currentLimits(apiLimits = [], plan = null, messages = [], model = null) {
     const streamed = this._streamLimits;
     const serverLimits = apiLimits.length ? apiLimits : (this._accountLimits || []);
     const useStream = Boolean(streamed && (!serverLimits.length || (streamed.at || 0) >= (this._accountLimitsAt || this._api?.at || 0)));
@@ -302,6 +344,36 @@ export class ProviderCoordinator {
     const rawLimits = useStream ? streamed.limits : serverLimits;
     const limits = rawLimits
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
+
+    // Check if an authoritative session limit with an active reset time exists
+    const hasAuthoritativeSession = limits.some(l => l.key === 'session' && typeof l.percent === 'number' && !l.estimated && l.resetsAt);
+
+    const hasUserMessages = Array.isArray(messages) && messages.some(m => m.role === 'user');
+    const hasActiveStoredWindow = Boolean(this._storedWindow?.startedAt && (now - this._storedWindow.startedAt < 5 * 3600 * 1000));
+
+    // If no authoritative session with reset time exists, estimate rolling 5h window when messages or stored window exist
+    if ((this.provider.name === 'Claude' || this.provider.name === 'Gemini') &&
+        !hasAuthoritativeSession &&
+        (hasUserMessages || hasActiveStoredWindow) &&
+        typeof this.provider.resolveSessionWindow === 'function') {
+      const { limit: sessionLimit, window } = this.provider.resolveSessionWindow(messages, model, now, this._storedWindow);
+      if (window && typeof chrome !== 'undefined' && chrome.storage?.local) {
+        this._storedWindow = window;
+        const winKey = `limits:${this.provider.name}:window`;
+        chrome.storage.local.set({ [winKey]: window }).catch(() => {});
+      }
+      const existingSessionIdx = limits.findIndex(l => l.key === 'session');
+      if (existingSessionIdx >= 0) {
+        const existing = limits[existingSessionIdx];
+        limits[existingSessionIdx] = {
+          ...sessionLimit,
+          percent: existing.percent > 0 ? Math.max(existing.percent, sessionLimit.percent) : sessionLimit.percent
+        };
+      } else {
+        limits.unshift(sessionLimit);
+      }
+      return limits;
+    }
 
     if (limits.length) return limits;
 
@@ -459,7 +531,7 @@ export class ProviderCoordinator {
       state.observables.conversationId = conversationId;
       state.observables.awaitingData = awaitingData;
       // Plan usage limits as the site reports them (Claude only); read with the conversation
-      state.limits = this._currentLimits(saved?.limits || [], plan);
+      state.limits = this._currentLimits(saved?.limits || [], plan, tokenized, modelRaw);
       // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
       if (reached) {

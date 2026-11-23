@@ -45,7 +45,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   capsule: { method: 'ask-ai' },
   context: { alerts: true },
   display: { theme: 'auto', compact: false, badges: true },
-  features: DEFAULT_FEATURES
+  features: DEFAULT_FEATURES,
+  export: { defaultFormat: 'markdown' }
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -85,6 +86,9 @@ function normalizeSettings(raw) {
       usageHistory: bool(feat.usageHistory, DEFAULT_FEATURES.usageHistory),
       preSendEstimate: bool(feat.preSendEstimate, DEFAULT_FEATURES.preSendEstimate),
       checkpointExport: bool(feat.checkpointExport, DEFAULT_FEATURES.checkpointExport)
+    },
+    export: {
+      defaultFormat: oneOf(obj(r.export).defaultFormat, ['markdown', 'pdf', 'excel'])
     }
   };
 }
@@ -100,6 +104,7 @@ async function writeSettings(area, patch) {
   const p = obj(patch);
   const pContext = obj(p.context);
   const pFeatures = obj(p.features);
+  const pExport = obj(p.export);
 
   // Keep alerts in sync across features.alerts and context.alerts
   let syncedAlerts;
@@ -126,7 +131,8 @@ async function writeSettings(area, patch) {
     capsule: { ...cur.capsule, ...obj(p.capsule) },
     context: mergedContext,
     display: { ...cur.display, ...obj(p.display) },
-    features: mergedFeatures
+    features: mergedFeatures,
+    export: { ...cur.export, ...pExport }
   });
   await area.set({ [SETTINGS_KEY]: next });
   return next;
@@ -1313,7 +1319,8 @@ const ICONS = {
   chevron: 'M4 6l4 4 4-4',
   refresh: 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3',
   copy: 'M5.5 5.5V3.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M2.5 6.5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1z',
-  gear: 'M6.5 1.5h3l.4 1.5a5 5 0 0 1 1.2.7l1.5-.5 2.1 2.1-.5 1.5c.3.4.5.8.7 1.2l1.5.4v3l-1.5.4a5 5 0 0 1-.7 1.2l.5 1.5-2.1 2.1-1.5-.5a5 5 0 0 1-1.2.7l-.4 1.5h-3l-.4-1.5a5 5 0 0 1-1.2-.7l-1.5.5-2.1-2.1.5-1.5a5 5 0 0 1-.7-1.2l-1.5-.4v-3l1.5-.4a5 5 0 0 1 .7-1.2l-.5-1.5 2.1-2.1 1.5.5a5 5 0 0 1 1.2-.7l.4-1.5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'
+  gear: 'M6.5 1.5h3l.4 1.5a5 5 0 0 1 1.2.7l1.5-.5 2.1 2.1-.5 1.5c.3.4.5.8.7 1.2l1.5.4v3l-1.5.4a5 5 0 0 1-.7 1.2l.5 1.5-2.1 2.1-1.5-.5a5 5 0 0 1-1.2.7l-.4 1.5h-3l-.4-1.5a5 5 0 0 1-1.2-.7l-1.5.5-2.1-2.1.5-1.5a5 5 0 0 1-.7-1.2l-1.5-.4v-3l1.5-.4a5 5 0 0 1 .7-1.2l-.5-1.5 2.1-2.1 1.5.5a5 5 0 0 1 1.2-.7l.4-1.5zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',
+  export: 'M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2M8 2v7.5M5 6.5l3 3 3-3'
 };
 
 const fmtK = (n) => {
