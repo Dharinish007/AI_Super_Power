@@ -2,8 +2,8 @@
  * Unit Tests for Countdown & Biggest Item (content/countdown.js, content/biggest-item.js)
  */
 
-import { ResetCountdown } from '../../content/countdown.js';
-import { extractBiggestItem, formatBiggestItemDisplay, scrollToItem } from '../../content/biggest-item.js';
+import { ResetCountdown } from '../../src/features/countdown/countdown.js';
+import { extractBiggestItem, formatBiggestItemDisplay, scrollToItem } from '../../src/features/biggest-item/biggest-item.js';
 
 export function runBiggestItemAndCountdownTests() {
   console.log('--- Running Countdown & Biggest Item Tests ---');

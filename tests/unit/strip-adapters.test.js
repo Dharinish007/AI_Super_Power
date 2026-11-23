@@ -5,7 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { claudeAdapter, geminiAdapter, chatgptAdapter, getAdapterForProvider } from '../../content/strip-adapters.js';
+import { claudeAdapter, geminiAdapter, chatgptAdapter, getAdapterForProvider } from '../../src/ui/widget/strip-adapters.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

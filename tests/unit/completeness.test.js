@@ -11,9 +11,9 @@
  * - New chat initialization with full completeness
  */
 
-import { ContextCalculator } from '../../engine/context-calculator.js';
-import { ConfidenceLevel } from '../../engine/confidence-engine.js';
-import { ConversationClient } from '../../content/conversation-client.js';
+import { ContextCalculator } from '../../src/engine/context-calculator.js';
+import { ConfidenceLevel } from '../../src/engine/confidence-engine.js';
+import { ConversationClient } from '../../src/providers/chatgpt/conversation-client.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';

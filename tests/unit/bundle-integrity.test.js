@@ -10,8 +10,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { EvidenceType as ClassifierEvidenceType, AccuracyClass } from '../../engine/context-classifier.js';
-import { EvidenceType as MergerEvidenceType } from '../../engine/evidence-merger.js';
+import { EvidenceType as ClassifierEvidenceType, AccuracyClass } from '../../src/engine/context-classifier.js';
+import { EvidenceType as MergerEvidenceType } from '../../src/engine/evidence-merger.js';
 import { bundledContentScript, bundledSidePanel } from '../../scripts/build.js';
 
 const __filename = fileURLToPath(import.meta.url);

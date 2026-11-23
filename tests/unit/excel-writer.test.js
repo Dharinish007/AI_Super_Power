@@ -14,9 +14,9 @@ import {
   buildZipArchive,
   buildWorksheetXml,
   toExcel
-} from '../../engine/export/excel-writer.js';
-import { toTables } from '../../engine/export/table-extractor.js';
-import { ClaudeMessageParser } from '../../content/export/claude-message-parser.js';
+} from '../../src/engine/export/excel-writer.js';
+import { toTables } from '../../src/engine/export/table-extractor.js';
+import { ClaudeMessageParser } from '../../src/providers/claude/claude-message-parser.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const readFixture = file => JSON.parse(fs.readFileSync(path.join(rootDir, 'tests', 'fixtures', 'export', file), 'utf8'));

@@ -2,7 +2,7 @@
  * Unit Tests for StripComponent (ui/strip-component.js)
  */
 
-import { StripComponent } from '../../ui/strip-component.js';
+import { StripComponent } from '../../src/ui/widget/strip-component.js';
 
 class MockNode {
   constructor(tag, isSvg = false) {
@@ -178,8 +178,26 @@ export async function runStripComponentTests() {
     assert('Msgs left rendered above ring for Claude', comp.ctxMsgs.textContent.includes('~28 msgs'));
     assert('Ring displays 48% with ok state', comp.ctxVal.textContent.includes('48%') && comp.ctxVal.classList.contains('ok'));
     assert('Drawer title shows context 96K / 200K · est.', comp.dTitle.textContent.includes('96K / 200K · est.'));
-    assert('Drawer breakdown displays legend', comp.dLegUser.textContent.includes('You 4%') && comp.dLegAsst.textContent.includes('Claude & tools 55%'));
+    assert('Drawer breakdown displays legend', comp.dLegUser.textContent.includes('You 2%') && comp.dLegAsst.textContent.includes('Claude & tools 28%'));
     assert('Drawer shows biggest item', comp.dBigVal.textContent.includes('12K'));
+
+    // 1b. Zero context usage (B1 fix): empty ring, 0% across all segments, no 100% fallback
+    comp.render({
+      rows: [
+        { label: '5h', state: 'ok', percent: 0, resetsAt: null, source: 'measured' },
+        { label: 'Wk', state: 'ok', percent: 0, resetsAt: null, source: 'measured' }
+      ],
+      context: { used: 0, limit: 200000, source: 'estimated' },
+      msgsLeft: 0,
+      provider: 'Claude',
+      breakdown: { user: 0, assistant: 0, system: 0 }
+    });
+    assert('Zero usage displays 0% ring with arc hidden', comp.ctxVal.textContent.includes('0%') && comp.ringArc.style.display === 'none');
+    assert('Zero usage breakdown displays 0% for all segments',
+      comp.dLegUser.textContent.includes('You 0%') &&
+      comp.dLegAsst.textContent.includes('Claude & tools 0%') &&
+      comp.dLegSys.textContent.includes('System 0%')
+    );
 
     // 2. Danger threshold (> 80%) displays ⚠
     comp.render({

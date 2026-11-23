@@ -345,8 +345,8 @@ export class ProviderCoordinator {
     const limits = rawLimits
       .map(l => (l.resetsAt && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l));
 
-    // Check if an authoritative session limit with an active reset time exists
-    const hasAuthoritativeSession = limits.some(l => l.key === 'session' && typeof l.percent === 'number' && !l.estimated && l.resetsAt);
+    // Check if an authoritative 5h session limit with an active reset time exists
+    const hasAuthoritativeSession = limits.some(l => (l.id === '5h' || l.key === '5h' || l.key === 'session') && typeof (l.used ?? l.percent) === 'number' && !l.estimated && l.resetsAt);
 
     const hasUserMessages = Array.isArray(messages) && messages.some(m => m.role === 'user');
     const hasActiveStoredWindow = Boolean(this._storedWindow?.startedAt && (now - this._storedWindow.startedAt < 5 * 3600 * 1000));
@@ -362,12 +362,13 @@ export class ProviderCoordinator {
         const winKey = `limits:${this.provider.name}:window`;
         chrome.storage.local.set({ [winKey]: window }).catch(() => {});
       }
-      const existingSessionIdx = limits.findIndex(l => l.key === 'session');
+      const existingSessionIdx = limits.findIndex(l => l.id === '5h' || l.key === '5h' || l.key === 'session');
       if (existingSessionIdx >= 0) {
         const existing = limits[existingSessionIdx];
         limits[existingSessionIdx] = {
           ...sessionLimit,
-          percent: existing.percent > 0 ? Math.max(existing.percent, sessionLimit.percent) : sessionLimit.percent
+          percent: existing.percent > 0 ? Math.max(existing.percent, sessionLimit.percent) : sessionLimit.percent,
+          used: existing.used > 0 ? Math.max(existing.used, sessionLimit.used) : sessionLimit.used
         };
       } else {
         limits.unshift(sessionLimit);
@@ -379,16 +380,16 @@ export class ProviderCoordinator {
 
     if (this.provider.name === 'Claude') {
       if (String(plan).toLowerCase() === 'free') {
-        return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
+        return [{ id: '5h', key: '5h', label: '5h', used: 0, total: 100, note: 'Available · Dynamic limit', source: 'api' }];
       }
-      return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
+      return [{ id: '5h', key: '5h', label: '5h', used: 0, total: 100, percent: null, resetsAt: null, source: 'api' }];
     }
 
     if (!limits.length && this.provider.limitStreamSource) {
       if (String(plan).toLowerCase() === 'free') {
-        return [{ key: 'session', label: 'Session', note: 'Available · Dynamic limit' }];
+        return [{ id: '5h', key: '5h', label: '5h', used: 0, total: 100, note: 'Available · Dynamic limit', source: 'api' }];
       }
-      return [{ key: 'session', label: 'Session (5h)', percent: null, resetsAt: null }];
+      return [{ id: '5h', key: '5h', label: '5h', used: 0, total: 100, percent: null, resetsAt: null, source: 'api' }];
     }
     return limits;
   }
@@ -535,7 +536,7 @@ export class ProviderCoordinator {
       // Sites that only show a notice once a limit is hit (Claude / Gemini)
       const reached = p.detectLimitReached?.(document);
       if (reached) {
-        const idx = state.limits.findIndex(l => l.key === reached.key);
+        const idx = state.limits.findIndex(l => (l.id && reached.id && l.id === reached.id) || l.key === reached.key);
         if (idx >= 0) state.limits[idx] = reached;
         else state.limits.push(reached);
       }

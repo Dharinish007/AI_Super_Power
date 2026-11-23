@@ -2,7 +2,7 @@
  * Unit Tests for Usage History & Sparkline Generation (content/history.js)
  */
 
-import { downsampleHistory, addSample, generateSparklinePath } from '../../content/history.js';
+import { downsampleHistory, addSample, generateSparklinePath } from '../../src/features/history/history.js';
 
 export function runHistoryTests() {
   console.log('--- Running Usage History Tests ---');

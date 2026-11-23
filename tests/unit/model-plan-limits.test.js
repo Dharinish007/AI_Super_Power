@@ -18,12 +18,12 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ModelDetector } from '../../content/model-detector.js';
-import { normalizePlanTier, PlanTier } from '../../content/plan-detector.js';
-import { ContextCalculator } from '../../engine/context-calculator.js';
-import { EvidenceMerger, EvidenceType } from '../../engine/evidence-merger.js';
-import { ConfidenceEngine } from '../../engine/confidence-engine.js';
-import { AccuracyClass } from '../../engine/context-classifier.js';
+import { ModelDetector } from '../../src/providers/chatgpt/model-detector.js';
+import { normalizePlanTier, PlanTier } from '../../src/providers/chatgpt/plan-detector.js';
+import { ContextCalculator } from '../../src/engine/context-calculator.js';
+import { EvidenceMerger, EvidenceType } from '../../src/engine/evidence-merger.js';
+import { ConfidenceEngine } from '../../src/engine/confidence-engine.js';
+import { AccuracyClass } from '../../src/engine/context-classifier.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

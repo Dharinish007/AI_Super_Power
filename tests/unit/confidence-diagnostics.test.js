@@ -8,10 +8,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ContentScriptCoordinator } from '../../content/content-main.js';
-import { ConfidenceEngine } from '../../engine/confidence-engine.js';
-import { EvidenceMerger } from '../../engine/evidence-merger.js';
-import { toWidgetState } from '../../content/widget-state.js';
+import { ContentScriptCoordinator } from '../../src/providers/common/content-main.js';
+import { ConfidenceEngine } from '../../src/engine/confidence-engine.js';
+import { EvidenceMerger } from '../../src/engine/evidence-merger.js';
+import { toWidgetState } from '../../src/ui/widget/widget-state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../config/model-limits.json'), 'utf8'));

@@ -135,6 +135,17 @@ export function toWidgetState(s, opts = {}) {
     return {
       provider, conversationId: s?.observables?.conversationId || null, model: 'Detecting…', modelFamily: null, plan: null,
       usedTokens: 0, contextLimit: null, remainingTokens: null, percentage: null,
+      context: {
+        used: 0,
+        limit: 200000,
+        segments: [
+          { id: 'user', label: 'You', tokens: 0 },
+          { id: 'assistant', label: `${provider} & tools`, tokens: 0 },
+          { id: 'system', label: 'System & memory', tokens: 0 }
+        ],
+        source: 'dom',
+        confidence: 'estimate'
+      },
       limitStatus: 'UNKNOWN', confidence: 0, confidenceLevel: 'LOW',
       evidence: [], breakdown: [], stats: { user: 0, assistant: 0, hidden: 0 }, hiddenItems: [], limits: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
     };
@@ -224,19 +235,39 @@ export function toWidgetState(s, opts = {}) {
       label: i.label, tokens: i.tokens || 0, text: i.text || '',
       note: i.included === false ? 'not counted' : (i.estimated ? 'estimate' : null)
     })),
+    // Standardized context conforming to shared contract
+    context: {
+      used: usedTokens,
+      limit: contextLimit || 200000,
+      segments: [
+        { id: 'user', label: 'You', tokens: s.tokens?.user ?? 0 },
+        { id: 'assistant', label: `${provider} & tools`, tokens: s.tokens?.assistant ?? 0 },
+        { id: 'system', label: 'System & memory', tokens: s.tokens?.hidden ?? 0 }
+      ],
+      source: authoritative ? 'api' : (dataSource?.startsWith('dom') ? 'dom' : 'estimate'),
+      confidence: 'estimate'
+    },
     // Plan usage limits (Claude only; empty elsewhere): percent used and time until reset
     // Percent-based (Claude) or count-based (ChatGPT: `remaining`, `blocked`)
-    limits: (s.limits || []).map(l => ({
-      key: l.key,
-      label: l.label,
-      percent: l.percent,
-      remaining: l.remaining,
-      blocked: Boolean(l.blocked),
-      estimated: Boolean(l.estimated),
-      note: l.note || null,
-      resetsAt: l.resetsAt || null,
-      resetIn: formatResetIn(l.resetsAt)
-    })),
+    limits: (s.limits || []).map(l => {
+      const id = (l.id && l.id !== 'session') ? l.id : (l.key === 'session' ? '5h' : (l.key || '5h'));
+      const label = (l.label && l.label !== 'Session' && l.label !== 'Session (5h)') ? l.label : (id === 'weekly' ? 'Weekly' : '5h');
+      return {
+        id,
+        key: id,
+        label,
+        used: typeof l.used === 'number' ? l.used : (typeof l.percent === 'number' ? l.percent : 0),
+        total: typeof l.total === 'number' ? l.total : 100,
+        source: l.source || (l.estimated ? 'estimate' : 'api'),
+        percent: l.percent,
+        remaining: l.remaining,
+        blocked: Boolean(l.blocked),
+        estimated: Boolean(l.estimated),
+        note: l.note || null,
+        resetsAt: l.resetsAt || null,
+        resetIn: formatResetIn(l.resetsAt)
+      };
+    }),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
       : dataSource === 'dom_unsaved' ? 'Page text (not saved yet)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,

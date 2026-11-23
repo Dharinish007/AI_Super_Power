@@ -8,7 +8,7 @@
  * 5. Failures are backed off instead of refetched on every DOM mutation
  */
 
-import { ConversationClient } from '../../content/conversation-client.js';
+import { ConversationClient } from '../../src/providers/chatgpt/conversation-client.js';
 
 const TREE = {
   conversation_id: 'c-1',

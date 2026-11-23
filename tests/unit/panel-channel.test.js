@@ -1,6 +1,6 @@
 /** Unit Tests for content/panel-channel.js: URL support, panel states, the port protocol over fake ports. */
 
-import { PANEL_PORT, isSupportedUrl, panelStatus, servePanel, connectPanel } from '../../content/panel-channel.js';
+import { PANEL_PORT, isSupportedUrl, panelStatus, servePanel, connectPanel } from '../../src/core/panel-channel.js';
 
 /** Two linked fake ports, like chrome.runtime.Port. */
 function portPair() {

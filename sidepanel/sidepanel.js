@@ -6,7 +6,7 @@
 (function() {
   'use strict';
 
-  // --- content/settings.js ---
+  // --- src/core/settings.js ---
   /**
  * Context Monitor - Settings
  *
@@ -164,7 +164,7 @@ async function migrateSettings(area) {
 }
 
 
-  // --- content/widget-state.js ---
+  // --- src/ui/widget/widget-state.js ---
   /**
  * Context Monitor - Widget View State
  *
@@ -302,6 +302,17 @@ function toWidgetState(s, opts = {}) {
     return {
       provider, conversationId: s?.observables?.conversationId || null, model: 'Detecting…', modelFamily: null, plan: null,
       usedTokens: 0, contextLimit: null, remainingTokens: null, percentage: null,
+      context: {
+        used: 0,
+        limit: 200000,
+        segments: [
+          { id: 'user', label: 'You', tokens: 0 },
+          { id: 'assistant', label: `${provider} & tools`, tokens: 0 },
+          { id: 'system', label: 'System & memory', tokens: 0 }
+        ],
+        source: 'dom',
+        confidence: 'estimate'
+      },
       limitStatus: 'UNKNOWN', confidence: 0, confidenceLevel: 'LOW',
       evidence: [], breakdown: [], stats: { user: 0, assistant: 0, hidden: 0 }, hiddenItems: [], limits: [], source: '', turns: 0, warning: null, diagnostics: s?.diagnostics || null, ready: false
     };
@@ -391,19 +402,39 @@ function toWidgetState(s, opts = {}) {
       label: i.label, tokens: i.tokens || 0, text: i.text || '',
       note: i.included === false ? 'not counted' : (i.estimated ? 'estimate' : null)
     })),
+    // Standardized context conforming to shared contract
+    context: {
+      used: usedTokens,
+      limit: contextLimit || 200000,
+      segments: [
+        { id: 'user', label: 'You', tokens: s.tokens?.user ?? 0 },
+        { id: 'assistant', label: `${provider} & tools`, tokens: s.tokens?.assistant ?? 0 },
+        { id: 'system', label: 'System & memory', tokens: s.tokens?.hidden ?? 0 }
+      ],
+      source: authoritative ? 'api' : (dataSource?.startsWith('dom') ? 'dom' : 'estimate'),
+      confidence: 'estimate'
+    },
     // Plan usage limits (Claude only; empty elsewhere): percent used and time until reset
     // Percent-based (Claude) or count-based (ChatGPT: `remaining`, `blocked`)
-    limits: (s.limits || []).map(l => ({
-      key: l.key,
-      label: l.label,
-      percent: l.percent,
-      remaining: l.remaining,
-      blocked: Boolean(l.blocked),
-      estimated: Boolean(l.estimated),
-      note: l.note || null,
-      resetsAt: l.resetsAt || null,
-      resetIn: formatResetIn(l.resetsAt)
-    })),
+    limits: (s.limits || []).map(l => {
+      const id = (l.id && l.id !== 'session') ? l.id : (l.key === 'session' ? '5h' : (l.key || '5h'));
+      const label = (l.label && l.label !== 'Session' && l.label !== 'Session (5h)') ? l.label : (id === 'weekly' ? 'Weekly' : '5h');
+      return {
+        id,
+        key: id,
+        label,
+        used: typeof l.used === 'number' ? l.used : (typeof l.percent === 'number' ? l.percent : 0),
+        total: typeof l.total === 'number' ? l.total : 100,
+        source: l.source || (l.estimated ? 'estimate' : 'api'),
+        percent: l.percent,
+        remaining: l.remaining,
+        blocked: Boolean(l.blocked),
+        estimated: Boolean(l.estimated),
+        note: l.note || null,
+        resetsAt: l.resetsAt || null,
+        resetIn: formatResetIn(l.resetsAt)
+      };
+    }),
     source: authoritative ? 'Full conversation (API)' : dataSource === 'dom_fallback' ? 'Page text (API unavailable)'
       : dataSource === 'dom_unsaved' ? 'Page text (not saved yet)' : 'Page text',
     turns: s.observables?.messagesCount ?? 0,
@@ -447,7 +478,7 @@ function widgetFields(vm, fields) {
 }
 
 
-  // --- content/capsule.js ---
+  // --- src/core/capsule.js ---
   /**
  * Context Monitor - Capsule
  *
@@ -1031,7 +1062,7 @@ async function captureCapsule({ method, page, store, onStatus }) {
 }
 
 
-  // --- content/panel-channel.js ---
+  // --- src/core/panel-channel.js ---
   /**
  * Context Monitor - Panel channel
  *
@@ -1148,7 +1179,7 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
 }
 
 
-  // --- ui/formatters.js ---
+  // --- src/ui/shared/formatters.js ---
   /**
  * Context Monitor - Pure UI Formatters & Thresholds
  *
@@ -1156,6 +1187,46 @@ function connectPanel({ tabs, tabId, onState, onDisconnect = () => {} }) {
  * reset timestamps, and token counts across all surfaces (Strip component, Detail drawer, Side panel).
  * Pure functions: formatting only, no recalculation.
  */
+
+/**
+ * Evaluates color band for a utilization percentage:
+ * - < 75%: 'green' (e.g. 74.9 is 'green')
+ * - 75% to 90% (inclusive): 'amber' (75 is 'amber', 90 is 'amber')
+ * - > 90%: 'red' (90.1 is 'red')
+ * Handles null, undefined, and non-finite values safely by returning 'green'.
+ * @param {number|null|undefined} percent
+ * @returns {'green'|'amber'|'red'}
+ */
+function bandFor(percent) {
+  if (percent === null || percent === undefined || !Number.isFinite(percent)) {
+    return 'green';
+  }
+  if (percent < 75) return 'green';
+  if (percent <= 90) return 'amber';
+  return 'red';
+}
+
+/**
+ * Computes each segment's percentage against the total context limit.
+ * Total segment percentages sum to total context utilization percent, not 100%.
+ * At 0 context tokens or limit <= 0: all segments return 0%.
+ * @param {Array<{ id: string, label: string, tokens: number }>} segments
+ * @param {number} limit Total context limit
+ * @returns {Array<{ id: string, label: string, tokens: number, percent: number }>}
+ */
+function calculateSegmentPercents(segments, limit) {
+  if (!Array.isArray(segments)) return [];
+  if (!limit || limit <= 0) {
+    return segments.map(s => ({
+      ...s,
+      percent: 0
+    }));
+  }
+  return segments.map(s => ({
+    ...s,
+    percent: Math.round(((s.tokens || 0) / limit) * 100)
+  }));
+}
 
 /**
  * Returns threshold state for a percentage:
@@ -1309,7 +1380,7 @@ function formatTokens(tokens, options = {}) {
 }
 
 
-  // --- ui/dom.js ---
+  // --- src/ui/shared/dom.js ---
   /**
  * Context Monitor - shared DOM helpers and components (h, icons, Section, RowList, HiddenStack, formatters).
  * Moved out of overlay-ui.js so the widgets and the side panel build the same DOM. No dependencies.
@@ -1514,7 +1585,7 @@ function download(parent, base, ext, text, type = 'text/plain') {
 }
 
 
-  // --- ui/styles.js ---
+  // --- src/ui/shared/styles.js ---
   /**
  * Context Monitor - shared widget CSS (the STYLES string injected into each shadow root).
  * Moved out of overlay-ui.js so the side panel bundle reuses the same look.
@@ -1807,7 +1878,7 @@ const STYLES = `
   .ctx-ring-arc.ok { stroke: var(--good); }
   .ctx-ring-arc.warn { stroke: var(--warn); }
   .ctx-ring-arc.danger { stroke: var(--danger); }
-  .ctx-ring-arc.hatched { stroke-dasharray: 2.5 2 !important; }
+  .ctx-ring-arc.hatched { stroke-opacity: 0.85; }
   .ctx-pct { font-family: var(--mono); font-weight: 700; font-size: 12px; }
   .ctx-pct.ok { color: var(--good); }
   .ctx-pct.warn { color: var(--warn-text); }
@@ -1825,7 +1896,7 @@ const STYLES = `
 `;
 
 
-  // --- ui/capsule-panel.js ---
+  // --- src/ui/sidepanel/capsule-panel.js ---
   /**
  * Context Monitor - Capsules / Skills panel
  *
@@ -2306,7 +2377,7 @@ function CapsulePanel(parent, ctx) {
 }
 
 
-  // --- ui/context-view.js ---
+  // --- src/ui/sidepanel/context-view.js ---
   /**
  * Context Monitor - Simplified Context view
  *
@@ -2498,10 +2569,10 @@ function ContextView(parent, { actions }) {
 
     // 2. Stacked Bar & Legend
     const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
-    const total = (st.user + st.assistant + st.hidden) || vm.usedTokens || 1;
-    const youPct = Math.round((st.user / total) * 100);
-    const asstPct = Math.round((st.assistant / total) * 100);
-    const sysPct = Math.max(0, 100 - youPct - asstPct);
+    const totalLimit = vm.contextLimit || 200000;
+    const youPct = totalLimit > 0 ? Math.round(((st.user || 0) / totalLimit) * 100) : 0;
+    const asstPct = totalLimit > 0 ? Math.round(((st.assistant || 0) / totalLimit) * 100) : 0;
+    const sysPct = totalLimit > 0 ? Math.round(((st.hidden || 0) / totalLimit) * 100) : 0;
 
     segUser.style.width = `${youPct}%`;
     segAsst.style.width = `${asstPct}%`;
@@ -2522,10 +2593,10 @@ function ContextView(parent, { actions }) {
       show(bigRow, false);
     }
 
-    // 4. Usage section with exactly two rows (Session & Weekly)
+    // 4. Usage section with exactly two rows (5h & Weekly)
     const limits = vm.limits || [];
-    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session'));
-    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
+    const session = limits.find(l => l.id === '5h' || l.key === '5h' || l.key === 'session' || l.label === '5h' || l.label?.toLowerCase().includes('session'));
+    const weekly = limits.find(l => l.id === 'weekly' || l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
     let hasUsage = false;
 
     if (session) {
@@ -2535,7 +2606,8 @@ function ContextView(parent, { actions }) {
       const sReset = formatReset(session.resetsAt) || (session.resetIn ? `resets in ${session.resetIn}` : null);
       const parts = [sPct, sReset].filter(Boolean);
       if (parts.length) {
-        setText(sessionRow, `Session ${parts.join(' · ')}`);
+        const label = (session.label && session.label !== 'Session' && session.label !== 'Session (5h)') ? session.label : '5h';
+        setText(sessionRow, `${label} ${parts.join(' · ')}`);
         show(sessionRow, true);
         hasUsage = true;
       } else {
@@ -2601,7 +2673,7 @@ function ContextView(parent, { actions }) {
 }
 
 
-  // --- ui/settings-view.js ---
+  // --- src/ui/sidepanel/settings-view.js ---
   /**
  * Context Monitor - Settings tab: Widgets (two toggles, Context widget fields), Capsules (method),
  * Context (alerts), Display (theme, compact numbers, sidebar badges). Every change is written at once;
@@ -2684,7 +2756,7 @@ function SettingsView(parent, { storage }) {
 }
 
 
-  // --- sidepanel/main.js ---
+  // --- src/ui/sidepanel/main.js ---
   /**
  * AI Context Monitor - Side panel. Shows the active tab of this window: Context | Capsules | Skills |
  * Settings. The engine runs in the tab; this page renders its view state and calls back through the

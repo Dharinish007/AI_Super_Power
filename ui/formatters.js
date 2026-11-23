@@ -7,6 +7,46 @@
  */
 
 /**
+ * Evaluates color band for a utilization percentage:
+ * - < 75%: 'green' (e.g. 74.9 is 'green')
+ * - 75% to 90% (inclusive): 'amber' (75 is 'amber', 90 is 'amber')
+ * - > 90%: 'red' (90.1 is 'red')
+ * Handles null, undefined, and non-finite values safely by returning 'green'.
+ * @param {number|null|undefined} percent
+ * @returns {'green'|'amber'|'red'}
+ */
+export function bandFor(percent) {
+  if (percent === null || percent === undefined || !Number.isFinite(percent)) {
+    return 'green';
+  }
+  if (percent < 75) return 'green';
+  if (percent <= 90) return 'amber';
+  return 'red';
+}
+
+/**
+ * Computes each segment's percentage against the total context limit.
+ * Total segment percentages sum to total context utilization percent, not 100%.
+ * At 0 context tokens or limit <= 0: all segments return 0%.
+ * @param {Array<{ id: string, label: string, tokens: number }>} segments
+ * @param {number} limit Total context limit
+ * @returns {Array<{ id: string, label: string, tokens: number, percent: number }>}
+ */
+export function calculateSegmentPercents(segments, limit) {
+  if (!Array.isArray(segments)) return [];
+  if (!limit || limit <= 0) {
+    return segments.map(s => ({
+      ...s,
+      percent: 0
+    }));
+  }
+  return segments.map(s => ({
+    ...s,
+    percent: Math.round(((s.tokens || 0) / limit) * 100)
+  }));
+}
+
+/**
  * Returns threshold state for a percentage:
  * - under 50%: 'ok' ('good', green #10a37f, 🟢)
  * - 50-80%: 'warn' ('warn', amber #f59e0b, 🟡)

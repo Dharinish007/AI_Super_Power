@@ -33,18 +33,66 @@ function readCleanModule(file) {
     .replace(/^export\s+/gm, '');
 }
 
-// Bundle order: engine, network, content & DOM adapters, then the Claude / Gemini provider adapters
+// Bundle order: engine core, network observer, platform core, features, providers, UI, side-panel
+// All sources now live under src/; compiled outputs are written to content/ and sidepanel/ (MV3 manifest unchanged).
 const MODULES = [
-  'engine/tokenizer.js', 'engine/gemma-tokenizer.js', 'engine/context-classifier.js', 'engine/evidence-merger.js',
-  'engine/confidence-engine.js', 'engine/context-calculator.js', 'engine/context-advisor.js',
-  'engine/export/types.js', 'engine/export/markdown-exporter.js', 'ui/print-styles.js', 'engine/export/print-html-exporter.js', 'engine/export/table-extractor.js', 'engine/export/excel-writer.js',
+  // ── Layer 1: Headless engine (DOM-free) ──────────────────────────────────
+  'src/engine/tokenizer.js',
+  'src/engine/gemma-tokenizer.js',
+  'src/engine/context-classifier.js',
+  'src/engine/evidence-merger.js',
+  'src/engine/confidence-engine.js',
+  'src/engine/context-calculator.js',
+  'src/engine/context-advisor.js',
+  'src/engine/export/types.js',
+  'src/engine/export/markdown-exporter.js',
+  'src/ui/shared/print-styles.js',
+  'src/engine/export/print-html-exporter.js',
+  'src/engine/export/table-extractor.js',
+  'src/engine/export/excel-writer.js',
+
+  // ── Network observer (isolated-world bridge receiver) ────────────────────
   'network/request-observer.js',
-  'content/conversation-client.js', 'content/message-extractor.js', 'content/plan-detector.js', 'content/model-detector.js',
-  'content/attachment-detector.js', 'content/tool-detector.js', 'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/page-actions.js', 'content/panel-channel.js',
-  'content/alerts.js', 'content/countdown.js', 'content/biggest-item.js', 'content/history.js', 'content/pre-send.js', 'content/checkpoint-export.js',
-  'content/export/dom-block-parser.js', 'content/export/claude-message-parser.js',
-  'ui/formatters.js', 'ui/dom.js', 'ui/styles.js', 'ui/strip-component.js', 'ui/export-dialog.js', 'content/strip-adapters.js', 'content/widgets.js', 'content/chatgpt-dom.js', 'content/turn-merger.js', 'content/coordinator-common.js', 'content/content-main.js',
-  'content/providers.js', 'content/provider-coordinator.js'
+
+  // ── Layer 5: Core platform (settings, capsule, channels) ─────────────────
+  'src/core/settings.js',
+  'src/core/capsule.js',
+  'src/core/page-actions.js',
+  'src/core/panel-channel.js',
+
+  // ── Layer 3: Additive features ───────────────────────────────────────────
+  'src/features/alerts/alerts.js',
+  'src/features/countdown/countdown.js',
+  'src/features/biggest-item/biggest-item.js',
+  'src/features/history/history.js',
+  'src/features/pre-send/pre-send.js',
+  'src/features/checkpoint/checkpoint-export.js',
+  'src/providers/claude/dom-block-parser.js',
+  'src/providers/claude/claude-message-parser.js',
+
+  // ── Layer 4: UI shared primitives & in-page widget ───────────────────────
+  'src/ui/shared/formatters.js',
+  'src/ui/shared/dom.js',
+  'src/ui/shared/styles.js',
+  'src/ui/widget/strip-component.js',
+  'src/ui/widget/export-dialog.js',
+  'src/ui/widget/widget-state.js',
+  'src/ui/widget/strip-adapters.js',
+  'src/ui/widget/widgets.js',
+
+  // ── Layer 2: Site providers & coordinators ───────────────────────────────
+  'src/providers/chatgpt/conversation-client.js',
+  'src/providers/chatgpt/message-extractor.js',
+  'src/providers/chatgpt/plan-detector.js',
+  'src/providers/chatgpt/model-detector.js',
+  'src/providers/chatgpt/attachment-detector.js',
+  'src/providers/chatgpt/tool-detector.js',
+  'src/providers/chatgpt/chatgpt-dom.js',
+  'src/providers/common/turn-merger.js',
+  'src/providers/common/coordinator-common.js',
+  'src/providers/common/content-main.js',
+  'src/providers/common/providers.js',
+  'src/providers/common/provider-coordinator.js',
 ];
 
 export const bundledContentScript = `/**
@@ -86,10 +134,19 @@ ${MODULES.map(m => `  // --- ${m} ---\n  ${readCleanModule(m)}`).join('\n\n')}
 })();
 `;
 
-// Side panel: an extension page, so no tokenizer and no site adapters; only the views and the channel
+// Side panel: an extension page — no tokenizer, no site adapters; only views, formatters, and channel
 const PANEL_MODULES = [
-  'content/settings.js', 'content/widget-state.js', 'content/capsule.js', 'content/panel-channel.js',
-  'ui/formatters.js', 'ui/dom.js', 'ui/styles.js', 'ui/capsule-panel.js', 'ui/context-view.js', 'ui/settings-view.js', 'sidepanel/main.js'
+  'src/core/settings.js',
+  'src/ui/widget/widget-state.js',
+  'src/core/capsule.js',
+  'src/core/panel-channel.js',
+  'src/ui/shared/formatters.js',
+  'src/ui/shared/dom.js',
+  'src/ui/shared/styles.js',
+  'src/ui/sidepanel/capsule-panel.js',
+  'src/ui/sidepanel/context-view.js',
+  'src/ui/sidepanel/settings-view.js',
+  'src/ui/sidepanel/main.js',
 ];
 
 export const bundledSidePanel = `/**

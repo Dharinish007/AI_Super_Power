@@ -33,7 +33,7 @@ export function claudeAdapter(viewState = {}, _settings = {}) {
     const rows = [];
 
     // Session (5h) row: always present for Claude
-    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session') || l.label?.toLowerCase().includes('5h'));
+    const session = limits.find(l => l.id === '5h' || l.key === '5h' || l.key === 'session' || l.label?.toLowerCase().includes('session') || l.label?.toLowerCase().includes('5h'));
     const sessionPct = (session && typeof session.percent === 'number' && Number.isFinite(session.percent))
       ? Math.round(session.percent)
       : (limits.length === 0 ? 0 : undefined);
@@ -127,7 +127,7 @@ export function geminiAdapter(viewState = {}, _settings = {}) {
 
     // Gemini: 5h and Weekly (one weighted pool). Show note "Heavy tasks use more".
     // Both 5h and Weekly rows are always present
-    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session') || l.label?.toLowerCase().includes('5h'));
+    const session = limits.find(l => l.id === '5h' || l.key === '5h' || l.key === 'session' || l.label?.toLowerCase().includes('session') || l.label?.toLowerCase().includes('5h'));
     const sessionPct = (session && typeof session.percent === 'number' && Number.isFinite(session.percent))
       ? Math.round(session.percent)
       : 0;
@@ -144,7 +144,7 @@ export function geminiAdapter(viewState = {}, _settings = {}) {
       note: 'Heavy tasks use more'
     });
 
-    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
+    const weekly = limits.find(l => l.id === 'weekly' || l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
     const weeklyPct = (weekly && typeof weekly.percent === 'number' && Number.isFinite(weekly.percent))
       ? Math.round(weekly.percent)
       : 0;

@@ -2,9 +2,9 @@
  * Context Monitor - Export Dialog & UI Wiring Test Suite
  */
 
-import { slugifyTitle, ExportDialog } from '../../ui/export-dialog.js';
-import { StripComponent } from '../../ui/strip-component.js';
-import { createParagraphBlock, createUnknownBlock } from '../../engine/export/types.js';
+import { slugifyTitle, ExportDialog } from '../../src/ui/widget/export-dialog.js';
+import { StripComponent } from '../../src/ui/widget/strip-component.js';
+import { createParagraphBlock, createUnknownBlock } from '../../src/engine/export/types.js';
 
 // Minimal Mock DOM Node for headless testing of UI Dialog & StripComponent
 class MockElement {

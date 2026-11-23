@@ -7,8 +7,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { Tokenizer } from '../../engine/tokenizer.js';
-import { GeminiProvider } from '../../content/providers.js';
+import { Tokenizer } from '../../src/engine/tokenizer.js';
+import { GeminiProvider } from '../../src/providers/common/providers.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 

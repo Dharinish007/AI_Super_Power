@@ -9,10 +9,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ContentScriptCoordinator } from '../../content/content-main.js';
-import { ConversationClient } from '../../content/conversation-client.js';
-import { ChatGPTDOMObserver } from '../../content/chatgpt-dom.js';
-import { toWidgetState } from '../../content/widget-state.js';
+import { ContentScriptCoordinator } from '../../src/providers/common/content-main.js';
+import { ConversationClient } from '../../src/providers/chatgpt/conversation-client.js';
+import { ChatGPTDOMObserver } from '../../src/providers/chatgpt/chatgpt-dom.js';
+import { toWidgetState } from '../../src/ui/widget/widget-state.js';
 import { loadServiceWorker } from './reliability.test.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

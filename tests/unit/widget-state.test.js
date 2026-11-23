@@ -3,9 +3,9 @@
  * The UI must display engine values unchanged: only formatting, never recalculation.
  */
 
-import { ClaudeProvider } from '../../content/providers.js';
-import { toWidgetState, formatModelName, alertLevel, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage, widgetFields } from '../../content/widget-state.js';
-import { widgetPositions } from '../../content/widgets.js';
+import { ClaudeProvider } from '../../src/providers/common/providers.js';
+import { toWidgetState, formatModelName, alertLevel, biggestMessages, formatChatExport, growthSeries, normalizeAttachments, chatIdFromHref, recordUsage, widgetFields } from '../../src/ui/widget/widget-state.js';
+import { widgetPositions } from '../../src/ui/widget/widgets.js';
 
 export function runWidgetStateTests() {
   console.log('--- Running Widget View-State Tests ---');

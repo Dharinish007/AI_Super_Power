@@ -12,10 +12,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Tiktoken } from 'js-tiktoken/lite';
 import o200k_base from 'js-tiktoken/ranks/o200k_base';
-import { Tokenizer } from '../../engine/tokenizer.js';
-import { MessageExtractor } from '../../content/message-extractor.js';
-import { queryGroups } from '../../content/tool-detector.js';
-import { ConversationClient } from '../../content/conversation-client.js';
+import { Tokenizer } from '../../src/engine/tokenizer.js';
+import { MessageExtractor } from '../../src/providers/chatgpt/message-extractor.js';
+import { queryGroups } from '../../src/providers/chatgpt/tool-detector.js';
+import { ConversationClient } from '../../src/providers/chatgpt/conversation-client.js';
 
 const fixtures = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../fixtures/conversations');
 

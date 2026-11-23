@@ -12,9 +12,9 @@ import path from 'path';
 import vm from 'vm';
 import { fileURLToPath } from 'url';
 import { RequestObserver } from '../../network/request-observer.js';
-import { ConversationClient } from '../../content/conversation-client.js';
-import { mergeLiveTurns } from '../../content/turn-merger.js';
-import { ContentScriptCoordinator } from '../../content/content-main.js';
+import { ConversationClient } from '../../src/providers/chatgpt/conversation-client.js';
+import { mergeLiveTurns } from '../../src/providers/common/turn-merger.js';
+import { ContentScriptCoordinator } from '../../src/providers/common/content-main.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const interceptorCode = fs.readFileSync(path.resolve(__dirname, '../../content/network-interceptor.js'), 'utf8');

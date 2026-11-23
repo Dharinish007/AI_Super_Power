@@ -290,7 +290,7 @@ export const STYLES = `
   .ctx-ring-arc.ok { stroke: var(--good); }
   .ctx-ring-arc.warn { stroke: var(--warn); }
   .ctx-ring-arc.danger { stroke: var(--danger); }
-  .ctx-ring-arc.hatched { stroke-dasharray: 2.5 2 !important; }
+  .ctx-ring-arc.hatched { stroke-opacity: 0.85; }
   .ctx-pct { font-family: var(--mono); font-weight: 700; font-size: 12px; }
   .ctx-pct.ok { color: var(--good); }
   .ctx-pct.warn { color: var(--warn-text); }

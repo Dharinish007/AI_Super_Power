@@ -409,7 +409,7 @@ export class StripComponent {
         const t = threshold(pct);
         const offset = RING_CIRCUMFERENCE * (1 - Math.min(100, Math.max(0, pct)) / 100);
 
-        this.ringArc.style.display = '';
+        this.ringArc.style.display = pct === 0 ? 'none' : '';
         this.ringArc.setAttribute('stroke-dashoffset', String(offset));
         this.ringArc.className.baseVal = `ctx-ring-arc ${t.state} ${isEstCtx ? 'hatched' : ''}`;
 
@@ -454,11 +454,11 @@ export class StripComponent {
     const uTokens = bk.user || 0;
     const aTokens = bk.assistant || 0;
     const sTokens = bk.system || 0;
-    const totalBk = (uTokens + aTokens + sTokens) || used || 1;
+    const contextLimit = ringLimit || data.context?.limit || 200000;
 
-    const uPct = Math.round((uTokens / totalBk) * 100);
-    const aPct = Math.round((aTokens / totalBk) * 100);
-    const sPct = Math.max(0, 100 - uPct - aPct);
+    const uPct = contextLimit > 0 ? Math.round((uTokens / contextLimit) * 100) : 0;
+    const aPct = contextLimit > 0 ? Math.round((aTokens / contextLimit) * 100) : 0;
+    const sPct = contextLimit > 0 ? Math.round((sTokens / contextLimit) * 100) : 0;
 
     this.dSegUser.style.width = `${uPct}%`;
     this.dSegAsst.style.width = `${aPct}%`;

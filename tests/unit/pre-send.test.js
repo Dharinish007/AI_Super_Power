@@ -2,7 +2,7 @@
  * Unit Tests for Pre-Send Estimator (content/pre-send.js)
  */
 
-import { PreSendEstimator, formatPreSendEstimate } from '../../content/pre-send.js';
+import { PreSendEstimator, formatPreSendEstimate } from '../../src/features/pre-send/pre-send.js';
 
 export function runPreSendTests() {
   console.log('--- Running Pre-Send Token Estimator Tests ---');

@@ -8,7 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ConversationClient } from '../../content/conversation-client.js';
+import { ConversationClient } from '../../src/providers/chatgpt/conversation-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

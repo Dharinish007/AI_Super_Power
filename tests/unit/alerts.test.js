@@ -2,7 +2,7 @@
  * Unit Tests for Threshold Alerts & Hysteresis Engine (content/alerts.js)
  */
 
-import { AlertManager, shouldShowNewChatSuggestion } from '../../content/alerts.js';
+import { AlertManager, shouldShowNewChatSuggestion } from '../../src/features/alerts/alerts.js';
 
 export function runAlertsTests() {
   console.log('--- Running Threshold Alerts & Hysteresis Tests ---');

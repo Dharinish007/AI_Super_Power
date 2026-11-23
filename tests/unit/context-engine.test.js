@@ -5,10 +5,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ContextClassifier, AccuracyClass } from '../../engine/context-classifier.js';
-import { ConfidenceEngine, ConfidenceLevel } from '../../engine/confidence-engine.js';
-import { ContextCalculator } from '../../engine/context-calculator.js';
-import { ModelDetector } from '../../content/model-detector.js';
+import { ContextClassifier, AccuracyClass } from '../../src/engine/context-classifier.js';
+import { ConfidenceEngine, ConfidenceLevel } from '../../src/engine/confidence-engine.js';
+import { ContextCalculator } from '../../src/engine/context-calculator.js';
+import { ModelDetector } from '../../src/providers/chatgpt/model-detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

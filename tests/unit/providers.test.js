@@ -7,7 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ClaudeProvider, GeminiProvider, claudeModelKey, providerForHost, parseBatchexecute } from '../../content/providers.js';
+import { ClaudeProvider, GeminiProvider, claudeModelKey, providerForHost, parseBatchexecute, buildGeminiContractData } from '../../content/providers.js';
 import { ProviderCoordinator } from '../../content/provider-coordinator.js';
 import { ConfidenceEngine } from '../../engine/confidence-engine.js';
 import { Tokenizer } from '../../engine/tokenizer.js';
@@ -158,10 +158,10 @@ export async function runProvidersTests() {
         { kind: 'weekly_scoped', percent: 40, resets_at: null, scope: { model: { display_name: 'Opus' } } },
         { kind: 'mystery', percent: 99 }
       ] });
-      assert('Usage (limits[] shape): session, weekly and per-model weekly; unknown kinds skipped',
-        newer.map(l => `${l.key}:${l.percent}`).join(',') === 'session:28,weekly:12,weekly:Opus:40');
+      assert('Usage (limits[] shape): 5h, weekly and per-model weekly; unknown kinds skipped',
+        newer.map(l => `${l.key}:${l.percent}`).join(',') === '5h:28,weekly:12,weekly:Opus:40');
       const older = ClaudeProvider.parseUsage({ five_hour: { utilization: 7, resets_at: '2026-09-28T13:00:00Z' }, seven_day: null });
-      assert('Usage (older top-level shape) is read too', older.length === 1 && older[0].key === 'session' && older[0].percent === 7);
+      assert('Usage (older top-level shape) is read too', older.length === 1 && older[0].key === '5h' && older[0].percent === 7);
       assert('Usage: missing or malformed response -> no limits', ClaudeProvider.parseUsage(null).length === 0 && ClaudeProvider.parseUsage({ limits: [{ kind: 'session' }] }).length === 0);
       assert('Reset time formatted relative to now', formatResetIn(newer[0].resetsAt, now) === '3h 57m' &&
         formatResetIn(newer[1].resetsAt, now) === '4d 0h' && formatResetIn(now - 1000, now) === null && formatResetIn(null, now) === null);
@@ -170,8 +170,8 @@ export async function runProvidersTests() {
 
       // Stream event (the only source when /usage is empty, e.g. Free plan)
       const ml = ClaudeProvider.parseMessageLimit({ resetsAt: 1790000000, windows: { '5h': { utilization: 0.19 }, '7d': { utilization: 0.05, resets_at: '2026-10-02T12:00:00Z' } } });
-      assert('message_limit: 5h/7d fractions -> Session/Weekly percent; epoch-seconds reset -> ms',
-        ml.length === 2 && ml[0].key === 'session' && ml[0].percent === 19 && ml[0].resetsAt === 1790000000000 && ml[1].percent === 5 && ml[1].resetsAt === Date.parse('2026-10-02T12:00:00Z'));
+      assert('message_limit: 5h/7d fractions -> 5h/Weekly percent; epoch-seconds reset -> ms',
+        ml.length === 2 && ml[0].key === '5h' && ml[0].percent === 19 && ml[0].resetsAt === 1790000000000 && ml[1].percent === 5 && ml[1].resetsAt === Date.parse('2026-10-02T12:00:00Z'));
       const mlWithin = ClaudeProvider.parseMessageLimit({ type: 'within_limit' });
       assert('message_limit: within_limit -> dynamic note', mlWithin.length === 1 && mlWithin[0].note === 'Within limit · Dynamic');
       const mlExceeded = ClaudeProvider.parseMessageLimit({ type: 'exceeded_limit', resetsAt: 1790000000 });
@@ -179,7 +179,7 @@ export async function runProvidersTests() {
       assert('message_limit: malformed -> nothing', ClaudeProvider.parseMessageLimit(null).length === 0 && ClaudeProvider.parseMessageLimit({ windows: { '5h': {} } }).length === 0);
 
       const coord = new ProviderCoordinator(ClaudeProvider);
-      assert('Limits: nothing known yet -> placeholder session row (percent null)', coord._currentLimits([]).length === 1 && coord._currentLimits([])[0].percent === null);
+      assert('Limits: nothing known yet -> placeholder 5h row (percent null)', coord._currentLimits([]).length === 1 && coord._currentLimits([])[0].percent === null && coord._currentLimits([])[0].label === '5h');
       assert('Limits: Free plan initial load -> dynamic limit note', coord._currentLimits([], 'Free')[0].note === 'Available · Dynamic limit');
 
       // Account-wide fetchUsage testing
@@ -201,10 +201,10 @@ export async function runProvidersTests() {
       assert('limitText: estimated percentage includes ≈ badge', limitText({ percent: 25, estimated: true, resetIn: '4h 12m' }) === '≈ 25% · resets in 4h 12m');
       assert('limitText: exact percentage without ≈ badge', limitText({ percent: 25, estimated: false, resetIn: '4h 12m' }) === '25% · resets in 4h 12m');
 
-      coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 19, resetsAt: Date.now() + 3600000 }], at: Date.now() };
+      coord._streamLimits = { limits: [{ id: '5h', key: '5h', label: '5h', percent: 19, resetsAt: Date.now() + 3600000 }], at: Date.now() };
       assert('Limits: streamed value used when /usage is empty', coord._currentLimits([])[0].percent === 19);
       coord._api = { at: Date.now() + 1000 };
-      assert('Limits: a newer /usage read wins over the streamed value', coord._currentLimits([{ key: 'session', label: 'S', percent: 30, resetsAt: null }])[0].percent === 30);
+      assert('Limits: a newer /usage read wins over the streamed value', coord._currentLimits([{ id: '5h', key: '5h', label: '5h', percent: 30, resetsAt: null }])[0].percent === 30);
       coord._api = null;
       coord._streamLimits.limits[0].resetsAt = Date.now() - 1000;
       assert('Limits: past the reset time -> 0%, no reset shown', coord._currentLimits([])[0].percent === 0 && coord._currentLimits([])[0].resetsAt === null);
@@ -212,32 +212,55 @@ export async function runProvidersTests() {
       // Streamed value keeps winning even when the timestamps land in the same millisecond and both show
       // a smaller percentage than the API copy — this was the five-hour reduction bug.
       const sameMs = Date.now();
-      coord._streamLimits = { limits: [{ key: 'session', label: 'Session (5h)', percent: 9, resetsAt: sameMs + 3600000 }], at: sameMs };
+      coord._streamLimits = { limits: [{ id: '5h', key: '5h', label: '5h', percent: 9, resetsAt: sameMs + 3600000 }], at: sameMs };
       coord._api = { at: sameMs };
-      assert('Limits: streamed value wins on equal milliseconds', coord._currentLimits([{ key: 'session', label: 'S', percent: 30, resetsAt: null }])[0].percent === 9);
+      assert('Limits: streamed value wins on equal milliseconds', coord._currentLimits([{ id: '5h', key: '5h', label: '5h', percent: 30, resetsAt: null }])[0].percent === 9);
 
       // 5-hour rolling session window estimation on Claude Free tier
       coord._streamLimits = null;
       coord._api = null;
       const freeLimitsFromApi = [
-        { key: 'session', label: 'Session (5h)', percent: 0, resetsAt: null },
-        { key: 'weekly', label: 'Weekly', percent: 7, resetsAt: Date.now() + 8 * 3600 * 1000 }
+        { id: '5h', key: '5h', label: '5h', percent: 0, resetsAt: null },
+        { id: 'weekly', key: 'weekly', label: 'Weekly', percent: 7, resetsAt: Date.now() + 8 * 3600 * 1000 }
       ];
       const userMsgs = [{ role: 'user', text: 'hi', tokens: 10, createdAt: Date.now() - 60000 }];
       const resolvedFree = coord._currentLimits(freeLimitsFromApi, 'Free', userMsgs, 'claude-3-5-haiku-20241022');
       assert('Limits: Free tier with user messages estimates 5h rolling session',
-        resolvedFree[0].key === 'session' && resolvedFree[0].estimated === true && resolvedFree[0].percent > 0 && typeof resolvedFree[0].resetsAt === 'number');
+        resolvedFree[0].key === '5h' && resolvedFree[0].label === '5h' && resolvedFree[0].estimated === true && resolvedFree[0].percent > 0 && typeof resolvedFree[0].resetsAt === 'number');
       assert('Limits: Weekly limit preserved from server',
         resolvedFree[1].key === 'weekly' && resolvedFree[1].percent === 7);
 
       // Pro plan with authoritative session limit preserves server value without estimating
       const proLimitsFromApi = [
-        { key: 'session', label: 'Session (5h)', percent: 45, resetsAt: Date.now() + 3600000, estimated: false },
-        { key: 'weekly', label: 'Weekly', percent: 12, resetsAt: Date.now() + 8 * 3600 * 1000 }
+        { id: '5h', key: '5h', label: '5h', percent: 45, resetsAt: Date.now() + 3600000, estimated: false },
+        { id: 'weekly', key: 'weekly', label: 'Weekly', percent: 12, resetsAt: Date.now() + 8 * 3600 * 1000 }
       ];
       const resolvedPro = coord._currentLimits(proLimitsFromApi, 'Pro', userMsgs, 'claude-3-5-sonnet-20241022');
       assert('Limits: Pro tier with authoritative session preserves exact server values',
-        resolvedPro[0].key === 'session' && resolvedPro[0].percent === 45 && !resolvedPro[0].estimated);
+        resolvedPro[0].key === '5h' && resolvedPro[0].label === '5h' && resolvedPro[0].percent === 45 && !resolvedPro[0].estimated);
+
+      // Claude shared contract verification
+      const contract = ClaudeProvider.toContractData({
+        tokens: { totalMeasurable: 96000, user: 4000, assistant: 55000, hidden: 37000 },
+        model: { contextWindow: 200000 },
+        limits: [
+          { id: '5h', label: '5h', used: 67, total: 100, resetsAt: 1700000000000, source: 'api' },
+          { id: 'weekly', label: 'Weekly', used: 12, total: 100, resetsAt: 1700500000000, source: 'api' }
+        ]
+      });
+      assert('Claude toContractData adheres to shared contract',
+        contract.provider === 'claude' &&
+        contract.context.used === 96000 &&
+        contract.context.limit === 200000 &&
+        contract.context.confidence === 'estimate' &&
+        contract.context.segments.length === 3 &&
+        contract.context.segments[0].id === 'user' && contract.context.segments[0].tokens === 4000 &&
+        contract.context.segments[1].id === 'assistant' && contract.context.segments[1].tokens === 55000 &&
+        contract.context.segments[2].id === 'system' && contract.context.segments[2].tokens === 37000 &&
+        contract.limits.length === 2 &&
+        contract.limits[0].id === '5h' && contract.limits[0].label === '5h' && contract.limits[0].used === 67 &&
+        contract.limits[1].id === 'weekly' && contract.limits[1].label === 'Weekly'
+      );
 
       // Watcher (MAIN world): forwards only message_limit from a completion stream, page response untouched
       const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../../content/claude-limit-watcher.js'), 'utf8');
@@ -423,6 +446,18 @@ export async function runProvidersTests() {
       await hf.run({ forceApi: true });
       assert('Gemini: repeated failures back off (15 s -> 30 s)', retryMs === 30000);
       assert('Gemini: read failure falls back to the page, flagged as a lower bound', sf.observables.dataSource === 'dom_fallback' && sf.completeness.isLowerBound === true);
+      const contractFailing = GeminiProvider.toContractData(sf);
+      assert('Gemini RPC failure gracefully falls back to DOM with source: "dom" and limit 200000 without throwing',
+        contractFailing.provider === 'gemini' &&
+        contractFailing.context.source === 'dom' &&
+        contractFailing.context.limit === 200000 &&
+        contractFailing.context.used > 0 &&
+        contractFailing.context.confidence === 'estimate' &&
+        contractFailing.context.segments.length === 3 &&
+        contractFailing.context.segments[0].label === 'You' &&
+        contractFailing.context.segments[1].label === 'Gemini & tools' &&
+        contractFailing.context.segments[2].label === 'System & memory'
+      );
 
       env.domPlan = null;
       const s2 = await run();
@@ -459,7 +494,8 @@ export async function runProvidersTests() {
       const usage = GeminiProvider.parseUsage(parseBatchexecute(")]}'\n\n189\n" + JSON.stringify([['wrb.fr', 'jSf9Qc', '[1,[[600,0,1,[[1790880148,801040000]]],[12096,0,2,[[1791466948,801043000]]]],false]', null, null, null, 'generic']]), 'jSf9Qc'));
       assert('Gemini usage: tier 1 -> free (reported, OBSERVED); 5h + weekly limits with reset times',
         usage.plan.value === 'free' && usage.plan.evidenceType === 'OBSERVED' && usage.limits.length === 2 &&
-        usage.limits[0].key === 'session' && usage.limits[0].percent === 0 && usage.limits[0].resetsAt === 1790880148000 && usage.limits[1].key === 'weekly');
+        usage.limits[0].id === '5h' && usage.limits[0].key === '5h' && usage.limits[0].label === '5h' && usage.limits[0].percent === 0 && usage.limits[0].resetsAt === 1790880148000 &&
+        usage.limits[1].id === 'weekly' && usage.limits[1].key === 'weekly' && usage.limits[1].label === 'Weekly');
       const tiers = [2, 3, 4, 6].map(t => GeminiProvider.parseUsage([t, [[10, 0.42, 1, [[1, 0]]], [5, 0.9, 3, []]]]));
       assert('Gemini usage: tiers 2 Pro, 3/6 Ultra, 4 Plus; used fraction -> percent; AI-credit window skipped',
         tiers.map(u => u.plan.value).join() === 'pro,ultra,plus,ultra' && tiers[0].limits.length === 1 && tiers[0].limits[0].percent === 42);
@@ -493,6 +529,58 @@ export async function runProvidersTests() {
       assert('Gemini attachments: 258 per image on 2.x; current model when no version is shown',
         GeminiProvider.pageAttachments({ querySelectorAll: () => [q] }, '2.5 Flash').estimatedTokens === 516 &&
         GeminiProvider.pageAttachments({ querySelectorAll: () => [q] }, 'Flash').estimatedTokens === 2240);
+
+      // Gemini shared contract verification
+      const gContract = GeminiProvider.toContractData({
+        tokens: { totalMeasurable: 80000, user: 10000, assistant: 50000, hidden: 20000 },
+        model: { contextWindow: 200000 },
+        limits: [
+          { id: '5h', label: '5h', used: 45, total: 100, resetsAt: 1790880148000, source: 'api' },
+          { id: 'weekly', label: 'Weekly', used: 12, total: 100, resetsAt: 1791466948000, source: 'api' }
+        ]
+      });
+      assert('Gemini toContractData adheres to shared contract',
+        gContract.provider === 'gemini' &&
+        gContract.context.used === 80000 &&
+        gContract.context.limit === 200000 &&
+        gContract.context.confidence === 'estimate' &&
+        gContract.context.segments.length === 3 &&
+        gContract.context.segments[0].id === 'user' && gContract.context.segments[0].label === 'You' && gContract.context.segments[0].tokens === 10000 &&
+        gContract.context.segments[1].id === 'assistant' && gContract.context.segments[1].label === 'Gemini & tools' && gContract.context.segments[1].tokens === 50000 &&
+        gContract.context.segments[2].id === 'system' && gContract.context.segments[2].label === 'System & memory' && gContract.context.segments[2].tokens === 20000 &&
+        gContract.limits.length === 2 &&
+        gContract.limits[0].id === '5h' && gContract.limits[0].label === '5h' && gContract.limits[0].used === 45 &&
+        gContract.limits[1].id === 'weekly' && gContract.limits[1].label === 'Weekly' && gContract.limits[1].used === 12
+      );
+
+      // Gemini 0 context usage (Fix B1, Fix B2)
+      const gZeroContract = GeminiProvider.toContractData({
+        tokens: { totalMeasurable: 0, user: 0, assistant: 0, hidden: 0 }
+      });
+      assert('Gemini toContractData at 0 usage: used = 0, limit = 200000, all segments 0',
+        gZeroContract.context.used === 0 &&
+        gZeroContract.context.limit === 200000 &&
+        gZeroContract.context.segments.every(s => s.tokens === 0)
+      );
+
+      // Limit labels: zero "Session" occurrences in Gemini limits (Fix B3)
+      const gSessionWindow = GeminiProvider.resolveSessionWindow([{ role: 'user', text: 'hello', createdAt: Date.now() - 1000 }]);
+      const gParsedUsage = GeminiProvider.parseUsage([1, [[600, 0.35, 1, [[1790880148, 0]]], [12096, 0.12, 2, [[1791466948, 0]]]]]);
+      const gSerialized = JSON.stringify({ gSessionWindow, gParsedUsage, gContract });
+      assert('Gemini limit labels are "5h" and "Weekly" with zero "Session" occurrences',
+        !gSerialized.toLowerCase().includes('session (5h)') &&
+        !gSerialized.includes('"label":"Session"') &&
+        !gSerialized.includes('"id":"session"') &&
+        gParsedUsage.limits[0].id === '5h' && gParsedUsage.limits[0].label === '5h' &&
+        gParsedUsage.limits[1].id === 'weekly' && gParsedUsage.limits[1].label === 'Weekly' &&
+        gSessionWindow.limit.id === '5h' && gSessionWindow.limit.label === '5h'
+      );
+
+      assert('buildGeminiContractData exports pure function returning compliant object',
+        buildGeminiContractData().provider === 'gemini' &&
+        buildGeminiContractData().context.limit === 200000 &&
+        buildGeminiContractData().context.used === 0
+      );
     }
 
     // ------------------------------------------------------------------ Gemini: layout, free plan, limit notice

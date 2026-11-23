@@ -18,9 +18,9 @@ import {
   createConversationExportData,
   isConversationExportData,
   summarizeExportData
-} from '../../engine/export/types.js';
-import { DOMBlockParser } from '../../content/export/dom-block-parser.js';
-import { ClaudeMessageParser, parseMarkdownBlocks } from '../../content/export/claude-message-parser.js';
+} from '../../src/engine/export/types.js';
+import { DOMBlockParser } from '../../src/providers/claude/dom-block-parser.js';
+import { ClaudeMessageParser, parseMarkdownBlocks } from '../../src/providers/claude/claude-message-parser.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

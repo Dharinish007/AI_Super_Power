@@ -6,9 +6,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { escapeHtml, formatBlockToHtml, toPrintHtml } from '../../engine/export/print-html-exporter.js';
-import { PRINT_STYLES } from '../../ui/print-styles.js';
-import { ClaudeMessageParser } from '../../content/export/claude-message-parser.js';
+import { escapeHtml, formatBlockToHtml, toPrintHtml } from '../../src/engine/export/print-html-exporter.js';
+import { PRINT_STYLES } from '../../src/ui/shared/print-styles.js';
+import { ClaudeMessageParser } from '../../src/providers/claude/claude-message-parser.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const readFixture = file => JSON.parse(fs.readFileSync(path.join(rootDir, 'tests', 'fixtures', 'export', file), 'utf8'));

@@ -1,6 +1,6 @@
 /** Unit Tests for content/settings.js: defaults, repair of bad values, partial writes. */
 
-import { SETTINGS_KEY, DEFAULT_SETTINGS, DEFAULT_FEATURES, CONTEXT_FIELDS, normalizeSettings, readSettings, writeSettings, resetSettings, migrateSettings } from '../../content/settings.js';
+import { SETTINGS_KEY, DEFAULT_SETTINGS, DEFAULT_FEATURES, CONTEXT_FIELDS, normalizeSettings, readSettings, writeSettings, resetSettings, migrateSettings } from '../../src/core/settings.js';
 
 function fakeArea(init = {}) {
   const data = structuredClone(init);

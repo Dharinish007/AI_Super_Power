@@ -9,7 +9,7 @@ import {
   chatLimitReached, readTranscript, buildQuickCapsule, formatTranscript, saveHandoff, readHandoff, clearHandoff,
   formatCost, exportCapsules, normalizeCapsule, SKILLS_KEY, STARTER_SKILLS, formatSkillForInsert,
   normalizeTags, normalizeProject, projectsOf, searchItems, formatManyForInsert, captureCapsule
-} from '../../content/capsule.js';
+} from '../../src/core/capsule.js';
 
 /** chrome.storage.local stand-in */
 function fakeArea() {

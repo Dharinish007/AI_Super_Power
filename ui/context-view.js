@@ -189,10 +189,10 @@ export function ContextView(parent, { actions }) {
 
     // 2. Stacked Bar & Legend
     const st = vm.stats || { user: 0, assistant: 0, hidden: 0 };
-    const total = (st.user + st.assistant + st.hidden) || vm.usedTokens || 1;
-    const youPct = Math.round((st.user / total) * 100);
-    const asstPct = Math.round((st.assistant / total) * 100);
-    const sysPct = Math.max(0, 100 - youPct - asstPct);
+    const totalLimit = vm.contextLimit || 200000;
+    const youPct = totalLimit > 0 ? Math.round(((st.user || 0) / totalLimit) * 100) : 0;
+    const asstPct = totalLimit > 0 ? Math.round(((st.assistant || 0) / totalLimit) * 100) : 0;
+    const sysPct = totalLimit > 0 ? Math.round(((st.hidden || 0) / totalLimit) * 100) : 0;
 
     segUser.style.width = `${youPct}%`;
     segAsst.style.width = `${asstPct}%`;
@@ -213,10 +213,10 @@ export function ContextView(parent, { actions }) {
       show(bigRow, false);
     }
 
-    // 4. Usage section with exactly two rows (Session & Weekly)
+    // 4. Usage section with exactly two rows (5h & Weekly)
     const limits = vm.limits || [];
-    const session = limits.find(l => l.key === 'session' || l.label?.toLowerCase().includes('session'));
-    const weekly = limits.find(l => l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
+    const session = limits.find(l => l.id === '5h' || l.key === '5h' || l.key === 'session' || l.label === '5h' || l.label?.toLowerCase().includes('session'));
+    const weekly = limits.find(l => l.id === 'weekly' || l.key === 'weekly' || l.label?.toLowerCase().includes('weekly'));
     let hasUsage = false;
 
     if (session) {
@@ -226,7 +226,8 @@ export function ContextView(parent, { actions }) {
       const sReset = formatReset(session.resetsAt) || (session.resetIn ? `resets in ${session.resetIn}` : null);
       const parts = [sPct, sReset].filter(Boolean);
       if (parts.length) {
-        setText(sessionRow, `Session ${parts.join(' · ')}`);
+        const label = (session.label && session.label !== 'Session' && session.label !== 'Session (5h)') ? session.label : '5h';
+        setText(sessionRow, `${label} ${parts.join(' · ')}`);
         show(sessionRow, true);
         hasUsage = true;
       } else {

@@ -14,10 +14,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { EvidenceMerger, EvidenceType, SourcePriority } from '../../engine/evidence-merger.js';
-import { ConfidenceEngine, ConfidenceLevel } from '../../engine/confidence-engine.js';
-import { ContextCalculator } from '../../engine/context-calculator.js';
-import { ModelDetector } from '../../content/model-detector.js';
+import { EvidenceMerger, EvidenceType, SourcePriority } from '../../src/engine/evidence-merger.js';
+import { ConfidenceEngine, ConfidenceLevel } from '../../src/engine/confidence-engine.js';
+import { ContextCalculator } from '../../src/engine/context-calculator.js';
+import { ModelDetector } from '../../src/providers/chatgpt/model-detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -5,7 +5,7 @@
  * message parts extraction, special token safety, caching, and edge cases.
  */
 
-import { Tokenizer, BpeCounter, BUNDLED_ENCODING } from '../../engine/tokenizer.js';
+import { Tokenizer, BpeCounter, BUNDLED_ENCODING } from '../../src/engine/tokenizer.js';
 import o200k_base from 'js-tiktoken/ranks/o200k_base';
 
 export function runTokenizerTests() {

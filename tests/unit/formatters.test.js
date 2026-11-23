@@ -2,7 +2,7 @@
  * Unit Tests for Context Monitor pure formatters (ui/formatters.js)
  */
 
-import { formatPercent, colorForPercent, levelForPercent, formatLeft, formatMsgs, formatReset, formatTokens, threshold } from '../../ui/formatters.js';
+import { formatPercent, colorForPercent, levelForPercent, formatLeft, formatMsgs, formatReset, formatTokens, threshold, bandFor, calculateSegmentPercents } from '../../src/ui/shared/formatters.js';
 
 export function runFormattersTests() {
   console.log('--- Running Pure Formatter Unit Tests ---');
@@ -141,6 +141,67 @@ export function runFormattersTests() {
   // formatReset relative (Gemini format: resets in 2h 10m)
   const geminiReset = now + (2 * 3600 + 10 * 60) * 1000;
   assert('formatReset relative: "resets in 2h 10m"', formatReset(geminiReset, now, { relative: true }) === 'resets in 2h 10m');
+
+  // bandFor(percent)
+  assert('bandFor(< 75) returns "green" (e.g. 0, 50, 74.9)',
+    bandFor(0) === 'green' &&
+    bandFor(50) === 'green' &&
+    bandFor(74.9) === 'green'
+  );
+  assert('bandFor(75 <= pct <= 90) returns "amber" (75 is amber, 90 is amber)',
+    bandFor(75) === 'amber' &&
+    bandFor(80) === 'amber' &&
+    bandFor(90) === 'amber'
+  );
+  assert('bandFor(> 90) returns "red" (90.1 is red, 100 is red)',
+    bandFor(90.1) === 'red' &&
+    bandFor(95) === 'red' &&
+    bandFor(100) === 'red'
+  );
+  assert('bandFor handles null, undefined, non-finite safely returning "green"',
+    bandFor(null) === 'green' &&
+    bandFor(undefined) === 'green' &&
+    bandFor(NaN) === 'green' &&
+    bandFor(Infinity) === 'green'
+  );
+
+  // calculateSegmentPercents(segments, limit)
+  const sampleSegments = [
+    { id: 'user', label: 'You', tokens: 4000 },
+    { id: 'assistant', label: 'Claude & tools', tokens: 55000 },
+    { id: 'system', label: 'System & memory', tokens: 41000 }
+  ];
+  const pctSegments = calculateSegmentPercents(sampleSegments, 200000);
+  assert('calculateSegmentPercents calculates percentage of limit (not sum)',
+    pctSegments.length === 3 &&
+    pctSegments[0].percent === 2 &&
+    pctSegments[1].percent === 28 &&
+    pctSegments[2].percent === 21
+  );
+  const totalSegPct = pctSegments.reduce((sum, s) => sum + s.percent, 0);
+  assert('Total segment percentages sum to context utilization percent (51%), NOT 100%',
+    totalSegPct === 51 && totalSegPct !== 100
+  );
+
+  const zeroSegments = [
+    { id: 'user', label: 'You', tokens: 0 },
+    { id: 'assistant', label: 'Claude & tools', tokens: 0 },
+    { id: 'system', label: 'System & memory', tokens: 0 }
+  ];
+  const zeroPctSegments = calculateSegmentPercents(zeroSegments, 200000);
+  assert('At 0 context tokens, all segments return 0%',
+    zeroPctSegments.every(s => s.percent === 0)
+  );
+
+  const zeroLimitSegments = calculateSegmentPercents(sampleSegments, 0);
+  assert('At limit <= 0, all segments return 0%',
+    zeroLimitSegments.every(s => s.percent === 0)
+  );
+
+  assert('calculateSegmentPercents handles non-array input safely',
+    calculateSegmentPercents(null, 200000).length === 0 &&
+    calculateSegmentPercents(undefined, 200000).length === 0
+  );
 
   return { passed, failed };
 }

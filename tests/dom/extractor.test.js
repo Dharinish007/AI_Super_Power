@@ -8,10 +8,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { MessageExtractor } from '../../content/message-extractor.js';
-import { ModelDetector } from '../../content/model-detector.js';
-import { AttachmentDetector } from '../../content/attachment-detector.js';
-import { ToolDetector } from '../../content/tool-detector.js';
+import { MessageExtractor } from '../../src/providers/chatgpt/message-extractor.js';
+import { ModelDetector } from '../../src/providers/chatgpt/model-detector.js';
+import { AttachmentDetector } from '../../src/providers/chatgpt/attachment-detector.js';
+import { ToolDetector } from '../../src/providers/chatgpt/tool-detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

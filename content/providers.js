@@ -263,18 +263,23 @@ export const ClaudeProvider = {
     if (!ml || typeof ml !== 'object') return [];
     const toMs = (v) => (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : v ? Date.parse(v) || null : null);
 
-    // Directly normalized session / weekly objects (from stream watcher)
-    if (ml.session || ml.weekly) {
+    // Directly normalized 5h / weekly objects (from stream watcher)
+    if (ml.session || ml.weekly || ml['5h']) {
       const out = [];
-      if (ml.session) {
-        const u = ml.session.utilization;
-        const pct = ml.session.percentage ?? (typeof u === 'number' ? Math.round(u > 1 ? u : u * 100) : null);
+      const s5h = ml['5h'] || ml.session;
+      if (s5h) {
+        const u = s5h.utilization;
+        const pct = s5h.percentage ?? (typeof u === 'number' ? Math.round(u > 1 ? u : u * 100) : null);
         if (pct !== null) {
           out.push({
-            key: 'session',
-            label: 'Session (5h)',
+            id: '5h',
+            key: '5h',
+            label: '5h',
+            used: pct,
+            total: 100,
             percent: pct,
-            resetsAt: ml.session.resetTime ?? toMs(ml.session.resets_at)
+            resetsAt: s5h.resetTime ?? toMs(s5h.resets_at),
+            source: 'stream'
           });
         }
       }
@@ -283,10 +288,14 @@ export const ClaudeProvider = {
         const pct = ml.weekly.percentage ?? (typeof u === 'number' ? Math.round(u > 1 ? u : u * 100) : null);
         if (pct !== null) {
           out.push({
+            id: 'weekly',
             key: 'weekly',
             label: 'Weekly',
+            used: pct,
+            total: 100,
             percent: pct,
-            resetsAt: ml.weekly.resetTime ?? toMs(ml.weekly.resets_at)
+            resetsAt: ml.weekly.resetTime ?? toMs(ml.weekly.resets_at),
+            source: 'stream'
           });
         }
       }
@@ -295,7 +304,7 @@ export const ClaudeProvider = {
 
     const windows = ml.windows && typeof ml.windows === 'object' ? ml.windows : null;
     if (windows) {
-      const names = { '5h': ['session', 'Session (5h)'], '7d': ['weekly', 'Weekly'] };
+      const names = { '5h': ['5h', '5h'], '7d': ['weekly', 'Weekly'] };
       const out = [];
       for (const [win, [key, label]] of Object.entries(names)) {
         const w = windows[win];
@@ -303,11 +312,16 @@ export const ClaudeProvider = {
         if (typeof u !== 'number' || !isFinite(u)) continue;
         const exceeded = w?.status === 'exceeded_limit' || ml.status === 'exceeded_limit' || u >= 1;
         const rawPct = Math.round(u > 1 ? u : u * 100);
+        const pctVal = exceeded ? 100 : (rawPct >= 100 ? 99 : rawPct);
         out.push({
+          id: key,
           key,
           label,
-          percent: exceeded ? 100 : (rawPct >= 100 ? 99 : rawPct),
-          resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === 'session' ? ml.resetsAt : null))
+          used: pctVal,
+          total: 100,
+          percent: pctVal,
+          resetsAt: toMs(w.resets_at ?? w.resetsAt ?? (key === '5h' ? ml.resetsAt : null)),
+          source: 'stream'
         });
       }
       if (out.length) return out;
@@ -315,16 +329,16 @@ export const ClaudeProvider = {
 
     if (ml.type === 'exceeded_limit' || ml.blocked || ml.status === 'exceeded_limit') {
       const resetsAt = toMs(ml.resetsAt ?? ml.resets_at);
-      return [{ key: 'session', label: 'Session', blocked: true, percent: 100, resetsAt, note: null }];
+      return [{ id: '5h', key: '5h', label: '5h', used: 100, total: 100, blocked: true, percent: 100, resetsAt, source: 'stream', note: null }];
     }
 
     if (typeof ml.remaining === 'number') {
       const resetsAt = toMs(ml.resetsAt ?? ml.resets_at);
-      return [{ key: 'session', label: 'Session', remaining: ml.remaining, resetsAt, note: null }];
+      return [{ id: '5h', key: '5h', label: '5h', used: 0, total: 100, remaining: ml.remaining, resetsAt, source: 'stream', note: null }];
     }
 
     if (ml.type === 'within_limit') {
-      return [{ key: 'session', label: 'Session', note: 'Within limit · Dynamic' }];
+      return [{ id: '5h', key: '5h', label: '5h', used: 0, total: 100, note: 'Within limit · Dynamic', source: 'stream' }];
     }
 
     return [];
@@ -349,21 +363,21 @@ export const ClaudeProvider = {
       const num = Number(val);
       if (!Number.isFinite(num) || num < 0) return;
       const pct = num <= 1 && num > 0 ? Math.round(num * 100) : Math.min(100, Math.round(num));
-      out.push({ key, label, percent: pct, resetsAt: at(resetsAt) });
+      out.push({ id: key, key, label, used: pct, total: 100, percent: pct, resetsAt: at(resetsAt), source: 'api' });
     };
 
     if (Array.isArray(usage.limits)) {
       for (const l of usage.limits) {
         if (!l || typeof l !== 'object') continue;
         const model = l.scope?.model?.display_name;
-        if (l.kind === 'session') add('session', 'Session (5h)', l.percent, l.resets_at);
-        else if (l.kind === 'weekly_all') add('weekly', 'Weekly', l.percent, l.resets_at);
+        if (l.kind === 'session' || l.kind === '5h' || l.kind === 'five_hour') add('5h', '5h', l.percent, l.resets_at);
+        else if (l.kind === 'weekly_all' || l.kind === '7d' || l.kind === 'seven_day') add('weekly', 'Weekly', l.percent, l.resets_at);
         else if (l.kind === 'weekly_scoped' && model) add(`weekly:${model}`, `Weekly · ${model}`, l.percent, l.resets_at);
       }
     }
 
     const top = [
-      ['five_hour', 'session', 'Session (5h)'],
+      ['five_hour', '5h', '5h'],
       ['seven_day', 'weekly', 'Weekly'],
       ['seven_day_opus', 'weekly:Opus', 'Weekly · Opus'],
       ['seven_day_sonnet', 'weekly:Sonnet', 'Weekly · Sonnet'],
@@ -371,7 +385,7 @@ export const ClaudeProvider = {
       ['seven_day_omelette', 'weekly:Claude Design', 'Weekly · Claude Design']
     ];
     for (const [field, key, label] of top) {
-      if (usage[field] && !out.some(o => o.key === key)) {
+      if (usage[field] && !out.some(o => o.id === key || o.key === key)) {
         const bucket = usage[field];
         const val = bucket.utilization ?? bucket.percent;
         add(key, label, val, bucket.resets_at);
@@ -519,7 +533,7 @@ export const ClaudeProvider = {
 
     if (!windowStart) {
       return {
-        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        limit: { id: '5h', key: '5h', label: '5h', used: 0, total: 100, percent: 0, estimated: true, resetsAt: null, source: 'estimate', note: '0% · 5h window ready' },
         window: null
       };
     }
@@ -527,7 +541,7 @@ export const ClaudeProvider = {
     const resetsAt = windowStart + WINDOW_MS;
     if (now >= resetsAt) {
       return {
-        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null, note: '0% · 5h window ready' },
+        limit: { id: '5h', key: '5h', label: '5h', used: 0, total: 100, percent: 0, estimated: true, resetsAt: null, source: 'estimate', note: '0% · 5h window ready' },
         window: null
       };
     }
@@ -549,11 +563,15 @@ export const ClaudeProvider = {
     const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
 
     const limit = {
-      key: 'session',
-      label: 'Session (5h)',
+      id: '5h',
+      key: '5h',
+      label: '5h',
+      used: percent,
+      total: 100,
       percent,
       estimated: true,
       resetsAt,
+      source: 'estimate',
       turns: turnsInWindow
     };
 
@@ -578,7 +596,7 @@ export const ClaudeProvider = {
       const text = (n?.textContent || '').replace(/\s+/g, ' ');
       if (text.length > 300) continue;
       if (!/(reached|hit|out of) (your|free)? messages?|message limit (reached|resets)|try again (at|after)/i.test(text)) continue;
-      return { key: 'session', label: 'Session', blocked: true, percent: 100, resetsAt: this.parseResetTime(text, now) };
+      return { id: '5h', key: '5h', label: '5h', used: 100, total: 100, blocked: true, percent: 100, resetsAt: this.parseResetTime(text, now), source: 'dom' };
     }
     return null;
   },
@@ -595,8 +613,90 @@ export const ClaudeProvider = {
     d.setHours(h, Number(t[2] || 0), 0, 0);
     if (d.getTime() <= now) d.setDate(d.getDate() + 1);
     return d.getTime();
+  },
+
+  /**
+   * Conforms strictly to the shared contract:
+   * {
+   *   provider: "claude",
+   *   context: { used, limit, segments, source, confidence },
+   *   limits: [{ id, label, used, total, resetsAt, source }]
+   * }
+   */
+  toContractData(state = {}) {
+    return buildClaudeContractData(state);
   }
 };
+
+/**
+ * Builds standard shared contract representation for Claude:
+ * {
+ *   provider: "claude",
+ *   context: {
+ *     used: number,
+ *     limit: number,
+ *     segments: [{ id, label, tokens }],
+ *     source: "api" | "stream" | "dom" | "estimate",
+ *     confidence: "exact" | "estimate"
+ *   },
+ *   limits: [{
+ *     id: string,
+ *     label: string,
+ *     used: number,
+ *     total: number,
+ *     resetsAt: number | null,
+ *     source: "api" | "stream" | "dom" | "interceptor"
+ *   }]
+ * }
+ */
+export function buildClaudeContractData(state = {}) {
+  const contextState = state.context || {};
+  const used = typeof contextState.used === 'number'
+    ? contextState.used
+    : (state.tokens?.totalMeasurable ?? state.usedTokens ?? 0);
+  const limit = contextState.limit || state.model?.contextWindow || state.contextLimit || 200000;
+
+  const uTokens = contextState.segments?.find(s => s.id === 'user')?.tokens
+    ?? state.tokens?.user ?? state.stats?.user ?? state.breakdown?.user ?? 0;
+  const aTokens = contextState.segments?.find(s => s.id === 'assistant')?.tokens
+    ?? state.tokens?.assistant ?? state.stats?.assistant ?? state.breakdown?.assistant ?? 0;
+  const sTokens = contextState.segments?.find(s => s.id === 'system')?.tokens
+    ?? state.tokens?.hidden ?? state.stats?.hidden ?? state.breakdown?.system ?? 0;
+
+  const rawLimits = state.limits || [];
+  const normalizedLimits = rawLimits.map(l => {
+    const id = (l.id && l.id !== 'session') ? l.id : (l.key === 'session' ? '5h' : (l.key || '5h'));
+    const label = (l.label && l.label !== 'Session' && l.label !== 'Session (5h)') ? l.label : (id === 'weekly' ? 'Weekly' : '5h');
+    const usedVal = typeof l.used === 'number' ? l.used : (typeof l.percent === 'number' ? l.percent : 0);
+    const totalVal = typeof l.total === 'number' ? l.total : 100;
+    const resetsAt = l.resetsAt ?? null;
+    const source = l.source || (l.estimated ? 'estimate' : 'api');
+    return {
+      id,
+      label,
+      used: usedVal,
+      total: totalVal,
+      resetsAt,
+      source
+    };
+  });
+
+  return {
+    provider: 'claude',
+    context: {
+      used,
+      limit,
+      segments: [
+        { id: 'user', label: 'You', tokens: uTokens },
+        { id: 'assistant', label: 'Claude & tools', tokens: aTokens },
+        { id: 'system', label: 'System & memory', tokens: sTokens }
+      ],
+      source: state.observables?.dataSource === 'authoritative' ? 'api' : 'estimate',
+      confidence: 'estimate'
+    },
+    limits: normalizedLimits
+  };
+}
 
 // ============================================================================ Gemini
 
@@ -704,49 +804,64 @@ export const GeminiProvider = {
    * view). Pages until there is no continuation token; one retry on a failed page.
    */
   async fetchConversation(conversationId) {
-    // The session values are in an inline script that may not be parsed yet when the first read runs
-    let session = geminiSession(document);
-    for (let i = 0; !session && i < 20; i++) {
-      await new Promise(resolve => setTimeout(resolve, 250));
-      session = geminiSession(document);
+    try {
+      // The session values are in an inline script that may not be parsed yet when the first read runs
+      let session = geminiSession(document);
+      for (let i = 0; !session && i < 20; i++) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        session = geminiSession(document);
+      }
+      if (!session) return null;
+      // Plan and usage limits come with every read; best effort, never blocks the conversation
+      const usage = geminiRpc(session, GEMINI_RPC_USAGE, [], '/usage').catch(() => null);
+      const turns = [];
+      let token = null;
+      for (let page = 0; page < GEMINI_MAX_PAGES; page++) {
+        const payload = [`c_${conversationId}`, GEMINI_PAGE_SIZE, token, 1, [0], [4], null, 1];
+        const read = () => geminiRpc(session, GEMINI_RPC_READ, payload, location.pathname);
+        const data = await read().catch(read);
+        if (!Array.isArray(data?.[0])) break;
+        turns.push(...data[0]);
+        token = data[1];
+        if (!token) break;
+      }
+      const { plan, limits } = this.parseUsage(await usage);
+      // A work account's window follows its Workspace edition, not this tier (the page's "Work" label decides)
+      // The tier is applied by detectPlan on every pass, so a "Work" label that renders later still wins
+      geminiTier.plan = plan;
+      return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits };
+    } catch (err) {
+      console.warn('[Context Monitor] Gemini fetchConversation error:', err);
+      return null;
     }
-    if (!session) return null;
-    // Plan and usage limits come with every read; best effort, never blocks the conversation
-    const usage = geminiRpc(session, GEMINI_RPC_USAGE, [], '/usage').catch(() => null);
-    const turns = [];
-    let token = null;
-    for (let page = 0; page < GEMINI_MAX_PAGES; page++) {
-      const payload = [`c_${conversationId}`, GEMINI_PAGE_SIZE, token, 1, [0], [4], null, 1];
-      const read = () => geminiRpc(session, GEMINI_RPC_READ, payload, location.pathname);
-      const data = await read().catch(read);
-      if (!Array.isArray(data?.[0])) break;
-      turns.push(...data[0]);
-      token = data[1];
-      if (!token) break;
-    }
-    const { plan, limits } = this.parseUsage(await usage);
-    // A work account's window follows its Workspace edition, not this tier (the page's "Work" label decides)
-    // The tier is applied by detectPlan on every pass, so a "Work" label that renders later still wins
-    geminiTier.plan = plan;
-    return { ...this.normalizeConversation(turns.reverse(), conversationId), plan: null, hidden: null, attachments: null, limits };
   },
 
   /**
    * Gemini's usage RPC (checked live 2026-10-01): [tierId, [[remainingCredits, usedFraction, window, [[resetSeconds, nanos]]], …], overage].
    * Window 1 = 5 hours, 2 = weekly, 3 = AI credits (skipped).
-   * @returns {{ plan: Object|null, limits: Array<{ key: string, label: string, percent: number, resetsAt: number|null }> }}
+   * @returns {{ plan: Object|null, limits: Array<{ id: string, key: string, label: string, used: number, total: number, percent: number, resetsAt: number|null, source: string }> }}
    */
   parseUsage(data) {
     if (!Array.isArray(data)) return { plan: null, limits: [] };
     const value = GEMINI_TIERS[data[0]];
     const plan = value ? { value, evidenceType: 'OBSERVED' } : null;
-    const names = { 1: ['session', 'Session (5h)'], 2: ['weekly', 'Weekly'] };
+    const names = { 1: ['5h', '5h'], 2: ['weekly', 'Weekly'] };
     const limits = [];
     for (const item of Array.isArray(data[1]) ? data[1] : []) {
       const name = names[item?.[2]];
       if (!name || typeof item[1] !== 'number') continue;
       const reset = item[3]?.[0]?.[0];
-      limits.push({ key: name[0], label: name[1], percent: Math.round(item[1] * 100), resetsAt: typeof reset === 'number' ? reset * 1000 : null });
+      const pct = Math.round(item[1] * 100);
+      limits.push({
+        id: name[0],
+        key: name[0],
+        label: name[1],
+        used: pct,
+        total: 100,
+        percent: pct,
+        resetsAt: typeof reset === 'number' ? reset * 1000 : null,
+        source: 'api'
+      });
     }
     return { plan, limits };
   },
@@ -861,7 +976,7 @@ export const GeminiProvider = {
       // A long reply that merely discusses limits is not the limit notice (notices are one or two lines)
       if (n === replies[replies.length - 1] && text.length > 400) continue;
       if (!/(reached|hit) (your|the) (\w+ )?limit|limit (reached|resets)|usage limit/i.test(text)) continue;
-      return { key: 'limit', label: 'Gemini usage', remaining: 0, blocked: true, resetsAt: this.parseResetTime(text, now) };
+      return { id: '5h', key: '5h', label: '5h', used: 100, total: 100, remaining: 0, blocked: true, percent: 100, resetsAt: this.parseResetTime(text, now), source: 'dom' };
     }
     return null;
   },
@@ -905,7 +1020,7 @@ export const GeminiProvider = {
 
     if (!windowStart) {
       return {
-        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null },
+        limit: { id: '5h', key: '5h', label: '5h', used: 0, total: 100, percent: 0, estimated: true, resetsAt: null, source: 'estimate', note: '0% · 5h window ready' },
         window: null
       };
     }
@@ -913,7 +1028,7 @@ export const GeminiProvider = {
     const resetsAt = windowStart + WINDOW_MS;
     if (now >= resetsAt) {
       return {
-        limit: { key: 'session', label: 'Session (5h)', percent: 0, estimated: true, resetsAt: null },
+        limit: { id: '5h', key: '5h', label: '5h', used: 0, total: 100, percent: 0, estimated: true, resetsAt: null, source: 'estimate', note: '0% · 5h window ready' },
         window: null
       };
     }
@@ -931,11 +1046,15 @@ export const GeminiProvider = {
     const percent = Math.min(100, Math.max(1, Math.round(Math.max(turnRatio, tokenRatio) * 100)));
 
     const limit = {
-      key: 'session',
+      id: '5h',
+      key: '5h',
       label: '5h',
+      used: percent,
+      total: 100,
       percent,
       estimated: true,
       resetsAt,
+      source: 'estimate',
       turns: turnsInWindow
     };
 
@@ -989,8 +1108,111 @@ export const GeminiProvider = {
     }
     // Google publishes the window per plan for every model, so the model is not needed for the limit
     return { contextWindow: GEMINI_LIMITS[plan], status: 'VERIFIED', source: GEMINI_LIMIT_SOURCE, recognized: true };
+  },
+
+  /**
+   * Conforms strictly to the shared contract:
+   * {
+   *   provider: "gemini",
+   *   context: { used, limit, segments, source, confidence },
+   *   limits: [{ id, label, used, total, resetsAt, source }]
+   * }
+   */
+  toContractData(first, second) {
+    return buildGeminiContractData(first, second);
   }
 };
+
+/**
+ * Builds standard shared contract representation for Gemini:
+ * {
+ *   provider: "gemini",
+ *   context: {
+ *     used: number,
+ *     limit: number,
+ *     segments: [
+ *       { id: "user", label: "You", tokens: number },
+ *       { id: "assistant", label: "Gemini & tools", tokens: number },
+ *       { id: "system", label: "System & memory", tokens: number }
+ *     ],
+ *     source: "api" | "stream" | "dom" | "estimate",
+ *     confidence: "exact" | "estimate"
+ *   },
+ *   limits: [{
+ *     id: string,
+ *     label: string,
+ *     used: number,
+ *     total: number,
+ *     resetsAt: number | null,
+ *     source: "api" | "stream" | "dom" | "interceptor"
+ *   }]
+ * }
+ */
+export function buildGeminiContractData(first = {}, second = null) {
+  const state = second || first || {};
+  const contextState = state.context || {};
+  let used = typeof contextState.used === 'number'
+    ? contextState.used
+    : (state.tokens?.totalMeasurable ?? state.usedTokens ?? null);
+  if (used === null) {
+    if (Array.isArray(state.messages)) {
+      used = state.messages.reduce((sum, m) => sum + (m.tokens || 0), 0);
+    } else {
+      used = 0;
+    }
+  }
+
+  const isAuthoritative = state.observables?.dataSource === 'authoritative' || state.context?.source === 'api';
+  const isDom = state.observables?.dataSource?.startsWith('dom') || state.context?.source === 'dom' || state.source === 'dom' || !isAuthoritative;
+  const source = contextState.source || (isAuthoritative ? 'api' : (isDom ? 'dom' : 'estimate'));
+
+  const limit = contextState.limit || (state.observables?.dataSource === 'dom_fallback' ? 200000 : (state.contextLimit || state.model?.contextWindow || 200000));
+
+  const uTokens = contextState.segments?.find(s => s.id === 'user')?.tokens
+    ?? state.tokens?.user ?? state.stats?.user ?? state.breakdown?.user
+    ?? (Array.isArray(state.messages) ? state.messages.filter(m => m.role === 'user').reduce((s, m) => s + (m.tokens || 0), 0) : 0);
+  const aTokens = contextState.segments?.find(s => s.id === 'assistant')?.tokens
+    ?? state.tokens?.assistant ?? state.stats?.assistant ?? state.breakdown?.assistant
+    ?? (Array.isArray(state.messages) ? state.messages.filter(m => m.role === 'assistant').reduce((s, m) => s + (m.tokens || 0), 0) : 0);
+  const sTokens = contextState.segments?.find(s => s.id === 'system')?.tokens
+    ?? state.tokens?.hidden ?? state.stats?.hidden ?? state.breakdown?.system ?? 0;
+
+  const rawLimits = (state.limits || []).filter(l => l && l.key !== 'long_chat');
+  const normalizedLimits = rawLimits.map(l => {
+    const id = (l.id && l.id !== 'session') ? l.id : (l.key === 'session' ? '5h' : (l.key || '5h'));
+    const label = (l.label && l.label !== 'Session' && l.label !== 'Session (5h)') ? l.label : (id === 'weekly' ? 'Weekly' : '5h');
+    const usedVal = typeof l.used === 'number' ? l.used : (typeof l.percent === 'number' ? l.percent : 0);
+    const totalVal = typeof l.total === 'number' ? l.total : 100;
+    const resetsAt = l.resetsAt ?? null;
+    const source = l.source || (l.estimated ? 'estimate' : (state.observables?.dataSource === 'authoritative' ? 'api' : 'dom'));
+    return {
+      id,
+      label,
+      used: usedVal,
+      total: totalVal,
+      resetsAt,
+      source
+    };
+  });
+
+  const confidence = (state.tokenizerExact || state.confidence === 'exact' || state.confidence?.exact) ? 'exact' : 'estimate';
+
+  return {
+    provider: 'gemini',
+    context: {
+      used,
+      limit,
+      segments: [
+        { id: 'user', label: 'You', tokens: uTokens },
+        { id: 'assistant', label: 'Gemini & tools', tokens: aTokens },
+        { id: 'system', label: 'System & memory', tokens: sTokens }
+      ],
+      source,
+      confidence
+    },
+    limits: normalizedLimits
+  };
+}
 
 export const PROVIDERS = [ClaudeProvider, GeminiProvider];
 

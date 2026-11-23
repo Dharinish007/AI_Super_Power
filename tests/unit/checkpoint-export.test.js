@@ -2,7 +2,7 @@
  * Unit Tests for Checkpoint Export (content/checkpoint-export.js)
  */
 
-import { buildCheckpointMarkdown } from '../../content/checkpoint-export.js';
+import { buildCheckpointMarkdown } from '../../src/features/checkpoint/checkpoint-export.js';
 
 export function runCheckpointExportTests() {
   console.log('--- Running Checkpoint Export Tests ---');

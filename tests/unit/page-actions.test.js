@@ -1,7 +1,7 @@
 /** Unit Tests for content/page-actions.js: the in-page Page used by CapsulePanel and the widgets. */
 
-import { createPage } from '../../content/page-actions.js';
-import { CAPSULE_START, CAPSULE_END } from '../../content/capsule.js';
+import { createPage } from '../../src/core/page-actions.js';
+import { CAPSULE_START, CAPSULE_END } from '../../src/core/capsule.js';
 
 /** A message node as readTranscript / latestReplyText / readLatestCapsule read it. */
 const node = (role, text) => ({ innerText: text, parentElement: null, matches: (s) => s === role, querySelectorAll: () => [] });

@@ -10,7 +10,7 @@ import {
   formatBlockToMarkdown,
   calculateCodeFence,
   escapeTableCell
-} from '../../engine/export/markdown-exporter.js';
+} from '../../src/engine/export/markdown-exporter.js';
 import {
   createParagraphBlock,
   createHeadingBlock,
@@ -22,8 +22,8 @@ import {
   createUnknownBlock,
   createMessage,
   createConversationExportData
-} from '../../engine/export/types.js';
-import { ClaudeMessageParser } from '../../content/export/claude-message-parser.js';
+} from '../../src/engine/export/types.js';
+import { ClaudeMessageParser } from '../../src/providers/claude/claude-message-parser.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

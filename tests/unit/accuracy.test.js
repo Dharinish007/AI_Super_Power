@@ -9,13 +9,13 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ContentScriptCoordinator, SYSTEM_PROMPT_ESTIMATE as SP, chatgptLimits } from '../../content/content-main.js';
-import { ModelDetector } from '../../content/model-detector.js';
-import { PlanDetector, normalizePlanTier } from '../../content/plan-detector.js';
-import { Tokenizer } from '../../engine/tokenizer.js';
-import { ContextCalculator } from '../../engine/context-calculator.js';
-import { EvidenceMerger } from '../../engine/evidence-merger.js';
-import { toWidgetState } from '../../content/widget-state.js';
+import { ContentScriptCoordinator, SYSTEM_PROMPT_ESTIMATE as SP, chatgptLimits } from '../../src/providers/common/content-main.js';
+import { ModelDetector } from '../../src/providers/chatgpt/model-detector.js';
+import { PlanDetector, normalizePlanTier } from '../../src/providers/chatgpt/plan-detector.js';
+import { Tokenizer } from '../../src/engine/tokenizer.js';
+import { ContextCalculator } from '../../src/engine/context-calculator.js';
+import { EvidenceMerger } from '../../src/engine/evidence-merger.js';
+import { toWidgetState } from '../../src/ui/widget/widget-state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../config/model-limits.json'), 'utf8'));
