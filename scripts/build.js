@@ -120,6 +120,8 @@ ${MODULES.map(m => `  // --- ${m} ---\n  ${readCleanModule(m)}`).join('\n\n')}
   // reads start now (document_start), in parallel with the page's own loading. The widget and DOM
   // observer wait for the DOM.
   try {
+    if (typeof window !== 'undefined' && window.__ACM_INITIALIZED__) return;
+    if (typeof window !== 'undefined') window.__ACM_INITIALIZED__ = true;
     const provider = providerForHost(location.hostname);
     const coordinator = provider ? new ProviderCoordinator(provider) : new ContentScriptCoordinator(MODEL_LIMITS_DB);
     if (!provider) coordinator.prefetch();

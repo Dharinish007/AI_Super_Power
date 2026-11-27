@@ -174,7 +174,7 @@ export async function runStripComponentTests() {
       biggest: { role: 'assistant', turn: 2, tokens: 12000 }
     });
 
-    assert('Strip displays left rows (2 rows)', comp.stripLeft.children.length === 2);
+    assert('Strip displays left rows (2 rows)', comp.usageRowsWrap.children.length === 2);
     assert('Msgs left rendered above ring for Claude', comp.ctxMsgs.textContent.includes('~28 msgs'));
     assert('Ring displays 48% with ok state', comp.ctxVal.textContent.includes('48%') && comp.ctxVal.classList.contains('ok'));
     assert('Drawer title shows context 96K / 200K · est.', comp.dTitle.textContent.includes('96K / 200K · est.'));
@@ -238,7 +238,7 @@ export async function runStripComponentTests() {
     assert('Gemini: msgsLeft is null, right note shows resets in 2h 10m', comp.ctxMsgs.textContent.includes('resets in 2h 10m'));
     assert('Gemini: usage row does not display heavy note', !comp.stripLeft.textContent.includes('Heavy tasks use more'));
 
-    // 4. ChatGPT: Unlimited text row, colored context circle with percent
+    // 4. ChatGPT: Compact Usage button on left (shows details on click), colored context circle with percent on right
     comp.render({
       rows: [
         { label: 'Text', state: 'unlimited', source: 'measured', note: 'No limit · subject to safeguards' },
@@ -249,9 +249,28 @@ export async function runStripComponentTests() {
       provider: 'ChatGPT'
     });
 
-    assert('ChatGPT shows text row "No limit · subject to safeguards"', comp.stripLeft.textContent.includes('No limit · subject to safeguards'));
+    assert('ChatGPT shows compact Usage button on left', !comp.limitBtn.classList.contains('hide') && comp.limitBtn.textContent === 'Usage');
+    comp.limitBtn.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    assert('Clicking ChatGPT Usage button opens popover with usage details', !comp.limitBox.classList.contains('hide') && comp.limitBox.textContent.includes('No limit · subject to safeguards'));
     assert('ChatGPT context circle displays colored percent', comp.ctxVal.textContent.includes('%') && comp.ctxVal.classList.contains('ok'));
     assert('ChatGPT State C drawer title shows "~12K used · est."', comp.dTitle.textContent.includes('~12K used · est.'));
+
+    // 4b. Claude never renders extension model label
+    comp.render({
+      rows: [{ label: '5h', state: 'ok', percent: 10, source: 'measured' }],
+      context: { used: 20000, limit: 200000, source: 'estimated' },
+      model: 'Claude Haiku 4.5',
+      provider: 'Claude'
+    });
+    assert('Claude hides extension model label', comp.ctxModel.classList.contains('hide'));
+
+    // 4c. Context tooltip click-to-pin behavior
+    comp.ctxRingWrap.dispatchEvent({ type: 'click', stopPropagation: () => {} });
+    assert('Clicking context indicator pins tooltip open', comp._ctxPinned === true && !comp.ctxPopover.classList.contains('hide'));
+    comp.ctxRingWrap.dispatchEvent({ type: 'mouseleave' });
+    assert('Pinned tooltip stays open on mouseleave', !comp.ctxPopover.classList.contains('hide'));
+    comp._popoverDismissHandler({ target: { contains: () => false }, composedPath: () => [] });
+    assert('Clicking elsewhere closes pinned tooltip', comp._ctxPinned === false && comp.ctxPopover.classList.contains('hide'));
 
     // 5. ChatGPT State B (User Reference set)
     comp.render({

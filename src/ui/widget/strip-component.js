@@ -40,6 +40,7 @@ export class StripComponent {
     this._data = null;
     this._hoverTimer = null;
     this._ctxHoverTimer = null;
+    this._ctxPinned = false;
     this._limitLeaveTimer = null;
     this._ringLimit = null;
     this._pinnedOpen = false;
@@ -154,26 +155,29 @@ export class StripComponent {
     this.strip.setAttribute('aria-label', 'AI Chat Usage and Context Strip');
     this.strip.setAttribute('aria-expanded', 'false');
 
-    // Left Container: Session / 5h, separator, Weekly, or ChatGPT Limit button
+    // Left Container: Session / 5h, separator, Weekly, or ChatGPT Usage button
     this.stripLeft = h('div', 'strip-top', this.strip);
     this.stripTop = this.stripLeft; // Compatibility alias for tests & callers
     this.stripBottomLeft = this.stripLeft; // Compatibility alias
 
+    // Dedicated wrapper for usage bar rows so clearing rows never removes limitBtn/ctxMsgs
+    this.usageRowsWrap = h('div', 'strip-rows', this.stripLeft);
+
     // Divider between top row and bottom row (kept hidden for compatibility)
     this.stripDivider = h('div', 'strip-divider hide', this.strip);
 
-    // Left elements: "~N msgs left" (Claude/Gemini) + "Limit" button (ChatGPT)
+    // Left elements: "~N msgs left" (Claude/Gemini) + "Usage" button (ChatGPT)
     this.ctxMsgs = h('div', 'ctx-msgs hide', this.stripLeft);
 
-    // ChatGPT Limit button & popover
-    this.limitBtn = h('button', 'acm-limit-btn hide', this.stripLeft, 'Limit');
+    // ChatGPT Usage button & popover
+    this.limitBtn = h('button', 'acm-limit-btn hide', this.stripLeft, 'Usage');
     this.limitBtn.type = 'button';
-    this.limitBtn.setAttribute('aria-label', 'Message limits');
+    this.limitBtn.setAttribute('aria-label', 'Usage details');
     this.limitBtn.setAttribute('aria-expanded', 'false');
 
     this.limitBox = h('div', 'acm-limit-box hide', this.stripLeft);
     this.limitBox.setAttribute('role', 'dialog');
-    this.limitBox.setAttribute('aria-label', 'Message limits');
+    this.limitBox.setAttribute('aria-label', 'Usage details');
 
     // Right Side: model name in Claude + context circle + percentage beside it (◔) 20%
     this.stripRight = h('div', 'strip-bottom-right', this.strip);
@@ -230,7 +234,7 @@ export class StripComponent {
     this.ctxPopover.setAttribute('role', 'tooltip');
     this.ctxPopover.setAttribute('aria-label', 'Context breakdown');
 
-    // Wire up HOVER interaction on context circle with ~150ms leave delay
+    // Wire up HOVER + CLICK-TO-PIN interaction on context circle with ~150ms leave delay
     const openCtxPopover = () => {
       clearTimeout(this._ctxHoverTimer);
       this._renderCtxHoverPopover();
@@ -240,8 +244,10 @@ export class StripComponent {
     };
 
     const closeCtxPopover = () => {
+      if (this._ctxPinned) return;
       clearTimeout(this._ctxHoverTimer);
       this._ctxHoverTimer = setTimeout(() => {
+        if (this._ctxPinned) return;
         show(this.ctxPopover, false);
         this.ringBtn.setAttribute('aria-expanded', 'false');
       }, 150);
@@ -251,8 +257,19 @@ export class StripComponent {
     this.ctxRingWrap.addEventListener('mouseleave', closeCtxPopover);
     this.ctxPopover.addEventListener('mouseenter', () => clearTimeout(this._ctxHoverTimer));
     this.ctxPopover.addEventListener('mouseleave', closeCtxPopover);
+    this.ctxRingWrap.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._ctxPinned = !this._ctxPinned;
+      if (this._ctxPinned) {
+        openCtxPopover();
+      } else {
+        clearTimeout(this._ctxHoverTimer);
+        show(this.ctxPopover, false);
+        this.ringBtn.setAttribute('aria-expanded', 'false');
+      }
+    });
 
-    // Wire up HOVER & CLICK interaction on ChatGPT Limit button
+    // Wire up CLICK interaction on ChatGPT Usage button
     const openLimitBox = () => {
       clearTimeout(this._limitHoverTimer);
       this._renderLimitBox();
@@ -260,19 +277,6 @@ export class StripComponent {
       show(this.limitBox, true);
       this.limitBtn.setAttribute('aria-expanded', 'true');
     };
-
-    const closeLimitBox = () => {
-      clearTimeout(this._limitHoverTimer);
-      this._limitHoverTimer = setTimeout(() => {
-        show(this.limitBox, false);
-        this.limitBtn.setAttribute('aria-expanded', 'false');
-      }, 150);
-    };
-
-    this.limitBtn.addEventListener('mouseenter', openLimitBox);
-    this.limitBtn.addEventListener('mouseleave', closeLimitBox);
-    this.limitBox.addEventListener('mouseenter', () => clearTimeout(this._limitHoverTimer));
-    this.limitBox.addEventListener('mouseleave', closeLimitBox);
 
     this.limitBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -285,17 +289,28 @@ export class StripComponent {
       }
     });
 
-    // Outside click dismiss & Escape key dismiss
+    // Outside click dismiss & Escape key dismiss (Shadow DOM safe via composedPath)
     this._popoverDismissHandler = (e) => {
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+      const inEl = (el) => Boolean(el && (path.includes(el) || (e.target && typeof el.contains === 'function' && el.contains(e.target))));
+
       if (this.limitBox && !this.limitBox.classList.contains('hide')) {
-        if (!this.limitBox.contains(e.target) && !this.limitBtn.contains(e.target)) {
+        if (!inEl(this.limitBox) && !inEl(this.limitBtn)) {
           show(this.limitBox, false);
           this.limitBtn.setAttribute('aria-expanded', 'false');
+        }
+      }
+      if (this._ctxPinned && this.ctxPopover && !this.ctxPopover.classList.contains('hide')) {
+        if (!inEl(this.ctxPopover) && !inEl(this.ctxRingWrap)) {
+          this._ctxPinned = false;
+          show(this.ctxPopover, false);
+          this.ringBtn.setAttribute('aria-expanded', 'false');
         }
       }
     };
     this._popoverKeyHandler = (e) => {
       if (e.key === 'Escape') {
+        this._ctxPinned = false;
         show(this.ctxPopover, false);
         show(this.limitBox, false);
         this.ringBtn.setAttribute('aria-expanded', 'false');
@@ -407,12 +422,12 @@ export class StripComponent {
   }
 
   /**
-   * Renders the message limits mini box for ChatGPT.
+   * Renders the Usage details mini box for ChatGPT (file limits, Deep Research, Thinking, etc.).
    */
   _renderLimitBox() {
     const data = this._data;
     this.limitBox.textContent = '';
-    h('div', 'acm-popover-title', this.limitBox, 'Message Limits');
+    h('div', 'acm-popover-title', this.limitBox, 'Usage');
 
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     const validLimits = rows.filter(r => r.label !== '5h' && r.label !== 'Weekly');
@@ -429,9 +444,11 @@ export class StripComponent {
 
       let valStr;
       if (r.state === 'unlimited') {
-        valStr = r.note || 'No limit · subject to safeguards';
-      } else if (r.used !== undefined && r.max !== undefined) {
+        valStr = r.note || 'Unlimited · subject to safeguards';
+      } else if (typeof r.used === 'number' && typeof r.max === 'number') {
         valStr = `${r.used} / ${r.max}`;
+      } else if (typeof r.remaining === 'number') {
+        valStr = `${r.remaining} left`;
       } else if (typeof r.percent === 'number') {
         valStr = `${Math.round(r.percent)}%`;
       } else if (r.note) {
@@ -446,6 +463,12 @@ export class StripComponent {
       }
 
       h('span', 'acm-popover-val', row, valStr);
+    }
+
+    if (validLimits.length === 1 && validLimits[0].state === 'unlimited') {
+      const noteRow = h('div', 'acm-popover-row', this.limitBox);
+      h('span', 'acm-popover-label', noteRow, 'File uploads & Deep research');
+      h('span', 'acm-popover-val', noteRow, 'Shown when active');
     }
   }
 
@@ -473,19 +496,19 @@ export class StripComponent {
     // -------------------------------------------------------------------------
     // 1. Render Top Row: 5h and Weekly limit bars (Claude & Gemini side-by-side)
     // -------------------------------------------------------------------------
-    this.stripTop.textContent = '';
+    this.usageRowsWrap.textContent = '';
     this.dUsage.textContent = '';
     let hasUsageDetails = false;
     let primaryResetTs = null;
     let primaryResetEl = null;
 
-    // Filter rows: for ChatGPT, remove 5h and Weekly bars
+    // Filter rows: for ChatGPT, remove 5h and Weekly bars (rendered inside Usage popover)
     const visibleRows = isChatGPT
-      ? rows.filter(r => r.label !== '5h' && r.label !== 'Weekly')
+      ? []
       : rows;
 
     for (const r of visibleRows) {
-      const uRow = h('div', 'u-row', this.stripTop);
+      const uRow = h('div', 'u-row', this.usageRowsWrap);
       uRow.setAttribute('tabindex', '0');
 
       // Label (e.g. "5h", "Weekly")
@@ -550,10 +573,10 @@ export class StripComponent {
     }
     show(this.dUsage, hasUsageDetails);
 
-    // Display top row and divider (hide on ChatGPT or if no rows)
-    const showTopRow = !isChatGPT && visibleRows.length > 0;
-    show(this.stripTop, showTopRow);
-    show(this.stripDivider, showTopRow);
+    // Display left container (Usage button on ChatGPT, or 5h/Weekly bars on Claude/Gemini)
+    show(this.usageRowsWrap, !isChatGPT && visibleRows.length > 0);
+    show(this.stripTop, isChatGPT || visibleRows.length > 0);
+    show(this.stripDivider, !isChatGPT && visibleRows.length > 0);
 
     if (primaryResetTs && primaryResetEl && data.features?.countdown !== false) {
       this._activeResetEl = primaryResetEl;
@@ -593,13 +616,8 @@ export class StripComponent {
       }
     }
 
-    // Model name in Claude displayed immediately before the context circle
-    if (data.provider === 'Claude' && data.model) {
-      setText(this.ctxModel, data.model);
-      show(this.ctxModel, true);
-    } else {
-      show(this.ctxModel, false);
-    }
+    // Model name labels removed on Claude (Claude already displays the model name natively)
+    show(this.ctxModel, false);
 
     // Right side: Context Ring + percentage beside it (◔) 20%
     let ringState = 'C';

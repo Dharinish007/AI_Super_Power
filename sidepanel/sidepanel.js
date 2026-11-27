@@ -1830,18 +1830,28 @@ const STYLES = `
   .dev-view[hidden] { display: none; }
   .sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 
-  /* Strip Box (Usage Panel) - Floating seamless bar without rigid card box */
+  /* Strip Box (Usage Panel) - Opaque chat-box-style bar above input so scrolling text never overlaps */
   .strip-box {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between;
-    width: 100%; padding: 4px 2px; background: transparent; border: none;
+    width: 100%; padding: 6px 12px;
+    background: var(--acm-composer-bg, var(--surface));
+    border: 1px solid var(--acm-composer-border, var(--border));
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     user-select: none; box-sizing: border-box; color: var(--text);
-    gap: 12px;
+    gap: 12px; position: relative; z-index: 30;
   }
-  .strip-box:hover { background: transparent; border: none; }
+  .strip-box:hover {
+    background: var(--acm-composer-bg, var(--surface));
+    border-color: var(--acm-composer-border, var(--border));
+  }
 
   /* Single straight line rows: Session | Weekly on left, Circle on right */
   .strip-top {
     display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  }
+  .strip-rows {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
   }
   .strip-sep {
     color: var(--border); font-size: 11px; opacity: 0.6; margin: 0 4px; user-select: none;
@@ -2945,6 +2955,8 @@ function SettingsView(parent, { storage }) {
   let vm = null;
   let settings = await readSettings(storage);
   let active = 'context';
+  const injectedTabs = new Set();
+  let retryTimer = null;
 
   const toastEl = h('div', 'toast', root);
   toastEl.setAttribute('role', 'status');
@@ -3002,7 +3014,7 @@ function SettingsView(parent, { storage }) {
   function select(id) { active = id; render(); }
 
   function render() {
-    const status = panelStatus({ url: tabInfo.url, connected: Boolean(link) || tabInfo.loading, ready: Boolean(vm) && vm.ready !== false });
+    const status = panelStatus({ url: tabInfo.url, connected: Boolean(link) || tabInfo.loading || Boolean(retryTimer), ready: Boolean(vm) && vm.ready !== false });
     // Context needs a live tab; Capsules / Skills lists work without one (Insert etc. toast when no tab answers)
     const blocked = active === 'context' && status !== 'live';
     show(empty, blocked);
@@ -3032,8 +3044,26 @@ function SettingsView(parent, { storage }) {
     render();
   }
 
-  function follow(tab) {
+  async function autoInjectAndConnect(tab) {
+    if (!tab || !chrome.scripting?.executeScript || injectedTabs.has(tab.id)) return false;
+    injectedTabs.add(tab.id);
+    try {
+      const host = new URL(tab.url).hostname;
+      if (host === 'chatgpt.com' || host === 'chat.openai.com' || host.endsWith('.chatgpt.com')) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/network-interceptor.js'], world: 'MAIN' });
+      } else if (host === 'claude.ai' || host.endsWith('.claude.ai')) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/claude-limit-watcher.js'], world: 'MAIN' });
+      }
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/content-script.js'] });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function follow(tab, retryCount = 0) {
     if (!tab) return;
+    clearTimeout(retryTimer);
     const same = tab.id === tabInfo.id;
     tabInfo = { id: tab.id, url: tab.url, loading: tab.status === 'loading' };
     // Same tab, still linked: the content script follows its own in-page navigation (a full navigation drops the port)
@@ -3045,9 +3075,31 @@ function SettingsView(parent, { storage }) {
     // A loading page's content script is not listening yet ("Reading…" until then): connect at 'complete'
     if (!tabInfo.loading && isSupportedUrl(tab.url)) {
       try {
-        // No content script in the tab (opened before install / update): Chrome drops the port at once -> 'reload'
-        const l = connectPanel({ tabs: chrome.tabs, tabId: tab.id, onState: (s) => { if (link === l) setState(s); },
-          onDisconnect: () => { void chrome.runtime.lastError; if (link === l) { link = null; endWaits(); setState(null); } } });
+        let receivedState = false;
+        const l = connectPanel({ tabs: chrome.tabs, tabId: tab.id, onState: (s) => { receivedState = true; if (link === l) setState(s); },
+          onDisconnect: () => {
+            void chrome.runtime.lastError;
+            if (link !== l) return;
+            link = null;
+            endWaits();
+            // If disconnected before receiving state, auto-inject content script into pre-existing tab or retry
+            if (!receivedState && retryCount < 3) {
+              setState(null);
+              if (retryCount === 0) {
+                autoInjectAndConnect(tab).then((ok) => {
+                  if (tabInfo.id === tab.id) {
+                    retryTimer = setTimeout(() => follow(tab, retryCount + 1), ok ? 150 : 400);
+                  }
+                });
+              } else {
+                retryTimer = setTimeout(() => {
+                  if (tabInfo.id === tab.id) follow(tab, retryCount + 1);
+                }, 400 * retryCount);
+              }
+              return;
+            }
+            setState(null);
+          } });
         link = l;
       } catch (_) { link = null; }
     }

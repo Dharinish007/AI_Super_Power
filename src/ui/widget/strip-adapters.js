@@ -236,6 +236,9 @@ export function chatgptAdapter(viewState = {}, settings = {}) {
         label: l.label || key || 'Tool',
         state: st,
         percent: pct,
+        used: typeof l.used === 'number' ? l.used : undefined,
+        max: typeof l.total === 'number' ? l.total : undefined,
+        remaining: typeof l.remaining === 'number' ? l.remaining : undefined,
         resetsAt: l.resetsAt ? (typeof l.resetsAt === 'number' ? new Date(l.resetsAt).toISOString() : String(l.resetsAt)) : undefined,
         source: l.estimated ? 'estimated' : 'measured',
         note: l.note

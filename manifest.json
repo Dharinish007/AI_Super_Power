@@ -74,7 +74,8 @@
   "permissions": [
     "storage",
     "unlimitedStorage",
-    "sidePanel"
+    "sidePanel",
+    "scripting"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",

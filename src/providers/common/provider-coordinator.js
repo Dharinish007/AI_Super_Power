@@ -81,6 +81,19 @@ export class ProviderCoordinator {
     this._accountLimits = null;
     this._accountLimitsAt = 0;
     this._storedWindow = null;
+    this._ensurePanel();
+  }
+
+  _ensurePanel() {
+    if (this.panel) return;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
+      this.panel = servePanel({
+        runtime: chrome.runtime,
+        page: this.overlayUI.page,
+        getState: () => this._lastViewState || toWidgetState(null, { provider: this.provider.name }),
+        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
+      });
+    }
   }
 
   init() {
@@ -98,14 +111,7 @@ export class ProviderCoordinator {
     this._listenForLimits();
     this._fetchAccountLimits();
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
-    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
-      this.panel = servePanel({
-        runtime: chrome.runtime,
-        page: this.overlayUI.page,
-        getState: () => this._lastViewState || toWidgetState(null, { provider: this.provider.name }),
-        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
-      });
-    }
+    this._ensurePanel();
   }
 
   /**

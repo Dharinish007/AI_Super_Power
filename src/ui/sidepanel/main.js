@@ -39,6 +39,8 @@ import { formatChatExport } from '../widget/widget-state.js';
   let vm = null;
   let settings = await readSettings(storage);
   let active = 'context';
+  const injectedTabs = new Set();
+  let retryTimer = null;
 
   const toastEl = h('div', 'toast', root);
   toastEl.setAttribute('role', 'status');
@@ -96,7 +98,7 @@ import { formatChatExport } from '../widget/widget-state.js';
   function select(id) { active = id; render(); }
 
   function render() {
-    const status = panelStatus({ url: tabInfo.url, connected: Boolean(link) || tabInfo.loading, ready: Boolean(vm) && vm.ready !== false });
+    const status = panelStatus({ url: tabInfo.url, connected: Boolean(link) || tabInfo.loading || Boolean(retryTimer), ready: Boolean(vm) && vm.ready !== false });
     // Context needs a live tab; Capsules / Skills lists work without one (Insert etc. toast when no tab answers)
     const blocked = active === 'context' && status !== 'live';
     show(empty, blocked);
@@ -126,8 +128,26 @@ import { formatChatExport } from '../widget/widget-state.js';
     render();
   }
 
-  function follow(tab) {
+  async function autoInjectAndConnect(tab) {
+    if (!tab || !chrome.scripting?.executeScript || injectedTabs.has(tab.id)) return false;
+    injectedTabs.add(tab.id);
+    try {
+      const host = new URL(tab.url).hostname;
+      if (host === 'chatgpt.com' || host === 'chat.openai.com' || host.endsWith('.chatgpt.com')) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/network-interceptor.js'], world: 'MAIN' });
+      } else if (host === 'claude.ai' || host.endsWith('.claude.ai')) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/claude-limit-watcher.js'], world: 'MAIN' });
+      }
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/content-script.js'] });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function follow(tab, retryCount = 0) {
     if (!tab) return;
+    clearTimeout(retryTimer);
     const same = tab.id === tabInfo.id;
     tabInfo = { id: tab.id, url: tab.url, loading: tab.status === 'loading' };
     // Same tab, still linked: the content script follows its own in-page navigation (a full navigation drops the port)
@@ -139,9 +159,31 @@ import { formatChatExport } from '../widget/widget-state.js';
     // A loading page's content script is not listening yet ("Reading…" until then): connect at 'complete'
     if (!tabInfo.loading && isSupportedUrl(tab.url)) {
       try {
-        // No content script in the tab (opened before install / update): Chrome drops the port at once -> 'reload'
-        const l = connectPanel({ tabs: chrome.tabs, tabId: tab.id, onState: (s) => { if (link === l) setState(s); },
-          onDisconnect: () => { void chrome.runtime.lastError; if (link === l) { link = null; endWaits(); setState(null); } } });
+        let receivedState = false;
+        const l = connectPanel({ tabs: chrome.tabs, tabId: tab.id, onState: (s) => { receivedState = true; if (link === l) setState(s); },
+          onDisconnect: () => {
+            void chrome.runtime.lastError;
+            if (link !== l) return;
+            link = null;
+            endWaits();
+            // If disconnected before receiving state, auto-inject content script into pre-existing tab or retry
+            if (!receivedState && retryCount < 3) {
+              setState(null);
+              if (retryCount === 0) {
+                autoInjectAndConnect(tab).then((ok) => {
+                  if (tabInfo.id === tab.id) {
+                    retryTimer = setTimeout(() => follow(tab, retryCount + 1), ok ? 150 : 400);
+                  }
+                });
+              } else {
+                retryTimer = setTimeout(() => {
+                  if (tabInfo.id === tab.id) follow(tab, retryCount + 1);
+                }, 400 * retryCount);
+              }
+              return;
+            }
+            setState(null);
+          } });
         link = l;
       } catch (_) { link = null; }
     }

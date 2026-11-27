@@ -68,7 +68,7 @@ for (const cs of manifest.content_scripts || []) {
 assert(!manifest.permissions.includes('<all_urls>'), 'Permissions do not contain broad <all_urls>');
 assert(manifest.permissions.includes('storage'), 'Required "storage" permission declared');
 assert(manifest.permissions.includes('unlimitedStorage'), '"unlimitedStorage" declared (saved Capsules can exceed the 10 MB storage.local quota)');
-assert(manifest.permissions.every(p => ['storage', 'unlimitedStorage', 'sidePanel'].includes(p)), 'No permissions beyond storage + unlimitedStorage + sidePanel');
+assert(manifest.permissions.every(p => ['storage', 'unlimitedStorage', 'sidePanel', 'scripting'].includes(p)), 'No permissions beyond storage + unlimitedStorage + sidePanel + scripting');
 const SUPPORTED_HOSTS = ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://claude.ai/*', 'https://gemini.google.com/*'];
 assert(JSON.stringify([...(manifest.host_permissions || [])].sort()) === JSON.stringify([...SUPPORTED_HOSTS].sort()), 'Host permissions scoped exactly to ChatGPT, Claude and Gemini');
 

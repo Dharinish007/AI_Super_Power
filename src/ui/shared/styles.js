@@ -214,18 +214,28 @@ export const STYLES = `
   .dev-view[hidden] { display: none; }
   .sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 
-  /* Strip Box (Usage Panel) - Floating seamless bar without rigid card box */
+  /* Strip Box (Usage Panel) - Opaque chat-box-style bar above input so scrolling text never overlaps */
   .strip-box {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between;
-    width: 100%; padding: 4px 2px; background: transparent; border: none;
+    width: 100%; padding: 6px 12px;
+    background: var(--acm-composer-bg, var(--surface));
+    border: 1px solid var(--acm-composer-border, var(--border));
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     user-select: none; box-sizing: border-box; color: var(--text);
-    gap: 12px;
+    gap: 12px; position: relative; z-index: 30;
   }
-  .strip-box:hover { background: transparent; border: none; }
+  .strip-box:hover {
+    background: var(--acm-composer-bg, var(--surface));
+    border-color: var(--acm-composer-border, var(--border));
+  }
 
   /* Single straight line rows: Session | Weekly on left, Circle on right */
   .strip-top {
     display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  }
+  .strip-rows {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
   }
   .strip-sep {
     color: var(--border); font-size: 11px; opacity: 0.6; margin: 0 4px; user-select: none;

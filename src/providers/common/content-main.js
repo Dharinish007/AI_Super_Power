@@ -379,12 +379,25 @@ export class ContentScriptCoordinator {
    * Needs no DOM; the first analysis pass in init() reuses the in-flight or cached results.
    */
   prefetch() {
+    this._ensurePanel();
     this.requestObserver.start();
     const conversationId = this.conversationClient.extractConversationId();
     if (conversationId) {
       this.conversationClient.fetchConversation(conversationId); // Reads the session first
     } else {
       this.conversationClient.getSession();
+    }
+  }
+
+  _ensurePanel() {
+    if (this.panel) return;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
+      this.panel = servePanel({
+        runtime: chrome.runtime,
+        page: this.overlayUI.page,
+        getState: () => this._lastViewState || toWidgetState(null, { provider: 'ChatGPT' }),
+        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
+      });
     }
   }
 
@@ -413,14 +426,7 @@ export class ContentScriptCoordinator {
     this.tokenizer.warm();
 
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
-    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
-      this.panel = servePanel({
-        runtime: chrome.runtime,
-        page: this.overlayUI.page,
-        getState: () => this._lastViewState || toWidgetState(null, { provider: 'ChatGPT' }),
-        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
-      });
-    }
+    this._ensurePanel();
   }
 
   /**

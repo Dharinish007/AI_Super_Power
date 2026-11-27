@@ -254,7 +254,7 @@ export class Widgets {
     document.getElementById('chatgpt-context-monitor-glance')?.remove();
     const host = document.createElement('div');
     host.id = 'chatgpt-context-monitor-glance';
-    host.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;width:100%;z-index:20;margin:0 0 8px;contain:layout style;';
+    host.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;width:100%;position:relative;z-index:30;margin:0 0 8px;contain:layout style;';
     const shadow = host.attachShadow({ mode: 'open' });
     h('style', null, shadow, STYLES + WIDGET_CSS);
 
@@ -321,32 +321,148 @@ export class Widgets {
     }
   }
 
+  _syncComposerTheme(anchor, input) {
+    if (!this.glance?.host || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return;
+    const candidates = [
+      anchor,
+      anchor?.querySelector?.('fieldset, .text-input-field, .input-area, [data-testid="composer"], form > div'),
+      input?.parentElement,
+      input
+    ].filter(Boolean);
+
+    let bg = null;
+    let border = null;
+    for (const el of candidates) {
+      try {
+        const cs = window.getComputedStyle(el);
+        const rawBg = cs?.backgroundColor;
+        const m = String(rawBg || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (m) {
+          const a = m[4] !== undefined ? Number(m[4]) : 1;
+          if (a > 0.15) {
+            // Force opaque surface so scrolling chat text never bleeds through
+            bg = `rgb(${m[1]}, ${m[2]}, ${m[3]})`;
+            const bc = cs?.borderColor;
+            if (bc && bc !== 'rgba(0, 0, 0, 0)' && bc !== 'transparent' && Number(cs?.borderTopWidth?.replace('px', '') || 0) > 0) {
+              border = bc;
+            }
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (bg) this.glance.host.style.setProperty('--acm-composer-bg', bg);
+    else this.glance.host.style.removeProperty('--acm-composer-bg');
+
+    if (border) this.glance.host.style.setProperty('--acm-composer-border', border);
+    else this.glance.host.style.removeProperty('--acm-composer-border');
+  }
+
+  _findComposerAnchor(doc, input) {
+    if (!input) return null;
+
+    let anchor;
+    if (this.adapter.provider === 'Gemini') {
+      anchor = input.closest('input-area-v2, .input-area-v2, .input-area-container, .input-area, [class*="input-area"], [class*="chat-input"], chat-window-input, chat-window') ||
+               input.closest('form, fieldset') ||
+               input.parentElement;
+    } else if (this.adapter.provider === 'ChatGPT') {
+      anchor = input.closest('form, [data-testid="composer"]') ||
+               input.parentElement;
+    } else if (this.adapter.provider === 'Claude') {
+      anchor = input.closest('fieldset, form') ||
+               input.parentElement;
+    } else {
+      anchor = input.closest('form, fieldset, input-area-v2, .input-area-container, .input-area, [data-testid="composer"], [data-testid="chat-input"]') ||
+               input.parentElement;
+    }
+
+    // Step up to ensure anchor is the outermost chat pill/box container
+    // rather than an inner element inside the pill card
+    try {
+      while (anchor && anchor.parentElement &&
+             anchor.parentElement !== doc.body &&
+             anchor.parentElement !== doc.documentElement &&
+             !anchor.parentElement.matches?.('main, [role="main"], #chat-history, .conversation-container, .chat-history')) {
+        const p = anchor.parentElement;
+        const tag = (p.tagName || '').toLowerCase();
+        const cls = String(p.className || '');
+        if (tag === 'form' || tag === 'fieldset' ||
+            cls.includes('input-area') || cls.includes('chat-input') ||
+            cls.includes('composer') || cls.includes('text-input-field')) {
+          anchor = p;
+        } else if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+          // If the parent itself is the rounded card/pill (border-radius >= 16px), step up so anchor is the pill
+          const cs = window.getComputedStyle(p);
+          const br = parseFloat(cs?.borderRadius || '0');
+          if (br >= 16) {
+            anchor = p;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    } catch (_) {}
+
+    return anchor;
+  }
+
   _ensureGlanceMounted() {
     if (!this.glance || typeof document === 'undefined') return;
     const input = this.adapter.findInput(document);
-    let anchor = null;
-    if (input) {
-      if (input.tagName === 'FORM') {
-        anchor = input;
-      } else {
-        anchor = input.closest('fieldset') ||
-                 input.closest('form') ||
-                 input.closest('[data-testid="chat-input"]') ||
-                 input.closest('[data-testid="composer"]') ||
-                 input.parentElement;
-      }
-    }
+    let anchor = this._findComposerAnchor(document, input);
     if (!anchor) {
-      anchor = document.querySelector('form, [data-testid="composer"], [data-testid="chat-input"], [data-testid="prompt-textarea"]');
+      anchor = document.querySelector('input-container, input-area-v2, .input-area-container, .input-area, form, [data-testid="composer"], [data-testid="chat-input"], [data-testid="prompt-textarea"]');
     }
     if (!anchor || !anchor.parentElement) return;
 
-    // Insert AFTER the anchor (below the composer), not before it.
-    const afterAnchor = anchor.nextSibling;
-    if (this.glance.host.parentElement !== anchor.parentElement ||
-        this.glance.host !== anchor.nextElementSibling) {
-      anchor.parentElement.insertBefore(this.glance.host, afterAnchor);
+    // If anchor sits inside a horizontal flex row, step up so the strip stacks vertically above it
+    try {
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        while (anchor.parentElement && anchor.parentElement !== document.body &&
+               /^row/.test(window.getComputedStyle(anchor.parentElement)?.flexDirection || '')) {
+          anchor = anchor.parentElement;
+        }
+      }
+    } catch (_) {}
+
+    // Account for flex-direction: column-reverse where DOM-after = visually above
+    let isColReverse = false;
+    try {
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        isColReverse = window.getComputedStyle(anchor.parentElement)?.flexDirection === 'column-reverse';
+      }
+    } catch (_) {}
+
+    if (isColReverse) {
+      const afterAnchor = anchor.nextSibling;
+      if (this.glance.host.parentElement !== anchor.parentElement ||
+          this.glance.host !== anchor.nextElementSibling) {
+        anchor.parentElement.insertBefore(this.glance.host, afterAnchor);
+      }
+    } else {
+      if (this.glance.host.parentElement !== anchor.parentElement ||
+          this.glance.host !== anchor.previousElementSibling) {
+        anchor.parentElement.insertBefore(this.glance.host, anchor);
+      }
     }
+
+    // Geometry check: verify glance is visually above anchor, adjust if reversed
+    try {
+      if (typeof window !== 'undefined' && typeof this.glance.host.getBoundingClientRect === 'function' && typeof anchor.getBoundingClientRect === 'function') {
+        const gRect = this.glance.host.getBoundingClientRect();
+        const aRect = anchor.getBoundingClientRect();
+        if (gRect.height > 0 && aRect.height > 0 && gRect.top >= aRect.bottom - 4) {
+          anchor.parentElement.insertBefore(this.glance.host, anchor.nextSibling);
+        }
+      }
+    } catch (_) {}
+
+    this._syncComposerTheme(anchor, input);
+
     if (this.settings?.features?.preSendEstimate && input) {
       this.preSendEstimator.attach(input);
     } else {

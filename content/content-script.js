@@ -7122,18 +7122,28 @@ const STYLES = `
   .dev-view[hidden] { display: none; }
   .sec-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 
-  /* Strip Box (Usage Panel) - Floating seamless bar without rigid card box */
+  /* Strip Box (Usage Panel) - Opaque chat-box-style bar above input so scrolling text never overlaps */
   .strip-box {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between;
-    width: 100%; padding: 4px 2px; background: transparent; border: none;
+    width: 100%; padding: 6px 12px;
+    background: var(--acm-composer-bg, var(--surface));
+    border: 1px solid var(--acm-composer-border, var(--border));
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     user-select: none; box-sizing: border-box; color: var(--text);
-    gap: 12px;
+    gap: 12px; position: relative; z-index: 30;
   }
-  .strip-box:hover { background: transparent; border: none; }
+  .strip-box:hover {
+    background: var(--acm-composer-bg, var(--surface));
+    border-color: var(--acm-composer-border, var(--border));
+  }
 
   /* Single straight line rows: Session | Weekly on left, Circle on right */
   .strip-top {
     display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  }
+  .strip-rows {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
   }
   .strip-sep {
     color: var(--border); font-size: 11px; opacity: 0.6; margin: 0 4px; user-select: none;
@@ -7378,6 +7388,7 @@ class StripComponent {
     this._data = null;
     this._hoverTimer = null;
     this._ctxHoverTimer = null;
+    this._ctxPinned = false;
     this._limitLeaveTimer = null;
     this._ringLimit = null;
     this._pinnedOpen = false;
@@ -7492,26 +7503,29 @@ class StripComponent {
     this.strip.setAttribute('aria-label', 'AI Chat Usage and Context Strip');
     this.strip.setAttribute('aria-expanded', 'false');
 
-    // Left Container: Session / 5h, separator, Weekly, or ChatGPT Limit button
+    // Left Container: Session / 5h, separator, Weekly, or ChatGPT Usage button
     this.stripLeft = h('div', 'strip-top', this.strip);
     this.stripTop = this.stripLeft; // Compatibility alias for tests & callers
     this.stripBottomLeft = this.stripLeft; // Compatibility alias
 
+    // Dedicated wrapper for usage bar rows so clearing rows never removes limitBtn/ctxMsgs
+    this.usageRowsWrap = h('div', 'strip-rows', this.stripLeft);
+
     // Divider between top row and bottom row (kept hidden for compatibility)
     this.stripDivider = h('div', 'strip-divider hide', this.strip);
 
-    // Left elements: "~N msgs left" (Claude/Gemini) + "Limit" button (ChatGPT)
+    // Left elements: "~N msgs left" (Claude/Gemini) + "Usage" button (ChatGPT)
     this.ctxMsgs = h('div', 'ctx-msgs hide', this.stripLeft);
 
-    // ChatGPT Limit button & popover
-    this.limitBtn = h('button', 'acm-limit-btn hide', this.stripLeft, 'Limit');
+    // ChatGPT Usage button & popover
+    this.limitBtn = h('button', 'acm-limit-btn hide', this.stripLeft, 'Usage');
     this.limitBtn.type = 'button';
-    this.limitBtn.setAttribute('aria-label', 'Message limits');
+    this.limitBtn.setAttribute('aria-label', 'Usage details');
     this.limitBtn.setAttribute('aria-expanded', 'false');
 
     this.limitBox = h('div', 'acm-limit-box hide', this.stripLeft);
     this.limitBox.setAttribute('role', 'dialog');
-    this.limitBox.setAttribute('aria-label', 'Message limits');
+    this.limitBox.setAttribute('aria-label', 'Usage details');
 
     // Right Side: model name in Claude + context circle + percentage beside it (◔) 20%
     this.stripRight = h('div', 'strip-bottom-right', this.strip);
@@ -7568,7 +7582,7 @@ class StripComponent {
     this.ctxPopover.setAttribute('role', 'tooltip');
     this.ctxPopover.setAttribute('aria-label', 'Context breakdown');
 
-    // Wire up HOVER interaction on context circle with ~150ms leave delay
+    // Wire up HOVER + CLICK-TO-PIN interaction on context circle with ~150ms leave delay
     const openCtxPopover = () => {
       clearTimeout(this._ctxHoverTimer);
       this._renderCtxHoverPopover();
@@ -7578,8 +7592,10 @@ class StripComponent {
     };
 
     const closeCtxPopover = () => {
+      if (this._ctxPinned) return;
       clearTimeout(this._ctxHoverTimer);
       this._ctxHoverTimer = setTimeout(() => {
+        if (this._ctxPinned) return;
         show(this.ctxPopover, false);
         this.ringBtn.setAttribute('aria-expanded', 'false');
       }, 150);
@@ -7589,8 +7605,19 @@ class StripComponent {
     this.ctxRingWrap.addEventListener('mouseleave', closeCtxPopover);
     this.ctxPopover.addEventListener('mouseenter', () => clearTimeout(this._ctxHoverTimer));
     this.ctxPopover.addEventListener('mouseleave', closeCtxPopover);
+    this.ctxRingWrap.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._ctxPinned = !this._ctxPinned;
+      if (this._ctxPinned) {
+        openCtxPopover();
+      } else {
+        clearTimeout(this._ctxHoverTimer);
+        show(this.ctxPopover, false);
+        this.ringBtn.setAttribute('aria-expanded', 'false');
+      }
+    });
 
-    // Wire up HOVER & CLICK interaction on ChatGPT Limit button
+    // Wire up CLICK interaction on ChatGPT Usage button
     const openLimitBox = () => {
       clearTimeout(this._limitHoverTimer);
       this._renderLimitBox();
@@ -7598,19 +7625,6 @@ class StripComponent {
       show(this.limitBox, true);
       this.limitBtn.setAttribute('aria-expanded', 'true');
     };
-
-    const closeLimitBox = () => {
-      clearTimeout(this._limitHoverTimer);
-      this._limitHoverTimer = setTimeout(() => {
-        show(this.limitBox, false);
-        this.limitBtn.setAttribute('aria-expanded', 'false');
-      }, 150);
-    };
-
-    this.limitBtn.addEventListener('mouseenter', openLimitBox);
-    this.limitBtn.addEventListener('mouseleave', closeLimitBox);
-    this.limitBox.addEventListener('mouseenter', () => clearTimeout(this._limitHoverTimer));
-    this.limitBox.addEventListener('mouseleave', closeLimitBox);
 
     this.limitBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -7623,17 +7637,28 @@ class StripComponent {
       }
     });
 
-    // Outside click dismiss & Escape key dismiss
+    // Outside click dismiss & Escape key dismiss (Shadow DOM safe via composedPath)
     this._popoverDismissHandler = (e) => {
+      const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+      const inEl = (el) => Boolean(el && (path.includes(el) || (e.target && typeof el.contains === 'function' && el.contains(e.target))));
+
       if (this.limitBox && !this.limitBox.classList.contains('hide')) {
-        if (!this.limitBox.contains(e.target) && !this.limitBtn.contains(e.target)) {
+        if (!inEl(this.limitBox) && !inEl(this.limitBtn)) {
           show(this.limitBox, false);
           this.limitBtn.setAttribute('aria-expanded', 'false');
+        }
+      }
+      if (this._ctxPinned && this.ctxPopover && !this.ctxPopover.classList.contains('hide')) {
+        if (!inEl(this.ctxPopover) && !inEl(this.ctxRingWrap)) {
+          this._ctxPinned = false;
+          show(this.ctxPopover, false);
+          this.ringBtn.setAttribute('aria-expanded', 'false');
         }
       }
     };
     this._popoverKeyHandler = (e) => {
       if (e.key === 'Escape') {
+        this._ctxPinned = false;
         show(this.ctxPopover, false);
         show(this.limitBox, false);
         this.ringBtn.setAttribute('aria-expanded', 'false');
@@ -7745,12 +7770,12 @@ class StripComponent {
   }
 
   /**
-   * Renders the message limits mini box for ChatGPT.
+   * Renders the Usage details mini box for ChatGPT (file limits, Deep Research, Thinking, etc.).
    */
   _renderLimitBox() {
     const data = this._data;
     this.limitBox.textContent = '';
-    h('div', 'acm-popover-title', this.limitBox, 'Message Limits');
+    h('div', 'acm-popover-title', this.limitBox, 'Usage');
 
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     const validLimits = rows.filter(r => r.label !== '5h' && r.label !== 'Weekly');
@@ -7767,9 +7792,11 @@ class StripComponent {
 
       let valStr;
       if (r.state === 'unlimited') {
-        valStr = r.note || 'No limit · subject to safeguards';
-      } else if (r.used !== undefined && r.max !== undefined) {
+        valStr = r.note || 'Unlimited · subject to safeguards';
+      } else if (typeof r.used === 'number' && typeof r.max === 'number') {
         valStr = `${r.used} / ${r.max}`;
+      } else if (typeof r.remaining === 'number') {
+        valStr = `${r.remaining} left`;
       } else if (typeof r.percent === 'number') {
         valStr = `${Math.round(r.percent)}%`;
       } else if (r.note) {
@@ -7784,6 +7811,12 @@ class StripComponent {
       }
 
       h('span', 'acm-popover-val', row, valStr);
+    }
+
+    if (validLimits.length === 1 && validLimits[0].state === 'unlimited') {
+      const noteRow = h('div', 'acm-popover-row', this.limitBox);
+      h('span', 'acm-popover-label', noteRow, 'File uploads & Deep research');
+      h('span', 'acm-popover-val', noteRow, 'Shown when active');
     }
   }
 
@@ -7811,19 +7844,19 @@ class StripComponent {
     // -------------------------------------------------------------------------
     // 1. Render Top Row: 5h and Weekly limit bars (Claude & Gemini side-by-side)
     // -------------------------------------------------------------------------
-    this.stripTop.textContent = '';
+    this.usageRowsWrap.textContent = '';
     this.dUsage.textContent = '';
     let hasUsageDetails = false;
     let primaryResetTs = null;
     let primaryResetEl = null;
 
-    // Filter rows: for ChatGPT, remove 5h and Weekly bars
+    // Filter rows: for ChatGPT, remove 5h and Weekly bars (rendered inside Usage popover)
     const visibleRows = isChatGPT
-      ? rows.filter(r => r.label !== '5h' && r.label !== 'Weekly')
+      ? []
       : rows;
 
     for (const r of visibleRows) {
-      const uRow = h('div', 'u-row', this.stripTop);
+      const uRow = h('div', 'u-row', this.usageRowsWrap);
       uRow.setAttribute('tabindex', '0');
 
       // Label (e.g. "5h", "Weekly")
@@ -7888,10 +7921,10 @@ class StripComponent {
     }
     show(this.dUsage, hasUsageDetails);
 
-    // Display top row and divider (hide on ChatGPT or if no rows)
-    const showTopRow = !isChatGPT && visibleRows.length > 0;
-    show(this.stripTop, showTopRow);
-    show(this.stripDivider, showTopRow);
+    // Display left container (Usage button on ChatGPT, or 5h/Weekly bars on Claude/Gemini)
+    show(this.usageRowsWrap, !isChatGPT && visibleRows.length > 0);
+    show(this.stripTop, isChatGPT || visibleRows.length > 0);
+    show(this.stripDivider, !isChatGPT && visibleRows.length > 0);
 
     if (primaryResetTs && primaryResetEl && data.features?.countdown !== false) {
       this._activeResetEl = primaryResetEl;
@@ -7931,13 +7964,8 @@ class StripComponent {
       }
     }
 
-    // Model name in Claude displayed immediately before the context circle
-    if (data.provider === 'Claude' && data.model) {
-      setText(this.ctxModel, data.model);
-      show(this.ctxModel, true);
-    } else {
-      show(this.ctxModel, false);
-    }
+    // Model name labels removed on Claude (Claude already displays the model name natively)
+    show(this.ctxModel, false);
 
     // Right side: Context Ring + percentage beside it (◔) 20%
     let ringState = 'C';
@@ -9003,6 +9031,9 @@ function chatgptAdapter(viewState = {}, settings = {}) {
         label: l.label || key || 'Tool',
         state: st,
         percent: pct,
+        used: typeof l.used === 'number' ? l.used : undefined,
+        max: typeof l.total === 'number' ? l.total : undefined,
+        remaining: typeof l.remaining === 'number' ? l.remaining : undefined,
         resetsAt: l.resetsAt ? (typeof l.resetsAt === 'number' ? new Date(l.resetsAt).toISOString() : String(l.resetsAt)) : undefined,
         source: l.estimated ? 'estimated' : 'measured',
         note: l.note
@@ -9339,7 +9370,7 @@ class Widgets {
     document.getElementById('chatgpt-context-monitor-glance')?.remove();
     const host = document.createElement('div');
     host.id = 'chatgpt-context-monitor-glance';
-    host.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;width:100%;z-index:20;margin:0 0 8px;contain:layout style;';
+    host.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;width:100%;position:relative;z-index:30;margin:0 0 8px;contain:layout style;';
     const shadow = host.attachShadow({ mode: 'open' });
     h('style', null, shadow, STYLES + WIDGET_CSS);
 
@@ -9406,32 +9437,148 @@ class Widgets {
     }
   }
 
+  _syncComposerTheme(anchor, input) {
+    if (!this.glance?.host || typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return;
+    const candidates = [
+      anchor,
+      anchor?.querySelector?.('fieldset, .text-input-field, .input-area, [data-testid="composer"], form > div'),
+      input?.parentElement,
+      input
+    ].filter(Boolean);
+
+    let bg = null;
+    let border = null;
+    for (const el of candidates) {
+      try {
+        const cs = window.getComputedStyle(el);
+        const rawBg = cs?.backgroundColor;
+        const m = String(rawBg || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (m) {
+          const a = m[4] !== undefined ? Number(m[4]) : 1;
+          if (a > 0.15) {
+            // Force opaque surface so scrolling chat text never bleeds through
+            bg = `rgb(${m[1]}, ${m[2]}, ${m[3]})`;
+            const bc = cs?.borderColor;
+            if (bc && bc !== 'rgba(0, 0, 0, 0)' && bc !== 'transparent' && Number(cs?.borderTopWidth?.replace('px', '') || 0) > 0) {
+              border = bc;
+            }
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (bg) this.glance.host.style.setProperty('--acm-composer-bg', bg);
+    else this.glance.host.style.removeProperty('--acm-composer-bg');
+
+    if (border) this.glance.host.style.setProperty('--acm-composer-border', border);
+    else this.glance.host.style.removeProperty('--acm-composer-border');
+  }
+
+  _findComposerAnchor(doc, input) {
+    if (!input) return null;
+
+    let anchor;
+    if (this.adapter.provider === 'Gemini') {
+      anchor = input.closest('input-area-v2, .input-area-v2, .input-area-container, .input-area, [class*="input-area"], [class*="chat-input"], chat-window-input, chat-window') ||
+               input.closest('form, fieldset') ||
+               input.parentElement;
+    } else if (this.adapter.provider === 'ChatGPT') {
+      anchor = input.closest('form, [data-testid="composer"]') ||
+               input.parentElement;
+    } else if (this.adapter.provider === 'Claude') {
+      anchor = input.closest('fieldset, form') ||
+               input.parentElement;
+    } else {
+      anchor = input.closest('form, fieldset, input-area-v2, .input-area-container, .input-area, [data-testid="composer"], [data-testid="chat-input"]') ||
+               input.parentElement;
+    }
+
+    // Step up to ensure anchor is the outermost chat pill/box container
+    // rather than an inner element inside the pill card
+    try {
+      while (anchor && anchor.parentElement &&
+             anchor.parentElement !== doc.body &&
+             anchor.parentElement !== doc.documentElement &&
+             !anchor.parentElement.matches?.('main, [role="main"], #chat-history, .conversation-container, .chat-history')) {
+        const p = anchor.parentElement;
+        const tag = (p.tagName || '').toLowerCase();
+        const cls = String(p.className || '');
+        if (tag === 'form' || tag === 'fieldset' ||
+            cls.includes('input-area') || cls.includes('chat-input') ||
+            cls.includes('composer') || cls.includes('text-input-field')) {
+          anchor = p;
+        } else if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+          // If the parent itself is the rounded card/pill (border-radius >= 16px), step up so anchor is the pill
+          const cs = window.getComputedStyle(p);
+          const br = parseFloat(cs?.borderRadius || '0');
+          if (br >= 16) {
+            anchor = p;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    } catch (_) {}
+
+    return anchor;
+  }
+
   _ensureGlanceMounted() {
     if (!this.glance || typeof document === 'undefined') return;
     const input = this.adapter.findInput(document);
-    let anchor = null;
-    if (input) {
-      if (input.tagName === 'FORM') {
-        anchor = input;
-      } else {
-        anchor = input.closest('fieldset') ||
-                 input.closest('form') ||
-                 input.closest('[data-testid="chat-input"]') ||
-                 input.closest('[data-testid="composer"]') ||
-                 input.parentElement;
-      }
-    }
+    let anchor = this._findComposerAnchor(document, input);
     if (!anchor) {
-      anchor = document.querySelector('form, [data-testid="composer"], [data-testid="chat-input"], [data-testid="prompt-textarea"]');
+      anchor = document.querySelector('input-container, input-area-v2, .input-area-container, .input-area, form, [data-testid="composer"], [data-testid="chat-input"], [data-testid="prompt-textarea"]');
     }
     if (!anchor || !anchor.parentElement) return;
 
-    // Insert AFTER the anchor (below the composer), not before it.
-    const afterAnchor = anchor.nextSibling;
-    if (this.glance.host.parentElement !== anchor.parentElement ||
-        this.glance.host !== anchor.nextElementSibling) {
-      anchor.parentElement.insertBefore(this.glance.host, afterAnchor);
+    // If anchor sits inside a horizontal flex row, step up so the strip stacks vertically above it
+    try {
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        while (anchor.parentElement && anchor.parentElement !== document.body &&
+               /^row/.test(window.getComputedStyle(anchor.parentElement)?.flexDirection || '')) {
+          anchor = anchor.parentElement;
+        }
+      }
+    } catch (_) {}
+
+    // Account for flex-direction: column-reverse where DOM-after = visually above
+    let isColReverse = false;
+    try {
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        isColReverse = window.getComputedStyle(anchor.parentElement)?.flexDirection === 'column-reverse';
+      }
+    } catch (_) {}
+
+    if (isColReverse) {
+      const afterAnchor = anchor.nextSibling;
+      if (this.glance.host.parentElement !== anchor.parentElement ||
+          this.glance.host !== anchor.nextElementSibling) {
+        anchor.parentElement.insertBefore(this.glance.host, afterAnchor);
+      }
+    } else {
+      if (this.glance.host.parentElement !== anchor.parentElement ||
+          this.glance.host !== anchor.previousElementSibling) {
+        anchor.parentElement.insertBefore(this.glance.host, anchor);
+      }
     }
+
+    // Geometry check: verify glance is visually above anchor, adjust if reversed
+    try {
+      if (typeof window !== 'undefined' && typeof this.glance.host.getBoundingClientRect === 'function' && typeof anchor.getBoundingClientRect === 'function') {
+        const gRect = this.glance.host.getBoundingClientRect();
+        const aRect = anchor.getBoundingClientRect();
+        if (gRect.height > 0 && aRect.height > 0 && gRect.top >= aRect.bottom - 4) {
+          anchor.parentElement.insertBefore(this.glance.host, anchor.nextSibling);
+        }
+      }
+    } catch (_) {}
+
+    this._syncComposerTheme(anchor, input);
+
     if (this.settings?.features?.preSendEstimate && input) {
       this.preSendEstimator.attach(input);
     } else {
@@ -11961,12 +12108,25 @@ class ContentScriptCoordinator {
    * Needs no DOM; the first analysis pass in init() reuses the in-flight or cached results.
    */
   prefetch() {
+    this._ensurePanel();
     this.requestObserver.start();
     const conversationId = this.conversationClient.extractConversationId();
     if (conversationId) {
       this.conversationClient.fetchConversation(conversationId); // Reads the session first
     } else {
       this.conversationClient.getSession();
+    }
+  }
+
+  _ensurePanel() {
+    if (this.panel) return;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
+      this.panel = servePanel({
+        runtime: chrome.runtime,
+        page: this.overlayUI.page,
+        getState: () => this._lastViewState || toWidgetState(null, { provider: 'ChatGPT' }),
+        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
+      });
     }
   }
 
@@ -11995,14 +12155,7 @@ class ContentScriptCoordinator {
     this.tokenizer.warm();
 
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
-    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
-      this.panel = servePanel({
-        runtime: chrome.runtime,
-        page: this.overlayUI.page,
-        getState: () => this._lastViewState || toWidgetState(null, { provider: 'ChatGPT' }),
-        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
-      });
-    }
+    this._ensurePanel();
   }
 
   /**
@@ -13983,6 +14136,19 @@ class ProviderCoordinator {
     this._accountLimits = null;
     this._accountLimitsAt = 0;
     this._storedWindow = null;
+    this._ensurePanel();
+  }
+
+  _ensurePanel() {
+    if (this.panel) return;
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
+      this.panel = servePanel({
+        runtime: chrome.runtime,
+        page: this.overlayUI.page,
+        getState: () => this._lastViewState || toWidgetState(null, { provider: this.provider.name }),
+        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
+      });
+    }
   }
 
   init() {
@@ -14000,14 +14166,7 @@ class ProviderCoordinator {
     this._listenForLimits();
     this._fetchAccountLimits();
     // The side panel reads this tab through one port: view state is pushed, Page calls come back
-    if (typeof chrome !== 'undefined' && chrome.runtime?.onConnect) {
-      this.panel = servePanel({
-        runtime: chrome.runtime,
-        page: this.overlayUI.page,
-        getState: () => this._lastViewState || toWidgetState(null, { provider: this.provider.name }),
-        actions: { refresh: () => this.refresh(), diagnostics: () => this.getDiagnostics() }
-      });
-    }
+    this._ensurePanel();
   }
 
   /**
@@ -14497,6 +14656,8 @@ class ProviderCoordinator {
   // reads start now (document_start), in parallel with the page's own loading. The widget and DOM
   // observer wait for the DOM.
   try {
+    if (typeof window !== 'undefined' && window.__ACM_INITIALIZED__) return;
+    if (typeof window !== 'undefined') window.__ACM_INITIALIZED__ = true;
     const provider = providerForHost(location.hostname);
     const coordinator = provider ? new ProviderCoordinator(provider) : new ContentScriptCoordinator(MODEL_LIMITS_DB);
     if (!provider) coordinator.prefetch();
